@@ -2,28 +2,34 @@
   "name": "egypt-subscription-functions",
   "version": "1.0.0",
   "description": "Firebase Cloud Functions for Egypt Subscription",
-  "main": "index.js",
+  "main": "lib/index.js",
   "scripts": {
-    "serve": "firebase emulators:start --only functions",
+    "build": "tsc",
+    "serve": "npm run build && firebase emulators:start --only functions",
     "shell": "firebase functions:shell",
     "start": "npm run shell",
-    "deploy": "firebase deploy --only functions",
+    "deploy": "npm run build && firebase deploy --only functions",
     "logs": "firebase functions:log"
   },
   "engines": {
     "node": "22"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.0.0",
+    "@aws-sdk/client-ssm": "^3.0.0",
+    "@aws-sdk/s3-request-presigner": "^3.0.0",
+    "@google-cloud/secret-manager": "^5.0.0",
+    "busboy": "^1.6.0",
     "firebase-admin": "^12.0.0",
     "firebase-functions": "^4.8.0",
-    "busboy": "^1.6.0",
-    "@aws-sdk/client-s3": "^3.0.0",
-    "@aws-sdk/s3-request-presigner": "^3.0.0",
-    "@aws-sdk/client-ssm": "^3.0.0",
-    "@google-cloud/secret-manager": "^5.0.0"
+    "jsonwebtoken": "^9.0.3"
   },
   "devDependencies": {
-    "firebase-functions-test": "^3.1.0"
+    "@types/busboy": "^1.5.4",
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/node": "^20.19.27",
+    "firebase-functions-test": "^3.1.0",
+    "typescript": "^5.9.3"
   },
   "private": true
 }

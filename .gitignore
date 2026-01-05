@@ -5,6 +5,7 @@ firebase-debug.*.log
 
 # Node.js
 node_modules/
+lib/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
