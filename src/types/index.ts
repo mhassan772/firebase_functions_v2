@@ -34,5 +34,12 @@ export interface S3UploadRequest {
   content_type?: string;
   type?: string;
   id?: string;
+  multipart?: boolean;
+  part_count?: number;
+  upload_id?: string;
+  parts?: Array<{
+    part_number: number;
+    etag: string;
+  }>;
 }
 
