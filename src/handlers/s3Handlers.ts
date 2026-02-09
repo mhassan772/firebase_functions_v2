@@ -98,8 +98,8 @@ export async function handleS3Upload(req: Request): Promise<{
       throw new Error("Either file_key must be provided, or both type and id must be provided");
     }
 
-    if (type !== "pdf" && type !== "image") {
-      throw new Error("Invalid type. Currently only 'pdf', 'image', and 'podcasts' are supported");
+    if (type !== "pdf" && type !== "image" && type !== "youtube_image") {
+      throw new Error("Invalid type. Currently only 'pdf', 'image', 'youtube_image', and 'podcasts' are supported");
     }
 
     if (type === "pdf") {
@@ -110,6 +110,10 @@ export async function handleS3Upload(req: Request): Promise<{
       const secret = await getSecretSSM("book-picture-seed");
       const hashedFolderName = generateHashedFolderName(secret, String(id));
       final_file_key = `images/${id}/${hashedFolderName}/${id}.webp`;
+    } else if (type === "youtube_image") {
+      const secret = await getSecretSSM("book-picture-seed");
+      const hashedFolderName = generateHashedFolderName(secret, String(id));
+      final_file_key = `images/${id}/${hashedFolderName}/${id}_youtube.jpg`;
     }
   }
 
