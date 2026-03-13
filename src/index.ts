@@ -13,4 +13,6 @@ export { like } from "./functions/reviews/like";
 export { likeNoAuth } from "./functions/reviews/likeNoAuth";
 export { flag } from "./functions/reviews/flag";
 export { flagNoAuth } from "./functions/reviews/flagNoAuth";
+export { getUrls } from "./functions/downloads/getUrls";
+export { getUrlsNoAuth } from "./functions/downloads/getUrlsNoAuth";
 

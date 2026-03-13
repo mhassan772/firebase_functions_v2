@@ -1,0 +1,249 @@
+{
+  "endpoint": {
+    "authenticated": {
+      "path": "/getUrls",
+      "method": "POST",
+      "authentication": "Bearer Token"
+    },
+    "noAuth": {
+      "path": "/getUrlsNoAuth",
+      "method": "POST",
+      "authentication": "None (uid in body)"
+    }
+  },
+  "request": {
+    "headers": {
+      "Authorization": "Bearer <firebase-id-token>",
+      "Content-Type": "application/json"
+    },
+    "body": {
+      "books": {
+        "type": "array",
+        "required": true,
+        "items": {
+          "bookGuid": {
+            "type": "string",
+            "required": true,
+            "description": "Unique identifier of the book"
+          },
+          "quality": {
+            "type": "number",
+            "required": true,
+            "enum": [64, 128, 256],
+            "description": "Audio quality in kbps"
+          },
+          "reason": {
+            "type": "string",
+            "required": true,
+            "enum": ["download", "stream", "sample"],
+            "description": "Purpose of request - determines which counter to increment (download=num_downloads, stream=num_streams, sample=num_samples)"
+          }
+        }
+      },
+      "platform": {
+        "type": "string",
+        "required": true,
+        "enum": ["ios", "android"],
+        "description": "Target platform (ios = m4a, android = opus)"
+      },
+      "deviceId": {
+        "type": "string",
+        "required": false,
+        "description": "Device identifier for audit tracking"
+      },
+      "build_number": {
+        "type": "string",
+        "required": false,
+        "description": "Client app build number (reserved for future minimum build check)"
+      },
+      "uid": {
+        "type": "string",
+        "required": "only for getUrlsNoAuth",
+        "description": "Firebase user ID"
+      }
+    }
+  },
+  "response": {
+    "success": {
+      "httpStatus": 200,
+      "body": {
+        "code": 600,
+        "message": "success",
+        "data": {
+          "<bookGuid>": {
+            "recordings": [
+              {
+                "name": "string - chapter/recording name",
+                "duration": "number - duration in seconds",
+                "ext": "string - file extension (m4a or opus)",
+                "url": "string - public R2 download URL"
+              }
+            ],
+            "expiresAt": "string - ISO 8601 timestamp (1 month from now)"
+          }
+        }
+      }
+    },
+    "errors": [
+      {
+        "code": 400,
+        "httpStatus": 400,
+        "message": "Missing or invalid 'books' field. Expected non-empty array.",
+        "cause": "Invalid request body"
+      },
+      {
+        "code": 400,
+        "httpStatus": 400,
+        "message": "Missing required field: platform",
+        "cause": "Platform not provided"
+      },
+      {
+        "code": 400,
+        "httpStatus": 400,
+        "message": "Each book must have a 'bookGuid' field",
+        "cause": "Book object missing bookGuid"
+      },
+      {
+        "code": 400,
+        "httpStatus": 400,
+        "message": "Each book must have a 'quality' field",
+        "cause": "Book object missing quality"
+      },
+      {
+        "code": 401,
+        "httpStatus": 401,
+        "message": "Missing or invalid authorization header",
+        "cause": "Invalid Bearer token"
+      },
+      {
+        "code": 601,
+        "httpStatus": 400,
+        "message": "not-found-book",
+        "cause": "Book GUID does not exist in database",
+        "additionalFields": ["bookGuid"]
+      },
+      {
+        "code": 602,
+        "httpStatus": 400,
+        "message": "not-found-user",
+        "cause": "User ID does not exist in Firebase Auth"
+      },
+      {
+        "code": 603,
+        "httpStatus": 403,
+        "message": "unauthorized",
+        "cause": "NoAuth endpoint called when isNoAuthAllowed setting is false"
+      },
+      {
+        "code": 604,
+        "httpStatus": 400,
+        "message": "not-found-quality",
+        "cause": "Requested quality level not available for recording"
+      },
+      {
+        "code": 605,
+        "httpStatus": 400,
+        "message": "not-found-recordings",
+        "cause": "No recordings found for the book",
+        "additionalFields": ["bookGuid"]
+      },
+      {
+        "code": 608,
+        "httpStatus": 400,
+        "message": "email-not-verified",
+        "cause": "User's email address is not verified"
+      }
+    ]
+  },
+  "examples": {
+    "singleBook": {
+      "request": {
+        "books": [
+          {
+            "bookGuid": "ko0vFWslSODtjG9W82CG",
+            "quality": 64,
+            "reason": "download"
+          }
+        ],
+        "platform": "android",
+        "deviceId": "device-001"
+      },
+      "response": {
+        "code": 600,
+        "message": "success",
+        "data": {
+          "ko0vFWslSODtjG9W82CG": {
+            "recordings": [
+              {
+                "name": "Chapter 1",
+                "duration": 1800,
+                "ext": "opus",
+                "url": "https://books.good-storage.click/audio/ko0vFWslSODtjG9W82CG/64/ch1.opus"
+              }
+            ],
+            "expiresAt": "2026-04-13T10:30:00.000Z"
+          }
+        }
+      }
+    },
+    "multipleBooks": {
+      "request": {
+        "books": [
+          {
+            "bookGuid": "ko0vFWslSODtjG9W82CG",
+            "quality": 64,
+            "reason": "download"
+          },
+          {
+            "bookGuid": "abc123XYZ789",
+            "quality": 128,
+            "reason": "stream"
+          }
+        ],
+        "platform": "ios",
+        "deviceId": "iPhone-12"
+      },
+      "response": {
+        "code": 600,
+        "message": "success",
+        "data": {
+          "ko0vFWslSODtjG9W82CG": {
+            "recordings": [
+              {
+                "name": "Chapter 1",
+                "duration": 1800,
+                "ext": "m4a",
+                "url": "https://books.good-storage.click/audio/ko0vFWslSODtjG9W82CG/64/ch1.m4a"
+              }
+            ],
+            "expiresAt": "2026-04-13T10:30:00.000Z"
+          },
+          "abc123XYZ789": {
+            "recordings": [
+              {
+                "name": "Part 1",
+                "duration": 2400,
+                "ext": "m4a",
+                "url": "https://books.good-storage.click/audio/abc123XYZ789/128/part1.m4a"
+              }
+            ],
+            "expiresAt": "2026-04-13T10:30:00.000Z"
+          }
+        }
+      }
+    },
+    "noAuthEndpoint": {
+      "request": {
+        "uid": "wqj1yEqF1rhHKo1BwfA9ShEUbgY2",
+        "books": [
+          {
+            "bookGuid": "ko0vFWslSODtjG9W82CG",
+            "quality": 64,
+            "reason": "download"
+          }
+        ],
+        "platform": "android"
+      }
+    }
+  }
+}
