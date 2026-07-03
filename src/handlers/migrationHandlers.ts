@@ -41,8 +41,8 @@ export async function handleRestoreSubscriptionMigration(
         const { subscription_id, country_code, end_date_of_subscription } = fields;
         const user_guid = authenticatedUserGuid;
 
-        if (!subscription_id || !country_code || !end_date_of_subscription || !user_guid) {
-          reject(new Error("Missing required fields: subscription_id, country_code, end_date_of_subscription, user_guid"));
+        if (!subscription_id || !user_guid) {
+          reject(new Error("Missing required fields: subscription_id, user_guid"));
           return;
         }
 
@@ -65,15 +65,20 @@ export async function handleRestoreSubscriptionMigration(
         const photo_link = storagePath;
         fs.unlinkSync(fileData.filepath);
 
-        const migrationData = {
+        const migrationData: Record<string, unknown> = {
           subscription_id,
-          country_code,
-          end_date_of_subscription,
           user_guid,
           status: "pending",
           photo_link,
           created_at: Timestamp.now(),
         };
+
+        if (country_code) {
+          migrationData.country_code = country_code;
+        }
+        if (end_date_of_subscription) {
+          migrationData.end_date_of_subscription = end_date_of_subscription;
+        }
 
         await admin.firestore()
           .collection("subscription_migration_restoration")
@@ -130,8 +135,8 @@ export async function handleRestoreSubscriptionMigrationNoAuth(
       try {
         const { subscription_id, country_code, end_date_of_subscription, user_guid } = fields;
 
-        if (!subscription_id || !country_code || !end_date_of_subscription || !user_guid) {
-          reject(new Error("Missing required fields: subscription_id, country_code, end_date_of_subscription, user_guid"));
+        if (!subscription_id || !user_guid) {
+          reject(new Error("Missing required fields: subscription_id, user_guid"));
           return;
         }
 
@@ -154,15 +159,20 @@ export async function handleRestoreSubscriptionMigrationNoAuth(
         const photo_link = storagePath;
         fs.unlinkSync(fileData.filepath);
 
-        const migrationData = {
+        const migrationData: Record<string, unknown> = {
           subscription_id,
-          country_code,
-          end_date_of_subscription,
           user_guid,
           status: "pending",
           photo_link,
           created_at: Timestamp.now(),
         };
+
+        if (country_code) {
+          migrationData.country_code = country_code;
+        }
+        if (end_date_of_subscription) {
+          migrationData.end_date_of_subscription = end_date_of_subscription;
+        }
 
         await admin.firestore()
           .collection("subscription_migration_restoration")

@@ -15,5 +15,6 @@ export { flag } from "./functions/reviews/flag";
 export { flagNoAuth } from "./functions/reviews/flagNoAuth";
 export { getUrls } from "./functions/downloads/getUrls";
 export { getUrlsNoAuth } from "./functions/downloads/getUrlsNoAuth";
+export { webDownloads } from "./functions/downloads/webDownloads";
 export { reportIssue } from "./functions/issues/reportIssue";
 

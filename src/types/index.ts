@@ -16,8 +16,8 @@ export interface SubscriptionFields {
 
 export interface MigrationFields {
   subscription_id: string;
-  country_code: string;
-  end_date_of_subscription: string;
+  country_code?: string;
+  end_date_of_subscription?: string;
   user_guid?: string;
 }
 
