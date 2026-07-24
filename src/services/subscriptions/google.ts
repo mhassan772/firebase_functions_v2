@@ -1,6 +1,7 @@
 import { androidpublisher_v3, google } from "googleapis";
 import {
   GOOGLE_PACKAGE_NAME,
+  GOOGLE_SUBSCRIPTION_BASE_PLANS,
   GOOGLE_SUBSCRIPTION_PRODUCTS,
 } from "../../config/constants";
 import {
@@ -153,6 +154,15 @@ export function validateGooglePurchase(
     }
     if (!lineItem.autoRenewingPlan || lineItem.prepaidPlan) {
       throw invalidStoreData("google-product-not-recurring");
+    }
+    const basePlanId = lineItem.offerDetails?.basePlanId;
+    if (
+      !basePlanId ||
+      !GOOGLE_SUBSCRIPTION_BASE_PLANS.includes(
+        basePlanId as (typeof GOOGLE_SUBSCRIPTION_BASE_PLANS)[number]
+      )
+    ) {
+      throw invalidStoreData("google-base-plan-not-allowed");
     }
     if (!lineItem.expiryTime || !Number.isFinite(
       new Date(lineItem.expiryTime).getTime()

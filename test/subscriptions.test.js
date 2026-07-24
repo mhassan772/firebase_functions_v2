@@ -157,7 +157,7 @@ test("Apple normalization preserves paid cancellation and grace access", () => {
   assert.equal(retry.active, false);
 });
 
-test("Google requires allowlisted auto-renewing line items and matching binding", () => {
+test("Google requires allowlisted products, base plans, and binding", () => {
   const valid = {
     subscriptionState: "SUBSCRIPTION_STATE_ACTIVE",
     lineItems: [
@@ -165,6 +165,7 @@ test("Google requires allowlisted auto-renewing line items and matching binding"
         productId: "premium_access",
         expiryTime: FUTURE.toISOString(),
         autoRenewingPlan: { autoRenewEnabled: true },
+        offerDetails: { basePlanId: "monthly" },
       },
     ],
     externalAccountIdentifiers: {
@@ -172,6 +173,20 @@ test("Google requires allowlisted auto-renewing line items and matching binding"
     },
   };
   assert.doesNotThrow(() => validateGooglePurchase(valid, "expected"));
+  assert.doesNotThrow(() =>
+    validateGooglePurchase(
+      {
+        ...valid,
+        lineItems: [
+          {
+            ...valid.lineItems[0],
+            offerDetails: { basePlanId: "yearly" },
+          },
+        ],
+      },
+      "expected"
+    )
+  );
   assert.throws(
     () =>
       validateGooglePurchase(
@@ -193,6 +208,38 @@ test("Google requires allowlisted auto-renewing line items and matching binding"
               productId: "premium_access",
               expiryTime: FUTURE.toISOString(),
               prepaidPlan: {},
+            },
+          ],
+        },
+        "expected"
+    ),
+    /failed validation/
+  );
+  assert.throws(
+    () =>
+      validateGooglePurchase(
+        {
+          ...valid,
+          lineItems: [
+            {
+              ...valid.lineItems[0],
+              offerDetails: { basePlanId: "unexpected" },
+            },
+          ],
+        },
+        "expected"
+      ),
+    /failed validation/
+  );
+  assert.throws(
+    () =>
+      validateGooglePurchase(
+        {
+          ...valid,
+          lineItems: [
+            {
+              ...valid.lineItems[0],
+              offerDetails: undefined,
             },
           ],
         },

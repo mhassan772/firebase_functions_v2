@@ -29,10 +29,12 @@ The configured, allowlisted recurring products are:
 
 - Apple bundle `com.ktc.MantooqAppiOS`, numeric app ID `1624497481`,
   products `monthly_sub` and `yearly_sub`
-- Google package `ca.basira.mantooqapp`, product `premium_access`
+- Google package `ca.basira.mantooqapp`, product `premium_access`, recurring
+  base plans `monthly` and `yearly`
 
 Apple transactions must report `Auto-Renewable Subscription`. Google line
-items must contain `autoRenewingPlan` and must not contain `prepaidPlan`.
+items must contain `autoRenewingPlan`, must not contain `prepaidPlan`, and
+must identify the allowlisted `monthly` or `yearly` base plan.
 Anything else, including an allowlisted ID configured as a one-time/prepaid
 product, is rejected.
 
@@ -133,7 +135,7 @@ acknowledged without granting access.
 
 First-generation Pub/Sub function triggered by:
 
-`projects/mantooq-test/topics/google-play-subscription-notifications`
+`projects/mantooq-test/topics/mantooq-play-subscription-notifications`
 
 RTDN is a change signal only. The handler validates the fixed package, gets the
 current purchase through `purchases.subscriptionsv2.get`, follows the linked
@@ -192,12 +194,12 @@ rules file could replace unrelated deployed rules. Before any rules deployment:
 
 ## Required secrets and IAM
 
-Create these lowercase Secret Manager entries locally:
+Create these uppercase Secret Manager entries locally:
 
-- `apple_app_store_issuer_id`
-- `apple_app_store_key_id`
-- `apple_app_store_private_key`
-- `subscription_account_binding_hmac_key` (at least 32 random bytes)
+- `APPLE_APP_STORE_ISSUER_ID`
+- `APPLE_APP_STORE_KEY_ID`
+- `APPLE_APP_STORE_PRIVATE_KEY`
+- `SUBSCRIPTION_ACCOUNT_BINDING_HMAC_KEY` (at least 32 random bytes)
 
 Treat the HMAC key as durable account-linking infrastructure. Rotating it
 changes future store-binding values and therefore requires an explicit,
@@ -207,10 +209,10 @@ Do not paste any secret into chat, commit it, put it in a Flutter asset, or log
 it. Use local prompts for short values and `--data-file` for files:
 
 ```sh
-firebase functions:secrets:set apple_app_store_issuer_id
-firebase functions:secrets:set apple_app_store_key_id
-firebase functions:secrets:set apple_app_store_private_key --data-file=/secure/local/path/SubscriptionKey_KEYID.p8
-firebase functions:secrets:set subscription_account_binding_hmac_key --data-file=/secure/local/path/subscription-hmac-key
+firebase functions:secrets:set APPLE_APP_STORE_ISSUER_ID
+firebase functions:secrets:set APPLE_APP_STORE_KEY_ID
+firebase functions:secrets:set APPLE_APP_STORE_PRIVATE_KEY --data-file=/secure/local/path/SubscriptionKey_KEYID.p8
+firebase functions:secrets:set SUBSCRIPTION_ACCOUNT_BINDING_HMAC_KEY --data-file=/secure/local/path/subscription-hmac-key
 ```
 
 The dedicated runtime service account needs `roles/datastore.user`,
@@ -237,16 +239,16 @@ gcloud projects add-iam-policy-binding mantooq-test \
   --member=serviceAccount:subscription-verifier@mantooq-test.iam.gserviceaccount.com \
   --role=roles/logging.logWriter
 
-gcloud secrets add-iam-policy-binding apple_app_store_issuer_id \
+gcloud secrets add-iam-policy-binding APPLE_APP_STORE_ISSUER_ID \
   --member=serviceAccount:subscription-verifier@mantooq-test.iam.gserviceaccount.com \
   --role=roles/secretmanager.secretAccessor --project=mantooq-test
-gcloud secrets add-iam-policy-binding apple_app_store_key_id \
+gcloud secrets add-iam-policy-binding APPLE_APP_STORE_KEY_ID \
   --member=serviceAccount:subscription-verifier@mantooq-test.iam.gserviceaccount.com \
   --role=roles/secretmanager.secretAccessor --project=mantooq-test
-gcloud secrets add-iam-policy-binding apple_app_store_private_key \
+gcloud secrets add-iam-policy-binding APPLE_APP_STORE_PRIVATE_KEY \
   --member=serviceAccount:subscription-verifier@mantooq-test.iam.gserviceaccount.com \
   --role=roles/secretmanager.secretAccessor --project=mantooq-test
-gcloud secrets add-iam-policy-binding subscription_account_binding_hmac_key \
+gcloud secrets add-iam-policy-binding SUBSCRIPTION_ACCOUNT_BINDING_HMAC_KEY \
   --member=serviceAccount:subscription-verifier@mantooq-test.iam.gserviceaccount.com \
   --role=roles/secretmanager.secretAccessor --project=mantooq-test
 ```
@@ -284,7 +286,7 @@ group information, sandbox setup, and server-notification configuration.
    `ca.basira.mantooqapp`, and grant the purchase/order and subscription
    permissions required to read subscription status.
 4. Create
-   `projects/mantooq-test/topics/google-play-subscription-notifications`.
+   `projects/mantooq-test/topics/mantooq-play-subscription-notifications`.
 5. Grant
    `google-play-developer-notifications@system.gserviceaccount.com`
    `roles/pubsub.publisher` on that topic.
@@ -297,9 +299,9 @@ The Pub/Sub commands, after confirming the topic is absent or already correct,
 are:
 
 ```sh
-gcloud pubsub topics create google-play-subscription-notifications \
+gcloud pubsub topics create mantooq-play-subscription-notifications \
   --project=mantooq-test
-gcloud pubsub topics add-iam-policy-binding google-play-subscription-notifications \
+gcloud pubsub topics add-iam-policy-binding mantooq-play-subscription-notifications \
   --member=serviceAccount:google-play-developer-notifications@system.gserviceaccount.com \
   --role=roles/pubsub.publisher \
   --project=mantooq-test
