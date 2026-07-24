@@ -1,0 +1,27 @@
+/*
+ * MERGE PATCH ONLY — do not deploy this file by itself.
+ *
+ * The repository does not contain the complete deployed Firestore rules.
+ * Merge these matches into that complete source, preserve the existing
+ * subscriptions_manual rules unchanged, and inspect/narrow every broader
+ * wildcard allow. In Firestore Rules, a false result here does not override
+ * a true result from another matching rule.
+ */
+
+match /subscription_master/{uid} {
+  allow get: if request.auth != null && request.auth.uid == uid;
+  allow list: if false;
+  allow create, update, delete: if false;
+}
+
+match /subscription_purchase_ownership/{document=**} {
+  allow read, write: if false;
+}
+
+match /subscription_store_state/{document=**} {
+  allow read, write: if false;
+}
+
+match /subscription_store_events/{document=**} {
+  allow read, write: if false;
+}
