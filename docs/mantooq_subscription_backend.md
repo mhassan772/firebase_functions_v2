@@ -119,6 +119,57 @@ mismatches use `permission-denied`, malformed input uses `invalid-argument`,
 store rejection uses `failed-precondition`, and retryable store failures use
 `unavailable`.
 
+### `manageSubscriptionDevice`
+
+Authenticated callable that manages the device list attached to a user's
+subscription. Enforcement is client-side for now: the app reads its own
+`subscription_master` doc and checks that its device ID is listed.
+
+Request: `{ "action": "register" | "unregister", "deviceId": "..." }`
+(`deviceId` is a client-generated identifier, trimmed, 1-128 characters).
+The user must already have a `subscription_master` doc, otherwise
+`failed-precondition` with details `{ code: "subscription-not-found" }`.
+
+- `register` succeeds while the device count is below the maximum and is
+  idempotent for an already-registered device. At the limit it fails with
+  `resource-exhausted` and details `{ code: "device-limit-reached", maxDevices }`.
+- `unregister` removes a device and records the removal time. Because any
+  replacement requires removing a device first, removal is rate-limited: one
+  removal per cooldown window. Inside the window it fails with
+  `failed-precondition` and details
+  `{ code: "device-replacement-cooldown", nextAllowedAt }`. Unregistering a
+  device that is not listed is a no-op and does not consume the cooldown.
+
+Both limits are read from `settings/mantooqAppSettings`:
+
+```json
+{
+  "subscription": {
+    "max_number_of_devices": 2,
+    "days_before_replacing_device": 7
+  }
+}
+```
+
+Missing or invalid values fall back to those defaults (2 devices, 7 days).
+The effective maximum also adds the user's `extra_device_seats` field when a
+future extra-seat purchase flow sets it on the master doc.
+
+Response:
+
+```json
+{
+  "devices": {
+    "action": "register",
+    "changed": true,
+    "allowed_devices": ["device-a", "device-b"],
+    "max_number_of_devices": 2,
+    "last_date_replacing_device": "2026-08-24T00:00:00.000Z",
+    "next_replacement_allowed_at": "2026-08-31T00:00:00.000Z"
+  }
+}
+```
+
 ### `appleSubscriptionNotifications`
 
 First-generation HTTPS endpoint:
@@ -153,6 +204,9 @@ It contains only:
 - Apple-only `originalTransactionId`
 - Google-only `purchaseReference` (SHA-256, never a token)
 - `lastStoreEventAt`, `lastVerifiedAt`, `createdAt`, `updatedAt`
+- Device-management fields owned by `manageSubscriptionDevice`, preserved
+  across store-driven rebuilds: `allowed_devices`,
+  `last_date_replacing_device`, and future `extra_device_seats`
 
 Protected collections:
 

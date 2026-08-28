@@ -8,6 +8,7 @@ export { restoreSubscriptionMigration } from "./functions/subscriptions/restoreS
 export { restoreSubscriptionMigrationNoAuth } from "./functions/subscriptions/restoreSubscriptionMigrationNoAuth";
 export { getSubscriptionAccountBinding } from "./functions/subscriptions/getSubscriptionAccountBinding";
 export { verifySubscription } from "./functions/subscriptions/verifySubscription";
+export { manageSubscriptionDevice } from "./functions/subscriptions/manageSubscriptionDevice";
 export { appleSubscriptionNotifications } from "./functions/subscriptions/appleSubscriptionNotifications";
 export { googleSubscriptionNotifications } from "./functions/subscriptions/googleSubscriptionNotifications";
 export { admin_upload_to_S3 } from "./functions/admin/uploadToS3";

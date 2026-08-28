@@ -25,8 +25,15 @@ const {
   buildMasterProjection,
   googleOwnershipDocumentId,
   ownershipDocumentId,
+  preserveMasterDeviceFields,
   shouldApplyIncomingState,
 } = require("../lib/services/subscriptions/persistence");
+const {
+  applyDeviceAction,
+  deviceStateFromMaster,
+  nextReplacementAllowedAt,
+  resolveDeviceLimits,
+} = require("../lib/services/subscriptions/devices");
 const { Timestamp } = require("firebase-admin/firestore");
 const {
   asCallableError,
@@ -368,6 +375,191 @@ test("master projection and document keys never expose protected purchase data",
       originalTransactionId: original,
     }).includes(original)
   );
+});
+
+test("device limits come from settings with safe defaults", () => {
+  assert.deepEqual(resolveDeviceLimits(undefined), {
+    maxDevices: 2,
+    replacementCooldownDays: 7,
+  });
+  assert.deepEqual(resolveDeviceLimits({}), {
+    maxDevices: 2,
+    replacementCooldownDays: 7,
+  });
+  assert.deepEqual(
+    resolveDeviceLimits({
+      subscription: {
+        max_number_of_devices: 3,
+        days_before_replacing_device: 14,
+      },
+    }),
+    { maxDevices: 3, replacementCooldownDays: 14 }
+  );
+  assert.deepEqual(
+    resolveDeviceLimits({
+      subscription: {
+        max_number_of_devices: 0,
+        days_before_replacing_device: -1,
+      },
+    }),
+    { maxDevices: 2, replacementCooldownDays: 7 }
+  );
+  assert.deepEqual(
+    resolveDeviceLimits({
+      subscription: {
+        max_number_of_devices: "3",
+        days_before_replacing_device: 1.5,
+      },
+    }),
+    { maxDevices: 2, replacementCooldownDays: 7 }
+  );
+});
+
+test("device registration is free under the limit and idempotent", () => {
+  const limits = { maxDevices: 2, replacementCooldownDays: 7 };
+  const empty = { allowedDevices: [], extraSeats: 0 };
+
+  const first = applyDeviceAction(empty, "register", "device-a", limits, NOW);
+  assert.equal(first.changed, true);
+  assert.deepEqual(first.allowedDevices, ["device-a"]);
+
+  const again = applyDeviceAction(
+    { allowedDevices: ["device-a"], extraSeats: 0 },
+    "register",
+    "device-a",
+    limits,
+    NOW
+  );
+  assert.equal(again.changed, false);
+  assert.deepEqual(again.allowedDevices, ["device-a"]);
+});
+
+test("device registration is rejected at the limit unless extra seats exist", () => {
+  const limits = { maxDevices: 2, replacementCooldownDays: 7 };
+  const full = { allowedDevices: ["device-a", "device-b"], extraSeats: 0 };
+  assert.throws(
+    () => applyDeviceAction(full, "register", "device-c", limits, NOW),
+    (error) =>
+      error.code === "resource-exhausted" &&
+      error.details.code === "device-limit-reached" &&
+      error.details.maxDevices === 2
+  );
+
+  const withSeat = { ...full, extraSeats: 1 };
+  const result = applyDeviceAction(withSeat, "register", "device-c", limits, NOW);
+  assert.equal(result.changed, true);
+  assert.deepEqual(result.allowedDevices, ["device-a", "device-b", "device-c"]);
+});
+
+test("device removal enforces the replacement cooldown", () => {
+  const limits = { maxDevices: 2, replacementCooldownDays: 7 };
+
+  const first = applyDeviceAction(
+    { allowedDevices: ["device-a", "device-b"], extraSeats: 0 },
+    "unregister",
+    "device-a",
+    limits,
+    NOW
+  );
+  assert.equal(first.changed, true);
+  assert.deepEqual(first.allowedDevices, ["device-b"]);
+  assert.equal(first.lastReplacedAt, NOW);
+
+  const insideWindow = new Date(NOW.getTime() + 3 * 24 * 60 * 60 * 1000);
+  assert.throws(
+    () =>
+      applyDeviceAction(
+        { allowedDevices: ["device-b"], lastReplacedAt: NOW, extraSeats: 0 },
+        "unregister",
+        "device-b",
+        limits,
+        insideWindow
+      ),
+    (error) =>
+      error.code === "failed-precondition" &&
+      error.details.code === "device-replacement-cooldown" &&
+      error.details.nextAllowedAt ===
+        nextReplacementAllowedAt(NOW, limits).toISOString()
+  );
+
+  const afterWindow = new Date(NOW.getTime() + 8 * 24 * 60 * 60 * 1000);
+  const second = applyDeviceAction(
+    { allowedDevices: ["device-b"], lastReplacedAt: NOW, extraSeats: 0 },
+    "unregister",
+    "device-b",
+    limits,
+    afterWindow
+  );
+  assert.equal(second.changed, true);
+  assert.deepEqual(second.allowedDevices, []);
+  assert.equal(second.lastReplacedAt, afterWindow);
+});
+
+test("removing an unknown device is a no-op that keeps the cooldown intact", () => {
+  const limits = { maxDevices: 2, replacementCooldownDays: 7 };
+  const insideWindow = new Date(NOW.getTime() + 1 * 24 * 60 * 60 * 1000);
+  const result = applyDeviceAction(
+    { allowedDevices: ["device-a"], lastReplacedAt: NOW, extraSeats: 0 },
+    "unregister",
+    "device-x",
+    limits,
+    insideWindow
+  );
+  assert.equal(result.changed, false);
+  assert.deepEqual(result.allowedDevices, ["device-a"]);
+  assert.equal(result.lastReplacedAt, NOW);
+});
+
+test("device fields on the master doc survive store-driven rebuilds", () => {
+  const state = normalizeGoogleSubscription({
+    productId: "premium_access",
+    environment: "production",
+    purchaseReference: "reference",
+    expiryTime: FUTURE.toISOString(),
+    subscriptionState: "SUBSCRIPTION_STATE_ACTIVE",
+    autoRenewing: true,
+    now: NOW,
+  });
+  const rebuilt = buildMasterProjection(
+    state,
+    Timestamp.fromDate(NOW),
+    Timestamp.fromDate(NOW)
+  );
+  const existing = {
+    allowed_devices: ["device-a", "device-b"],
+    last_date_replacing_device: Timestamp.fromDate(PAST),
+    extra_device_seats: 1,
+    productId: "stale-value-not-carried",
+  };
+  const preserved = preserveMasterDeviceFields(rebuilt, existing);
+  assert.deepEqual(preserved.allowed_devices, ["device-a", "device-b"]);
+  assert.equal(preserved.last_date_replacing_device, existing.last_date_replacing_device);
+  assert.equal(preserved.extra_device_seats, 1);
+  assert.equal(preserved.productId, "premium_access");
+
+  const fresh = buildMasterProjection(
+    state,
+    Timestamp.fromDate(NOW),
+    Timestamp.fromDate(NOW)
+  );
+  assert.equal(preserveMasterDeviceFields(fresh, undefined), fresh);
+  assert.ok(!Object.hasOwn(fresh, "allowed_devices"));
+});
+
+test("device state parsing tolerates missing and malformed fields", () => {
+  assert.deepEqual(deviceStateFromMaster({}), {
+    allowedDevices: [],
+    lastReplacedAt: undefined,
+    extraSeats: 0,
+  });
+  const parsed = deviceStateFromMaster({
+    allowed_devices: ["device-a", 42, "", "device-b"],
+    last_date_replacing_device: Timestamp.fromDate(NOW),
+    extra_device_seats: 2,
+  });
+  assert.deepEqual(parsed.allowedDevices, ["device-a", "device-b"]);
+  assert.equal(parsed.lastReplacedAt.toISOString(), NOW.toISOString());
+  assert.equal(parsed.extraSeats, 2);
 });
 
 test("callable errors do not expose raw store material", () => {

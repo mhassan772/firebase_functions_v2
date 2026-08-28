@@ -172,7 +172,10 @@ export async function persistVerifiedSubscription(
     const createdAt = masterSnapshot.exists
       ? masterSnapshot.get("createdAt")
       : now;
-    const masterData = buildMasterProjection(masterState, createdAt, now);
+    const masterData = preserveMasterDeviceFields(
+      buildMasterProjection(masterState, createdAt, now),
+      masterSnapshot.exists ? masterSnapshot.data() : undefined
+    );
     transaction.set(masterRef, masterData);
     if (eventRef && event) {
       transaction.create(eventRef, {
@@ -426,6 +429,29 @@ export function buildMasterProjection(
     data.purchaseReference = state.purchaseReference;
   }
   return data;
+}
+
+// Device management fields live on the master doc but are owned by the
+// device callable, not the store projection; renewals must not erase them.
+export const MASTER_DEVICE_FIELDS = [
+  "allowed_devices",
+  "last_date_replacing_device",
+  "extra_device_seats",
+] as const;
+
+export function preserveMasterDeviceFields(
+  masterData: DocumentData,
+  existing: DocumentData | undefined
+): DocumentData {
+  if (!existing) {
+    return masterData;
+  }
+  for (const field of MASTER_DEVICE_FIELDS) {
+    if (existing[field] !== undefined) {
+      masterData[field] = existing[field];
+    }
+  }
+  return masterData;
 }
 
 function stateDataToNormalized(data: DocumentData): NormalizedSubscription {

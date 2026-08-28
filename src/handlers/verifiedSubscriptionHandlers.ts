@@ -27,6 +27,14 @@ import {
   resolveVerifiedOwner,
 } from "../services/subscriptions/persistence";
 import { requireRuntimeSecret } from "../services/subscriptions/runtimeSecrets";
+import {
+  DeviceAction,
+  DeviceManagementResponse,
+  manageSubscriptionDevices,
+  MAX_DEVICE_ID_LENGTH,
+  resolveDeviceLimits,
+} from "../services/subscriptions/devices";
+import { getSettings } from "./downloadHandlers";
 
 interface GoogleRtdnPayload {
   packageName?: unknown;
@@ -117,6 +125,38 @@ export async function handleVerifySubscription(
     return { subscription: result.subscription };
   } catch (error) {
     logCallableFailure("subscription_verification", operationId, platform, error);
+    throw asCallableError(error);
+  }
+}
+
+export async function handleManageSubscriptionDevice(
+  data: unknown,
+  context: functions.https.CallableContext
+): Promise<{ devices: DeviceManagementResponse }> {
+  const operationId = crypto.randomUUID();
+  let action: DeviceAction | undefined;
+  try {
+    assertExactKeys(data, ["action", "deviceId"]);
+    const request = data as Record<string, unknown>;
+    action = readDeviceAction(request.action);
+    const deviceId = readDeviceId(request.deviceId);
+    const uid = requireAuthenticatedUid(context);
+    logInfo("subscription_device_start", operationId, { action });
+    const limits = resolveDeviceLimits(await getSettings());
+    const devices = await manageSubscriptionDevices(
+      uid,
+      action,
+      deviceId,
+      limits
+    );
+    logInfo("subscription_device_success", operationId, {
+      action,
+      changed: devices.changed,
+      deviceCount: devices.allowed_devices.length,
+    });
+    return { devices };
+  } catch (error) {
+    logCallableFailure("subscription_device", operationId, undefined, error);
     throw asCallableError(error);
   }
 }
@@ -346,6 +386,29 @@ function readPlatform(
     );
   }
   return data.platform;
+}
+
+function readDeviceAction(value: unknown): DeviceAction {
+  if (value !== "register" && value !== "unregister") {
+    throw new SubscriptionError(
+      "invalid-input",
+      "device-action-invalid",
+      "The device action is invalid."
+    );
+  }
+  return value;
+}
+
+function readDeviceId(value: unknown): string {
+  const deviceId = typeof value === "string" ? value.trim() : "";
+  if (!deviceId || deviceId.length > MAX_DEVICE_ID_LENGTH) {
+    throw new SubscriptionError(
+      "invalid-input",
+      "device-id-invalid",
+      "The deviceId field is invalid."
+    );
+  }
+  return deviceId;
 }
 
 function assertExactKeys(data: unknown, allowedKeys: string[]): void {

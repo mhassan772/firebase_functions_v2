@@ -89,5 +89,11 @@ export interface Recording {
 
 export interface Settings {
   isNoAuthAllowed?: boolean;
+  subscription?: SubscriptionSettings;
+}
+
+export interface SubscriptionSettings {
+  max_number_of_devices?: number;
+  days_before_replacing_device?: number;
 }
 
