@@ -114,5 +114,12 @@
       ]
     }
   ],
-  "fieldOverrides": []
+  "fieldOverrides": [
+    {
+      "collectionGroup": "user_books_chunk",
+      "fieldPath": "books",
+      "ttl": false,
+      "indexes": []
+    }
+  ]
 }
