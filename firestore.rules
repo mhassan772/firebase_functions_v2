@@ -1,0 +1,380 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /book_recordings/{book_recordings} {
+      allow read, write: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+
+    }
+    match /books_series/{books_series_id} {
+      allow read, write: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+
+    }
+    match /server_podcasts/{id} {
+      allow read, write: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+
+    }
+    match /books_metadata/{key} {
+      allow read, write: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+
+    }
+    
+    match /books_pre_add/{key} {
+      allow read, write: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+
+    }
+ 
+    match /books_download_audit/{books_download_audit} {
+      allow read, write, delete, create: if false;
+    }
+    match /admin/{adminuid} {
+      allow read:if request.auth != null 
+      // && get(/databases/$(database)/documents/admin/$(request.auth.uid)).data.isAdmin == true;
+    allow write, delete, create: if false;
+    }
+    match /feedbacks/{feedback} {
+      allow create: if request.auth != null;
+      allow read, update: if request.auth != null && get(/databases/$(database)/documents/admin/$(request.auth.uid)).data.isAdmin == true;
+    }
+    match /settings/{settings} {
+      allow read, write, update, create, delete: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+
+    }
+	match /settings_app/{docId}/{subpath=**} {
+  allow read: if true;
+
+  allow create, update, delete: if request.auth != null
+    && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+}
+
+    
+    match /system_time/{document} {
+ 			 allow read, write: if request.auth != null;
+		}
+    
+    match /users/{userId} {
+      allow read, update, delete: if request.auth != null && request.auth.uid == userId;
+      allow read, update, delete: if request.auth != null && request.auth.uid == resource.data.id;
+      allow create: if true;
+			allow read, write: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+}
+    match /favourites/{userId} {
+      allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
+      allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+
+    }
+    match /auto_reported_issues/{issueId} {
+  allow create: if request.auth != null
+    && request.resource.data.userId == request.auth.uid;
+  allow read, update, delete: if request.auth != null
+    && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role in ['admin', 'developer'];
+}
+    match /favorites_v2/{userId} {
+ 		  allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
+      allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+
+		}
+    
+    match /playback_progress/{userId} {
+      allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
+      allow read: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+      allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+
+    }
+    
+    match /playback_progress_v2/{userId} {
+
+      allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
+      allow read: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+      allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+
+
+      match /chunks/{docId} {
+         allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
+         allow read: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+         allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+
+      }
+    }
+    
+    match /episode_progress/{userId} {                                                                                                                                                    
+    	allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;                                                                                          
+   	 	allow read: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';  
+      allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+
+  	}
+
+   match /converted_podcasts/{userId} {                                                                                                                                                    
+    	allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;                                                                                          
+   	 	allow read: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin'; 
+      allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+
+  	}      
+
+    match /podcast_subscriptions/{userId} {
+      allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
+      allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+
+    }
+    
+    match /episodes_lists/{userId} {
+    allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
+    allow read: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+    allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+
+
+    match /lists/{listId} {
+      allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
+      allow read: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+      allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+
+    }
+  	}
+    
+    match /pdf_progress/{userId} {
+      allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
+      allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+
+    }
+     match /completed_book/{userId} {
+      allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
+      allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+
+    }
+     match /completed_books_v2/{userId} {
+ 		  allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
+      allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+
+		}
+     match /archived_episodes/{userId} {
+ 		  allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
+      allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+
+		}
+     match /playlists/{userId} {
+      allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
+      allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+
+    }
+     match /playlists/{userId}/book_playlists/{id} {
+      allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
+      allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+
+    }
+     match /playlists_v2/{userId} {
+      allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
+      allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+      allow read: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+    }
+     
+     match /routines/{userId} {
+      allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
+            allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+
+      allow read: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+    }
+     match /routine_activity/{userId} {
+      allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
+            allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+
+      allow read: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+
+    }
+     match /listen_times/{userId} {
+      allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
+            allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+
+    }
+     match /device_sessions/{userId} {
+      allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
+      allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+      allow read: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+    }
+     match /device_sessions_v2/{userId} {
+      allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
+      allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+      allow read: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+    }
+ 		match /bookmarks/{userId}/bookmarks_chunk/{book_mark_chunck} {
+      allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
+            allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+
+    }   
+  	match /bookmarks/{userId} {
+      allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
+            allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+
+      allow read: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+    }
+    
+     match /bookmarks/{userId}/tags/{id} {
+      allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
+            allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+
+    }
+    
+      match /bookmarks/{userId}/book_bookmarks/{id} {
+      allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
+            allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+
+    }
+     match /subscriptions_manual/{userId} {
+      allow read: if request.auth != null ;
+      allow write: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+
+    }
+    match /subscriptions_manual_test/{userId} {
+      allow read: if request.auth != null ;
+      allow write: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+
+    }
+    match /subscriptions_to_be_approved/{subscriptionId} {
+      allow read: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+      allow write: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+      allow read: if request.auth != null && request.auth.uid == resource.data.user_guid;
+
+    }
+    
+   match /subscription_migration_restoration/{subscriptionId} {
+  allow read: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+  allow write: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+  allow read: if request.auth != null && request.auth.uid == resource.data.user_guid;
+
+} 
+    
+    
+    match /users/{userId}/downloaded_books/{book_d} {
+      allow read, update, delete, create: if request.auth != null
+
+    }
+    
+    match /donation_web/main {
+      allow read: if request.auth != null ;
+      allow write: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+    }
+    
+    match /publishers/{publisher_id} {
+      allow read, write, create: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+
+    }
+    
+    match /logs_adminv2/{log_id} {
+      allow read, write, create: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+
+    }
+    match /podcasts_filtering/{setting} {
+      allow read, write, create: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+
+    }
+    match /reporting_issues/{setting} {
+      allow read, write, create, delete: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role in ['admin', 'developer'];
+
+    }
+    
+    // Users collection - authenticated users can read their own document
+    match /users_adminv2/{userId} {
+      allow read: if request.auth != null && request.auth.uid == userId;
+      allow write: if false; // Only admins should write via admin SDK
+    }
+    // users_my_mantooq collection - authenticated users can read their own document
+    match /users_my_mantooq/{userId} {
+      allow read: if request.auth != null && request.auth.uid == userId;
+      allow write: if false; // Only admins should write via admin SDK
+    }
+    
+    // Users not activated collection - authenticated users can read/write their own document
+    match /users_not_activated_adminv2/{userId} {
+      allow read: if true;
+      allow create: if true;
+      allow update, delete: if false;
+    }
+    match /re_user_liked_comments/{userId}/{book_guid}/{commenter_guid} {
+      allow read: if request.auth != null && request.auth.uid == userId;
+    }		
+    match /re_user_flagged_comments/{userId}/{book_guid}/{commenter_guid} {
+      allow read: if request.auth != null && request.auth.uid == userId;
+    }	    
+    
+    
+    match /re_review_book/{book_guid} {
+      allow read: if request.auth != null ;
+    }
+    match /re_review_content/{comment_id} {
+      allow read: if request.auth != null ;
+    }
+    match /authors/{author} {
+      allow read: if true;
+      allow write, delete: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+    }
+
+    
+    match /books/{book} {
+      allow read: if true;
+      allow write: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+
+    }
+    match /books_copy_rights/{book} {
+      allow read, write: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+
+    }
+    
+    match /categories/{category} {
+      allow read: if true;
+      allow write: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+    }
+    
+    match /narrators/{narrator} {
+      allow read: if true;
+    }
+    match /popular_books/{popular_books} {
+      allow read: if true;
+    }
+    
+    match /popular_books_v2/{popular_books} {
+      allow read: if true;
+    }
+    
+    
+    //SUBSCRIPTION
+    match /subscription_master/{uid} {
+      allow get: if request.auth != null
+                 && request.auth.uid == uid;
+
+      allow list, create, update, delete: if false;
+    }
+
+    match /subscription_purchase_ownership/{document=**} {
+      allow read, write: if false;
+    }
+
+    match /subscription_store_state/{document=**} {
+      allow read, write: if false;
+    }
+
+    match /subscription_store_events/{document=**} {
+      allow read, write: if false;
+    }
+
+		
+    // DONATION PAGE
+    // Storefront catalog: public read, server-only writes.
+    match /DONATE_books/{bookId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // Donor records and mail audit log: server-only (Cloud Functions /
+    // Admin SDK bypass these rules).
+    match /DONATE_donations/{donationId} {
+      allow read, write: if false;
+    }
+    match /DONATE_mail_log/{logId} {
+      allow read, write: if false;
+    }
+    
+    match /{document=**} {
+      allow read: if false;
+      allow write: if false;
+      allow delete: if false;
+    }
+  }
+}

@@ -22,8 +22,8 @@ It does not modify `subscriptions_manual`.
 - Existing Pub/Sub conventions: none
 - Existing Apple/Google server integration: none
 - Existing App Check configuration: none
-- Existing deployment scripts: `npm run build`, `npm run serve`, and
-  `npm run deploy`
+- Existing scripts: `npm run build` and `npm run serve`. There is no
+  deploy script; deploy functions by name
 
 The configured, allowlisted recurring products are:
 

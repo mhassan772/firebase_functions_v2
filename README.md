@@ -63,12 +63,12 @@ firebase emulators:start --only functions
 
 ### 5. Deploy to Firebase
 
-```bash
-# Deploy functions
-npm run deploy
+Deploy functions by name. Several deployed functions have no source in this
+repo, so deploying all functions would offer to delete them.
 
-# Or use Firebase CLI directly
-firebase deploy --only functions
+```bash
+npm run build
+firebase deploy --only functions:<name>
 ```
 
 ## API Endpoints
