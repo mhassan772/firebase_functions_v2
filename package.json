@@ -9,7 +9,10 @@
     "serve": "npm run build && firebase emulators:start --only functions",
     "shell": "firebase functions:shell",
     "start": "npm run shell",
-    "logs": "firebase functions:log"
+    "logs": "firebase functions:log",
+    "test:rules": "bash scripts/emulator/with-java.sh firebase emulators:exec --only firestore --project demo-mantooq 'node --test test/rules/*.test.js'",
+    "emulators": "bash scripts/emulator/start.sh",
+    "emulators:seed": "node scripts/emulator/seed.mjs"
   },
   "engines": {
     "node": "22"
@@ -28,9 +31,11 @@
     "stripe": "^20.1.2"
   },
   "devDependencies": {
+    "@firebase/rules-unit-testing": "^5.0.2",
     "@types/busboy": "^1.5.4",
     "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^20.19.27",
+    "firebase": "^12.19.0",
     "firebase-functions-test": "^3.1.0",
     "typescript": "^5.9.3"
   },

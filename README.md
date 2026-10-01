@@ -71,6 +71,30 @@ npm run build
 firebase deploy --only functions:<name>
 ```
 
+## Firestore rules and the local emulator
+
+`firestore.rules` and `firestore.indexes.json` are the source of truth for the whole project. Edit them here, never in the console.
+
+Test rule changes before deploying them. This needs Java 21 (`brew install openjdk@21`):
+
+```bash
+npm run test:rules
+firebase deploy --only firestore --project mantooq-test
+```
+
+The tests run on a Firestore emulator under the `demo-mantooq` project, so they never touch real data.
+
+To work on the app's Firebase data without touching the live project, start the local Auth and Firestore emulators:
+
+```bash
+npm run emulators
+```
+
+- They are seeded with test accounts (see `scripts/emulator/seed.mjs`), and the emulator UI is at http://127.0.0.1:4001.
+- Ctrl+C throws the data away. `npm run emulators:seed` resets it while they run.
+- Run a debug build of the app with `--dart-define=USE_FIREBASE_EMULATOR=true` to use them.
+- The emulators run under the real project id, because the app's native config is tied to it. Only Auth and Firestore start, and neither calls real services. The functions emulator is left out because emulated functions would reach the real Apple, Google and Secret Manager APIs.
+
 ## API Endpoints
 
 ### 1. Egypt Subscription

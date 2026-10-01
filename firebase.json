@@ -10,11 +10,30 @@
     "region": "europe-west2"
   },
   "emulators": {
+    "auth": {
+      "host": "127.0.0.1",
+      "port": 9098
+    },
+    "firestore": {
+      "host": "127.0.0.1",
+      "port": 8086,
+      "websocketPort": 9151
+    },
     "functions": {
       "port": 5001
     },
     "ui": {
-      "enabled": true
+      "enabled": true,
+      "host": "127.0.0.1",
+      "port": 4001
+    },
+    "hub": {
+      "host": "127.0.0.1",
+      "port": 4401
+    },
+    "logging": {
+      "host": "127.0.0.1",
+      "port": 4501
     },
     "singleProjectMode": true
   }
