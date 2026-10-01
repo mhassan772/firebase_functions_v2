@@ -63,8 +63,8 @@ firebase emulators:start --only functions
 
 ### 5. Deploy to Firebase
 
-Deploy functions by name. Several deployed functions have no source in this
-repo, so deploying all functions would offer to delete them.
+Deploy functions by name. `mostPopularBooksV2` and `stream` are still deployed
+but have no source here, so deploying all functions would offer to delete them.
 
 ```bash
 npm run build

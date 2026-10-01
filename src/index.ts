@@ -21,4 +21,8 @@ export { flagNoAuth } from "./functions/reviews/flagNoAuth";
 export { getUrls } from "./functions/downloads/getUrls";
 export { getUrlsNoAuth } from "./functions/downloads/getUrlsNoAuth";
 export { webDownloads } from "./functions/downloads/webDownloads";
+export { downloadHttpV3 } from "./functions/downloads/downloadHttpV3";
+export { streamHttp } from "./functions/downloads/streamHttp";
+export { sampleHttp } from "./functions/downloads/sampleHttp";
+export { mostPopularBooksV3 } from "./functions/popularBooks/mostPopularBooksV3";
 export { reportIssue } from "./functions/issues/reportIssue";
