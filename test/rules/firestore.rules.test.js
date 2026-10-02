@@ -56,6 +56,18 @@ describe("data owned by one user", () => {
     "playback_progress_v2/{uid}/chunks/0{uid}",
     "favorites_v2/{uid}",
     "playlists_v2/{uid}",
+    "bookmarks/{uid}/tags/{uid}",
+    "bookmarks/{uid}/book_bookmarks/{uid}",
+    "routines/{uid}",
+    "routine_activity/{uid}",
+    "pdf_progress/{uid}",
+    "device_sessions_v2/{uid}",
+    "podcast_subscriptions/{uid}",
+    "episodes_lists/{uid}",
+    "episodes_lists/{uid}/lists/default-episode-list",
+    "episode_progress/{uid}",
+    "converted_podcasts/{uid}",
+    "archived_episodes/{uid}",
   ];
 
   for (const template of ownedPaths) {

@@ -10,7 +10,7 @@
     "shell": "firebase functions:shell",
     "start": "npm run shell",
     "logs": "firebase functions:log",
-    "test:rules": "bash scripts/emulator/with-java.sh firebase emulators:exec --only firestore --project demo-mantooq 'node --test test/rules/*.test.js'",
+    "test:rules": "bash scripts/emulator/with-java.sh firebase emulators:exec --config firebase.rules-test.json --only firestore --project demo-mantooq 'node --test test/rules/*.test.js'",
     "emulators": "bash scripts/emulator/start.sh",
     "emulators:seed": "node scripts/emulator/seed.mjs"
   },
