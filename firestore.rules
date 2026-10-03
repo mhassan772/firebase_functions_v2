@@ -226,6 +226,51 @@ service cloud.firestore {
         allow read, write: if request.auth != null && request.auth.uid == uid;
       }
     }
+    // A playlist or routine the owner shared by link. Anyone with the link reads
+    // it while it is enabled, including the go.mantooq.com edge script, which
+    // reads over the REST API with no auth. Only the owner sees a stopped share,
+    // lists their own shares, or writes them.
+    match /shared_collections/{shareId} {
+      function isShareOwner() {
+        return request.auth != null && request.auth.uid == resource.data.ownerUid;
+      }
+
+      // Rules cannot loop, so nested items are not checked, only the list sizes.
+      function isValidShare(d) {
+        return d.keys().hasAll(['type', 'ownerUid', 'sourceId', 'enabled', 'schema', 'name', 'createdAt', 'updatedAt'])
+          && d.ownerUid is string
+          && d.sourceId is string && d.sourceId.size() > 0 && d.sourceId.size() <= 100
+          && d.enabled is bool
+          && d.schema is int && d.schema == 1
+          && d.name is string && d.name.size() > 0 && d.name.size() <= 100
+          && d.createdAt is timestamp
+          && d.updatedAt is timestamp
+          && (
+            (d.type == 'playlist'
+              && d.keys().hasOnly(['type', 'ownerUid', 'sourceId', 'enabled', 'schema', 'name', 'createdAt', 'updatedAt', 'icon', 'items'])
+              && d.items is list && d.items.size() <= 1000
+              && (!('icon' in d) || d.icon is map))
+            || (d.type == 'routine'
+              && d.keys().hasOnly(['type', 'ownerUid', 'sourceId', 'enabled', 'schema', 'name', 'createdAt', 'updatedAt', 'entries', 'playlists'])
+              && d.entries is list && d.entries.size() <= 200
+              && d.playlists is map && d.playlists.size() <= 50)
+          );
+      }
+
+      allow get: if resource.data.enabled == true || isShareOwner();
+      // Passes only for queries filtered on the caller's own ownerUid.
+      allow list: if request.auth != null && resource.data.ownerUid == request.auth.uid;
+      allow create: if request.auth != null
+        && request.resource.data.ownerUid == request.auth.uid
+        && isValidShare(request.resource.data);
+      allow update: if isShareOwner()
+        && request.resource.data.ownerUid == resource.data.ownerUid
+        && request.resource.data.type == resource.data.type
+        && request.resource.data.sourceId == resource.data.sourceId
+        && request.resource.data.createdAt == resource.data.createdAt
+        && isValidShare(request.resource.data);
+      allow delete: if isShareOwner();
+    }
      match /subscriptions_manual/{userId} {
       allow read: if request.auth != null ;
       allow write: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';

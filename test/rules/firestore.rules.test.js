@@ -9,7 +9,19 @@ const {
   assertSucceeds,
   initializeTestEnvironment,
 } = require("@firebase/rules-unit-testing");
-const { doc, getDoc, setDoc, collection, getDocs, setLogLevel } = require("firebase/firestore");
+const {
+  doc,
+  getDoc,
+  setDoc,
+  updateDoc,
+  deleteDoc,
+  collection,
+  getDocs,
+  query,
+  where,
+  Timestamp,
+  setLogLevel,
+} = require("firebase/firestore");
 
 // The SDK logs every denial these tests expect; only real errors are worth seeing.
 setLogLevel("error");
@@ -125,6 +137,141 @@ describe("the public catalog", () => {
     await assertFails(setDoc(doc(asUser("user-1"), "books/book-1"), { name: "x" }));
     await assertFails(setDoc(doc(asUser("user-1"), "categories/cat-1"), { name: "x" }));
     await assertSucceeds(setDoc(doc(asUser("admin-1"), "books/book-1"), { name: "x" }));
+  });
+});
+
+describe("shared_collections", () => {
+  const now = Timestamp.fromMillis(Date.UTC(2026, 9, 3));
+
+  const playlistShare = (overrides = {}) => ({
+    type: "playlist",
+    ownerUid: "user-1",
+    sourceId: "playlist-local-1",
+    enabled: true,
+    schema: 1,
+    name: "قائمتي",
+    icon: { code: 1 },
+    items: [{ g: "book-1" }, { pod: 42, n: "بودكاست", i: "https://example.com/p.jpg" }],
+    createdAt: now,
+    updatedAt: now,
+    ...overrides,
+  });
+
+  const routineShare = (overrides = {}) => ({
+    type: "routine",
+    ownerUid: "user-1",
+    sourceId: "routine-local-1",
+    enabled: true,
+    schema: 1,
+    name: "وردي اليومي",
+    entries: [
+      { g: "book-1", t: "06:00", r: [1, 2] },
+      { list: "k1", t: "07:00", r: [3] },
+    ],
+    playlists: { k1: { name: "قائمة", items: [{ g: "book-1" }] } },
+    createdAt: now,
+    updatedAt: now,
+    ...overrides,
+  });
+
+  const seed = async (id, data) => {
+    await env.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), `shared_collections/${id}`), data);
+    });
+  };
+
+  test("anyone reads an enabled share; only the owner reads a stopped one", async () => {
+    await seed("on", playlistShare());
+    await seed("off", playlistShare({ enabled: false }));
+
+    await assertSucceeds(getDoc(doc(asGuest(), "shared_collections/on")));
+    await assertSucceeds(getDoc(doc(asUser("user-2"), "shared_collections/on")));
+
+    await assertFails(getDoc(doc(asGuest(), "shared_collections/off")));
+    await assertFails(getDoc(doc(asUser("user-2"), "shared_collections/off")));
+    await assertSucceeds(getDoc(doc(asUser("user-1"), "shared_collections/off")));
+  });
+
+  test("the owner creates valid playlist and routine shares", async () => {
+    await assertSucceeds(setDoc(doc(asUser("user-1"), "shared_collections/p1"), playlistShare()));
+    await assertSucceeds(setDoc(doc(asUser("user-1"), "shared_collections/r1"), routineShare()));
+    const { icon, ...noIcon } = playlistShare();
+    await assertSucceeds(setDoc(doc(asUser("user-1"), "shared_collections/p2"), noIcon));
+  });
+
+  test("a share cannot be created for someone else or as a guest", async () => {
+    await assertFails(setDoc(doc(asUser("user-2"), "shared_collections/p1"), playlistShare()));
+    await assertFails(setDoc(doc(asGuest(), "shared_collections/p1"), playlistShare()));
+  });
+
+  test("a share with a bad shape is refused", async () => {
+    const db = asUser("user-1");
+    const tooMany = Array.from({ length: 1001 }, (_, i) => ({ g: `book-${i}` }));
+    const bad = [
+      playlistShare({ schema: 2 }),
+      playlistShare({ type: "album" }),
+      playlistShare({ name: "" }),
+      playlistShare({ name: "ن".repeat(101) }),
+      playlistShare({ sourceId: "" }),
+      playlistShare({ enabled: "yes" }),
+      playlistShare({ unknownKey: true }),
+      playlistShare({ items: tooMany }),
+      playlistShare({ entries: [] }),
+      routineShare({ icon: { code: 1 } }),
+      routineShare({ items: [] }),
+      routineShare({ entries: Array.from({ length: 201 }, () => ({ g: "book-1", t: "06:00", r: [1] })) }),
+    ];
+    for (const [i, data] of bad.entries()) {
+      await assertFails(setDoc(doc(db, `shared_collections/bad-${i}`), data));
+    }
+  });
+
+  test("only the owner updates or deletes a share", async () => {
+    await seed("p1", playlistShare());
+
+    await assertFails(updateDoc(doc(asUser("user-2"), "shared_collections/p1"), { name: "x" }));
+    await assertFails(updateDoc(doc(asUser("user-2"), "shared_collections/p1"), { enabled: false }));
+    await assertFails(updateDoc(doc(asGuest(), "shared_collections/p1"), { enabled: false }));
+    await assertFails(deleteDoc(doc(asUser("user-2"), "shared_collections/p1")));
+
+    const db = asUser("user-1");
+    await assertSucceeds(updateDoc(doc(db, "shared_collections/p1"), { name: "اسم جديد", updatedAt: now }));
+    await assertSucceeds(updateDoc(doc(db, "shared_collections/p1"), { items: [{ g: "book-2" }] }));
+    await assertSucceeds(updateDoc(doc(db, "shared_collections/p1"), { enabled: false }));
+    await assertSucceeds(updateDoc(doc(db, "shared_collections/p1"), { enabled: true }));
+    await assertSucceeds(deleteDoc(doc(db, "shared_collections/p1")));
+  });
+
+  test("the owner cannot change who owns a share, its type or its source", async () => {
+    await seed("p1", playlistShare());
+    const db = asUser("user-1");
+
+    await assertFails(updateDoc(doc(db, "shared_collections/p1"), { ownerUid: "user-2" }));
+    await assertFails(updateDoc(doc(db, "shared_collections/p1"), { type: "routine" }));
+    await assertFails(updateDoc(doc(db, "shared_collections/p1"), { sourceId: "other" }));
+    await assertFails(updateDoc(doc(db, "shared_collections/p1"), { createdAt: Timestamp.now() }));
+    await assertFails(updateDoc(doc(db, "shared_collections/p1"), { name: "" }));
+  });
+
+  test("only the owner lists, and only their own shares", async () => {
+    await seed("p1", playlistShare());
+    await seed("p2", playlistShare({ ownerUid: "user-2", sourceId: "other" }));
+
+    const own = await assertSucceeds(
+      getDocs(query(collection(asUser("user-1"), "shared_collections"), where("ownerUid", "==", "user-1"))),
+    );
+    assert.equal(own.size, 1);
+
+    await assertFails(
+      getDocs(query(collection(asUser("user-2"), "shared_collections"), where("ownerUid", "==", "user-1"))),
+    );
+    await assertFails(
+      getDocs(query(collection(asGuest(), "shared_collections"), where("ownerUid", "==", "user-1"))),
+    );
+    await assertFails(getDocs(collection(asUser("user-1"), "shared_collections")));
+    await assertFails(
+      getDocs(query(collection(asUser("user-1"), "shared_collections"), where("enabled", "==", true))),
+    );
   });
 });
 
