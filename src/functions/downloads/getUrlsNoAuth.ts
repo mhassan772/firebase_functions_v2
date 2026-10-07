@@ -3,6 +3,7 @@ import { Request, Response } from "express";
 import { REGION } from "../../config/constants";
 import { handleGetUrls, getSettings } from "../../handlers/downloadHandlers";
 import { GetUrlsRequest } from "../../types";
+import { validateGetUrlsRequest } from "../../shared/getUrlsCore";
 
 interface GetUrlsNoAuthRequest extends GetUrlsRequest {
   uid: string;
@@ -31,45 +32,10 @@ export const getUrlsNoAuth = functions.region(REGION).https.onRequest(
         return;
       }
 
-      if (!books || !Array.isArray(books) || books.length === 0) {
-        res.status(400).json({
-          code: 400,
-          message: "Missing or invalid 'books' field. Expected non-empty array.",
-        });
+      const validationError = validateGetUrlsRequest(books, platform);
+      if (validationError) {
+        res.status(400).json(validationError);
         return;
-      }
-
-      if (!platform) {
-        res.status(400).json({
-          code: 400,
-          message: "Missing required field: platform",
-        });
-        return;
-      }
-
-      const validReasons = ["download", "stream", "sample"];
-      for (const book of books) {
-        if (!book.bookGuid) {
-          res.status(400).json({
-            code: 400,
-            message: "Each book must have a 'bookGuid' field",
-          });
-          return;
-        }
-        if (!book.quality) {
-          res.status(400).json({
-            code: 400,
-            message: "Each book must have a 'quality' field",
-          });
-          return;
-        }
-        if (!book.reason || !validReasons.includes(book.reason)) {
-          res.status(400).json({
-            code: 400,
-            message: "Each book must have a 'reason' field with value: download, stream, or sample",
-          });
-          return;
-        }
       }
 
       const response = await handleGetUrls({ books, platform, deviceId }, uid);

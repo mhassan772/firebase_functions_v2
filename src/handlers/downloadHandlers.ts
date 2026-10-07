@@ -1,18 +1,15 @@
 import { Timestamp } from "firebase-admin/firestore";
 import { admin } from "../config/admin";
+import { GetUrlsRequest, GetUrlsResponse, Book, Recording, Settings, BookItem } from "../types";
 import {
-  GetUrlsRequest,
-  GetUrlsResponse,
-  Book,
-  Recording,
-  BookUrlData,
-  RecordingUrl,
-  Quality,
-  Settings,
-  BookItem,
-} from "../types";
-
-const PUBLIC_DOMAIN = "https://books.good-storage.click";
+  BookSource,
+  buildAuditFields,
+  buildGroupedResponse,
+  buildSuccessResponse,
+  emailNotVerifiedError,
+  getCounterField,
+  notFoundUserError,
+} from "../shared/getUrlsCore";
 
 export async function handleGetUrls(
   request: GetUrlsRequest,
@@ -27,37 +24,34 @@ export async function handleGetUrls(
     getRecordingsInBatch(bookGuids),
   ]);
 
-  const result = buildGroupedResponse(books, recordingSnapshots, request);
+  const sources: BookSource[] = books.map((bookDoc, i) => {
+    const recordingDoc = recordingSnapshots[i].docs[0];
+    return {
+      bookExists: bookDoc.exists,
+      recordings: recordingDoc?.exists
+        ? (recordingDoc.data()?.recordings as Record<string, Recording> | undefined)
+        : null,
+    };
+  });
+  const result = buildGroupedResponse(request, sources);
 
   await Promise.all([
     incrementCountersBatch(request.books),
     addDownloadAuditBatch(books, request.books, authId, request.deviceId),
   ]);
 
-  return {
-    code: 600,
-    message: "success",
-    data: result,
-  };
+  return buildSuccessResponse(result);
 }
 
 async function verifyUserEmail(authId: string): Promise<void> {
   try {
     const user = await admin.auth().getUser(authId);
     if (!user.emailVerified) {
-      const errMessage = JSON.stringify({
-        code: 608,
-        message: "email-not-verified",
-      });
-      throw new Error(errMessage);
+      throw emailNotVerifiedError();
     }
   } catch (error: any) {
     if (error.code === "auth/user-not-found") {
-      const errMessage = JSON.stringify({
-        code: 602,
-        message: "not-found-user",
-      });
-      throw new Error(errMessage);
+      throw notFoundUserError();
     }
     throw error;
   }
@@ -89,101 +83,6 @@ async function getRecordingsInBatch(
   return Promise.all(queries);
 }
 
-function buildGroupedResponse(
-  books: FirebaseFirestore.DocumentSnapshot[],
-  recordingSnapshots: FirebaseFirestore.QuerySnapshot[],
-  request: GetUrlsRequest
-): Record<string, BookUrlData> {
-  const result: Record<string, BookUrlData> = {};
-  const expiresAt = getExpiryTimestamp();
-
-  for (let i = 0; i < request.books.length; i++) {
-    const bookItem = request.books[i];
-    const bookDoc = books[i];
-    const recordingSnapshot = recordingSnapshots[i];
-
-    if (!bookDoc.exists) {
-      const errMessage = JSON.stringify({
-        code: 601,
-        message: "not-found-book",
-        bookGuid: bookItem.bookGuid,
-      });
-      throw new Error(errMessage);
-    }
-
-    const recordingDoc = recordingSnapshot.docs[0];
-    if (!recordingDoc?.exists) {
-      const errMessage = JSON.stringify({
-        code: 605,
-        message: "not-found-recordings",
-        bookGuid: bookItem.bookGuid,
-      });
-      throw new Error(errMessage);
-    }
-
-    const recordingsData = recordingDoc.data()?.recordings;
-    if (!recordingsData) {
-      const errMessage = JSON.stringify({
-        code: 605,
-        message: "not-found-recordings",
-        bookGuid: bookItem.bookGuid,
-      });
-      throw new Error(errMessage);
-    }
-
-    const recordings = Object.values(recordingsData) as Recording[];
-    const urls = buildPublicUrls(
-      recordings,
-      bookItem.quality,
-      request.platform
-    );
-
-    result[bookItem.bookGuid] = {
-      recordings: urls,
-      expiresAt,
-    };
-  }
-
-  return result;
-}
-
-function buildPublicUrls(
-  recordings: Recording[],
-  quality: Quality,
-  platform: string
-): RecordingUrl[] {
-  const normalizedPlatform = platform?.toLowerCase() || "android";
-
-  return recordings.map((recording) => {
-    const qualityKey = `${quality}kb_url`;
-    let path = recording.url_list[qualityKey];
-
-    if (!path) {
-      const errMessage = JSON.stringify({
-        code: 604,
-        message: "not-found-quality",
-      });
-      throw new Error(errMessage);
-    }
-
-    path = (path || "").replace(/^\/+/, "");
-
-    let url: string;
-    if (normalizedPlatform === "ios") {
-      url = `${PUBLIC_DOMAIN}/${path.replace("opus", "m4a")}`;
-    } else {
-      url = `${PUBLIC_DOMAIN}/${path}`;
-    }
-
-    return {
-      name: recording.name,
-      duration: recording.duration,
-      ext: url.split(".").pop() || "",
-      url,
-    };
-  });
-}
-
 async function incrementCountersBatch(bookItems: BookItem[]): Promise<void> {
   if (bookItems.length === 0) return;
 
@@ -202,19 +101,6 @@ async function incrementCountersBatch(bookItems: BookItem[]): Promise<void> {
       }
     });
   });
-}
-
-function getCounterField(reason: string): string {
-  switch (reason) {
-    case "download":
-      return "num_downloads";
-    case "stream":
-      return "num_streams";
-    case "sample":
-      return "num_samples";
-    default:
-      return "num_downloads";
-  }
 }
 
 async function addDownloadAuditBatch(
@@ -236,23 +122,19 @@ async function addDownloadAuditBatch(
     const auditRef = admin.firestore().collection("books_download_audit").doc();
 
     batch.set(auditRef, {
-      book_guid: bookDoc.id,
-      book_name: bookData.name,
-      book_id_reference: bookData.book_id_reference || null,
+      ...buildAuditFields(
+        bookDoc.id,
+        bookData.name,
+        bookData.book_id_reference,
+        reason,
+        authId,
+        deviceId
+      ),
       timestamp,
-      user_guid: authId,
-      device_id: deviceId || null,
-      reason,
     });
   });
 
   await batch.commit();
-}
-
-function getExpiryTimestamp(): string {
-  const expiresAt = new Date();
-  expiresAt.setMonth(expiresAt.getMonth() + 1);
-  return expiresAt.toISOString();
 }
 
 export async function getSettings(): Promise<Settings> {
