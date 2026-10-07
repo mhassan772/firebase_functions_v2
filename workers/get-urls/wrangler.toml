@@ -1,0 +1,31 @@
+name = "mantooq-get-urls"
+main = "src/index.ts"
+compatibility_date = "2026-10-01"
+
+# workers.dev hosts are blocked by some ISPs, so the Worker is served only from its custom domain.
+workers_dev = false
+
+[[routes]]
+pattern = "api.good-storage.click"
+custom_domain = true
+
+# Each request makes two or three calls to Google APIs, so run near them rather than the user.
+[placement]
+mode = "smart"
+
+[observability]
+enabled = true
+
+[vars]
+FIREBASE_PROJECT_ID = "mantooq-test"
+
+# Google's securetoken signing keys, kept forever after Google retires them so old tokens still verify.
+[[kv_namespaces]]
+binding = "GOOGLE_KEYS"
+id = "31f30d1dfcbf489bbb0b4911d39079d7"
+
+[triggers]
+crons = ["17 */6 * * *"]
+
+# Secret, set with `wrangler secret put GOOGLE_SERVICE_ACCOUNT`: the JSON key of a dedicated
+# service account with Cloud Datastore User and Firebase Authentication Viewer only.
