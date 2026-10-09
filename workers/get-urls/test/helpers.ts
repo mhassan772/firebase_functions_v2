@@ -115,16 +115,6 @@ export function installFakeGoogle(google: FakeGoogle): void {
   });
 }
 
-export function fakeContext() {
-  const pending: Promise<unknown>[] = [];
-  const ctx = {
-    waitUntil: (promise: Promise<unknown>) => pending.push(promise),
-    passThroughOnException: () => {},
-    props: {},
-  } as unknown as ExecutionContext;
-  return { ctx, settle: () => Promise.all(pending) };
-}
-
 export function recordingFields(
   bookGuid: string,
   chapters: { key: string; name: string; duration: number; urls: Record<string, string> }[]

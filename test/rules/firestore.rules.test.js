@@ -418,6 +418,40 @@ describe("podcast audit events", () => {
   });
 });
 
+describe("book listeners", () => {
+  const path = "book_listeners/user-1_book-1";
+  const line = {
+    book_guid: "book-1",
+    user_guid: "user-1",
+    seconds: 600,
+    updatedAt: Timestamp.now(),
+    listenedBeforeSessions: false,
+    qualifies: true,
+    addedToBook: false,
+  };
+
+  test("no client creates a line, the owner and admins included", async () => {
+    for (const uid of ["user-1", "admin-1"]) {
+      await assertFails(setDoc(doc(asUser(uid), path), line));
+    }
+    await assertFails(setDoc(doc(asGuest(), path), line));
+  });
+
+  test("no client reads, updates or deletes a line", async () => {
+    await env.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), path), line);
+    });
+
+    for (const uid of ["user-1", "admin-1"]) {
+      const db = asUser(uid);
+      await assertFails(getDoc(doc(db, path)));
+      await assertFails(updateDoc(doc(db, path), { seconds: 99999 }));
+      await assertFails(deleteDoc(doc(db, path)));
+      await assertFails(getDocs(collection(db, "book_listeners")));
+    }
+  });
+});
+
 describe("everything else", () => {
   test("a collection with no rule of its own is closed", async () => {
     await assertFails(getDoc(doc(asUser("admin-1"), "unlisted_collection/doc-1")));

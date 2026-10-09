@@ -1,6 +1,7 @@
 import * as functions from "firebase-functions";
-import { BulkWriter, DocumentData, Query, QueryDocumentSnapshot, Timestamp } from "firebase-admin/firestore";
+import { BulkWriter, DocumentData, Timestamp } from "firebase-admin/firestore";
 import { admin } from "../config/admin";
+import { deleteRecordsBefore, forEachPage } from "./auditPaging";
 import {
   AUDIT_SOURCES,
   AuditEvent,
@@ -40,9 +41,6 @@ const CONVERTED_ACTIONS: ReadonlySet<string> = new Set(["convert", "listen"]);
 const SOURCE_PAGE_SIZE = 200;
 /** Audit records read per page while counting; they are small. */
 const AUDIT_PAGE_SIZE = 5000;
-/** Firestore's limit on writes in one batch. */
-const DELETE_BATCH_SIZE = 500;
-
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
@@ -260,46 +258,4 @@ async function saveRanking(docId: string, ranking: RankedPodcastEntry[]): Promis
     date_added: Timestamp.now(),
     date_updated: Timestamp.now(),
   });
-}
-
-/** Deletes records older than `cutoff` in batches, so any backlog size fits Firestore's limits. */
-async function deleteRecordsBefore(collection: string, cutoff: Date): Promise<number> {
-  const firestore = admin.firestore();
-  const query = firestore
-    .collection(collection)
-    .where("timestamp", "<", Timestamp.fromDate(cutoff))
-    .orderBy("timestamp")
-    .select();
-  let deleted = 0;
-  // Each page is deleted before the next is read, so paging restarts from the front.
-  for (;;) {
-    const snapshot = await query.limit(DELETE_BATCH_SIZE).get();
-    if (snapshot.empty) {
-      return deleted;
-    }
-    const batch = firestore.batch();
-    snapshot.docs.forEach((doc) => batch.delete(doc.ref));
-    await batch.commit();
-    deleted += snapshot.size;
-    if (snapshot.size < DELETE_BATCH_SIZE) {
-      return deleted;
-    }
-  }
-}
-
-async function forEachPage(
-  query: Query<DocumentData>,
-  pageSize: number,
-  visit: (docs: QueryDocumentSnapshot<DocumentData>[]) => void | Promise<void>,
-): Promise<void> {
-  let last: QueryDocumentSnapshot<DocumentData> | undefined;
-  for (;;) {
-    const page = last ? query.startAfter(last) : query;
-    const snapshot = await page.limit(pageSize).get();
-    await visit(snapshot.docs);
-    if (snapshot.size < pageSize) {
-      return;
-    }
-    last = snapshot.docs[snapshot.docs.length - 1];
-  }
 }

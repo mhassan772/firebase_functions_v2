@@ -55,7 +55,7 @@ export async function respondWithRecordingUrls(
 }
 
 /**
- * Returns every chapter URL of a book for download and records the download.
+ * Returns every chapter URL of a book for download and adds it to the user's downloaded books.
  */
 export async function handleDownloadUrls(
   body: RecordingUrlsRequest,
@@ -65,17 +65,16 @@ export async function handleDownloadUrls(
   await ensureUserExists(uid);
   const book = await getBook(body.bookGuid);
   const { recordings } = await getRecordings(body.bookGuid, body.narratorGuid);
-  await incrementCounter(body.bookGuid, "num_downloads");
   // The URLs are no longer signed, so the key is unused. The download is kept
   // because a missing key still fails the request with a 500, as deployed.
   await getCloudfrontPrivateKey(settings.storageBucketNameFirebase, settings.mp3CloudFrontSigningPrivateKeyFileName);
   const data = recordings.map((recording) => toRecordingUrl(recording, body.quality, body.platform, true));
-  await addDownloadRecords(uid, body.narratorGuid, book, body.deviceId);
+  await addDownloadedBook(uid, book, body.deviceId);
   return { code: 600, message: "success", data, remainingDownloads: -1, remainingHours: -1 };
 }
 
 /**
- * Returns every chapter URL of a book for streaming and counts the stream.
+ * Returns every chapter URL of a book for streaming.
  */
 export async function handleStreamUrls(
   body: RecordingUrlsRequest,
@@ -83,7 +82,6 @@ export async function handleStreamUrls(
 ): Promise<RecordingUrlsResponse> {
   await ensureUserExists(uid);
   const { recordingId, recordings } = await getRecordings(body.bookGuid, body.narratorGuid);
-  await incrementCounter(body.bookGuid, "num_streams");
   functions.logger.info(recordingId);
   const data = recordings.map((recording) => toRecordingUrl(recording, body.quality, body.platform, true));
   return { code: 600, message: "success", data };
@@ -161,13 +159,6 @@ async function getRecordings(
   return { recordingId: docSnapshot.id, recordings: Object.values(recordings) as Recording[] };
 }
 
-// Read-then-write, not FieldValue.increment, to keep the deployed behaviour.
-async function incrementCounter(bookGuid: string, field: "num_downloads" | "num_streams"): Promise<void> {
-  const docRef = admin.firestore().collection("books").doc(bookGuid);
-  const current = (await docRef.get()).data()?.[field] ?? 0;
-  await docRef.update({ [field]: current + 1 });
-}
-
 // The deployed version also checked file.exists(), but tested the returned
 // array instead of its value, so error 606 never fired.
 async function getCloudfrontPrivateKey(bucketName: string, fileName: string): Promise<string> {
@@ -194,27 +185,13 @@ function toRecordingUrl(recording: Recording, quality: Quality, platform: string
     : { name: recording.name, duration: recording.duration, url };
 }
 
-async function addDownloadRecords(uid: string, narratorGuid: string, book: Book, deviceId = ""): Promise<void> {
-  const firestore = admin.firestore();
-  const audit = {
+async function addDownloadedBook(uid: string, book: Book, deviceId = ""): Promise<void> {
+  await admin.firestore().collection(`users/${uid}/downloaded_books`).add({
     book_guid: book.guid,
     book_name: book.name,
-    narrator_guid: narratorGuid,
-    book_id_reference: book.book_id_reference,
+    book_picture_thumbnail_url: book.picture_url.thumbnail_url,
+    download_status: "1",
+    device_id: deviceId,
     timestamp: Timestamp.now(),
-    user_guid: uid,
-  };
-
-  await Promise.all([
-    firestore.collection(`users/${uid}/downloaded_books`).add({
-      book_guid: book.guid,
-      book_name: book.name,
-      book_picture_thumbnail_url: book.picture_url.thumbnail_url,
-      download_status: "1",
-      device_id: deviceId,
-      timestamp: Timestamp.now(),
-    }),
-    firestore.collection("books_download_audit").add(audit),
-    firestore.collection("books_download_audit_long_term").add(audit),
-  ]);
+  });
 }

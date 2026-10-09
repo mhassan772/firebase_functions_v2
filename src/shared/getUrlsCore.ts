@@ -10,7 +10,6 @@ import {
   GetUrlsRequest,
   GetUrlsResponse,
   Quality,
-  Reason,
   Recording,
   RecordingUrl,
 } from "../types";
@@ -153,38 +152,6 @@ function buildPublicUrls(
 
 export function buildSuccessResponse(data: Record<string, BookUrlData>): GetUrlsResponse {
   return { code: 600, message: "success", data };
-}
-
-export function getCounterField(reason: Reason | string): string {
-  switch (reason) {
-    case "download":
-      return "num_downloads";
-    case "stream":
-      return "num_streams";
-    case "sample":
-      return "num_samples";
-    default:
-      return "num_downloads";
-  }
-}
-
-/** Audit fields for one requested book, without the timestamp, whose type is runtime-specific. */
-export function buildAuditFields(
-  bookGuid: string,
-  bookName: string,
-  bookIdReference: string | number | undefined | null,
-  reason: Reason,
-  authId: string,
-  deviceId?: string
-) {
-  return {
-    book_guid: bookGuid,
-    book_name: bookName,
-    book_id_reference: bookIdReference || null,
-    user_guid: authId,
-    device_id: deviceId || null,
-    reason,
-  };
 }
 
 function getExpiryTimestamp(): string {

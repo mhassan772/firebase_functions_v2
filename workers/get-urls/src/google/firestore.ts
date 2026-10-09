@@ -105,20 +105,3 @@ export async function runQuery(env: Env, structuredQuery: unknown): Promise<Fire
   });
   return results.flatMap((result) => (result.document ? [result.document] : []));
 }
-
-export async function commit(env: Env, writes: unknown[]): Promise<void> {
-  await call(env, "commit", { writes });
-}
-
-/** A Firestore-style auto ID: 20 characters from [A-Za-z0-9]. */
-export function autoId(): string {
-  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-  let id = "";
-  while (id.length < 20) {
-    for (const byte of crypto.getRandomValues(new Uint8Array(40))) {
-      // Bytes from 248 up are skipped so every character is equally likely.
-      if (byte < 248 && id.length < 20) id += chars[byte % 62];
-    }
-  }
-  return id;
-}

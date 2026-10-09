@@ -58,6 +58,11 @@ service cloud.firestore {
     match /podcast_audit_state/{stateId} {
       allow read, write, delete, create: if false;
     }
+    // Each user's listening time per book, kept by the book listen-time triggers and counted by
+    // mostPopularBooksV3 through the Admin SDK. See docs/book-chart.md.
+    match /book_listeners/{lineId} {
+      allow read, write, delete, create: if false;
+    }
     match /admin/{adminuid} {
       allow read:if request.auth != null 
       // && get(/databases/$(database)/documents/admin/$(request.auth.uid)).data.isAdmin == true;

@@ -63,6 +63,8 @@ Thumbs.db
 
 # Podcast audit backfill dry runs (user ids)
 backfill-podcast-audit-*.json
+# Book listeners backfill dry runs (user ids)
+backfill-book-listeners-*
 
 # Firebase service account keys
 service-account-key.json

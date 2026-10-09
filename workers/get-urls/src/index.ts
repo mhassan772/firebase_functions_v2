@@ -3,8 +3,8 @@ import { Env } from "./env";
 import { handleGetUrls } from "./handler";
 
 export default {
-  fetch(request, env, ctx) {
-    return handleGetUrls(request, env, ctx);
+  fetch(request, env) {
+    return handleGetUrls(request, env);
   },
 
   /** Keeps every signing key Google publishes in KV, so tokens outlive the key's retirement. */
