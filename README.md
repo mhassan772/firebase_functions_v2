@@ -71,6 +71,10 @@ npm run build
 firebase deploy --only functions:<name>
 ```
 
+### Podcast charts
+
+`popularPodcastsV1` builds the home screen's podcast charts every day. Two temporary triggers, `podcastFollowAuditTrigger` and `podcastConvertAuditTrigger`, cover older app versions and should be turned off after about six months. [docs/podcast-charts.md](docs/podcast-charts.md) covers both, along with the Firestore documents, the settings, the one-off backfill and how to remove the triggers.
+
 ## Firestore rules and the local emulator
 
 `firestore.rules` and `firestore.indexes.json` are the source of truth for the whole project. Edit them here, never in the console.

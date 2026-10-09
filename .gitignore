@@ -61,6 +61,9 @@ jspm_packages/
 .DS_Store
 Thumbs.db
 
+# Podcast audit backfill dry runs (user ids)
+backfill-podcast-audit-*.json
+
 # Firebase service account keys
 service-account-key.json
 firebase-adminsdk-*.json

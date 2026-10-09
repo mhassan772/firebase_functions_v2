@@ -26,6 +26,38 @@ service cloud.firestore {
     match /books_download_audit/{books_download_audit} {
       allow read, write, delete, create: if false;
     }
+    // Podcast engagement behind the podcast rankings: one document per user, podcast and
+    // action, holding the latest date. popularPodcastsV1 and the temporary audit triggers
+    // write them through the Admin SDK. See docs/podcast-charts.md.
+    match /podcast_audit/{auditId} {
+      allow read, write, delete, create: if false;
+    }
+    // The one exception: the app records a listen to a converted podcast itself, since no
+    // synced document shows it. A user writes only their own listen, stamped with the server
+    // time, and re-dates it at most once a day. Conversions stay server-only.
+    match /converted_podcast_audit/{auditId} {
+      function isOwnConvertedListen(d) {
+        return request.auth != null
+          && d.keys().hasOnly(['podcast_id', 'book_guid', 'user_guid', 'action', 'timestamp'])
+          && d.keys().hasAll(['podcast_id', 'book_guid', 'user_guid', 'action', 'timestamp'])
+          && d.action == 'listen'
+          && d.user_guid == request.auth.uid
+          && d.timestamp == request.time
+          && d.podcast_id is string && d.podcast_id.size() > 0 && d.podcast_id.size() <= 200
+          && d.book_guid is string && d.book_guid.size() > 0 && d.book_guid.size() <= 200
+          && auditId == 'listen_' + request.auth.uid + '_' + d.podcast_id;
+      }
+
+      allow read, delete: if false;
+      allow create: if isOwnConvertedListen(request.resource.data);
+      allow update: if isOwnConvertedListen(request.resource.data)
+        && resource.data.timestamp < request.time - duration.value(1, 'd')
+        && request.resource.data.podcast_id == resource.data.podcast_id
+        && request.resource.data.user_guid == resource.data.user_guid;
+    }
+    match /podcast_audit_state/{stateId} {
+      allow read, write, delete, create: if false;
+    }
     match /admin/{adminuid} {
       allow read:if request.auth != null 
       // && get(/databases/$(database)/documents/admin/$(request.auth.uid)).data.isAdmin == true;
@@ -385,6 +417,13 @@ service cloud.firestore {
     
     match /popular_books_v2/{popular_books} {
       allow read: if true;
+    }
+
+    // Written only by popularPodcastsV1. Public like popular_books_v2: new
+    // listeners browsing as guests see the same ranking.
+    match /popular_podcasts_v2/{ranking} {
+      allow read: if true;
+      allow write: if false;
     }
     
     

@@ -25,4 +25,7 @@ export { downloadHttpV3 } from "./functions/downloads/downloadHttpV3";
 export { streamHttp } from "./functions/downloads/streamHttp";
 export { sampleHttp } from "./functions/downloads/sampleHttp";
 export { mostPopularBooksV3 } from "./functions/popularBooks/mostPopularBooksV3";
+export { popularPodcastsV1 } from "./functions/podcasts/popularPodcastsV1";
+export { podcastFollowAuditTrigger } from "./functions/podcasts/podcastFollowAuditTrigger";
+export { podcastConvertAuditTrigger } from "./functions/podcasts/podcastConvertAuditTrigger";
 export { reportIssue } from "./functions/issues/reportIssue";

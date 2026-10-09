@@ -12,7 +12,8 @@
     "logs": "firebase functions:log",
     "test:rules": "bash scripts/emulator/with-java.sh firebase emulators:exec --config firebase.rules-test.json --only firestore --project demo-mantooq 'node --test test/rules/*.test.js'",
     "emulators": "bash scripts/emulator/start.sh",
-    "emulators:seed": "node scripts/emulator/seed.mjs"
+    "emulators:seed": "node scripts/emulator/seed.mjs",
+    "backfill:podcast-audit": "node scripts/backfill/podcast-audit.mjs"
   },
   "engines": {
     "node": "22"

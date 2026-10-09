@@ -20,6 +20,7 @@ const {
   query,
   where,
   Timestamp,
+  serverTimestamp,
   setLogLevel,
 } = require("firebase/firestore");
 
@@ -272,6 +273,148 @@ describe("shared_collections", () => {
     await assertFails(
       getDocs(query(collection(asUser("user-1"), "shared_collections"), where("enabled", "==", true))),
     );
+  });
+});
+
+describe("podcast audit events", () => {
+  const paths = [
+    "podcast_audit/follow_user-1_p-920666",
+    "podcast_audit/listen_user-1_p-920666",
+    "converted_podcast_audit/convert_user-1_p-920666",
+    "podcast_audit_state/daily",
+  ];
+  const event = (path) =>
+    path.startsWith("podcast_audit_state")
+      ? { lastRunAt: Timestamp.now() }
+      : {
+          podcast_id: "p-920666",
+          ...(path.startsWith("converted") ? { book_guid: "book-guid-1" } : {}),
+          user_guid: "user-1",
+          action: path.split("/")[1].split("_")[0],
+          timestamp: serverTimestamp(),
+        };
+
+  test("no client creates an event or the job state, the owner and admins included", async () => {
+    for (const uid of ["user-1", "admin-1"]) {
+      for (const path of paths) {
+        await assertFails(setDoc(doc(asUser(uid), path), event(path)));
+      }
+    }
+    await assertFails(setDoc(doc(asGuest(), paths[0]), event(paths[0])));
+  });
+
+  test("no client reads, updates or deletes an event or the job state", async () => {
+    await env.withSecurityRulesDisabled(async (context) => {
+      for (const path of paths) {
+        await setDoc(doc(context.firestore(), path), { ...event(path), timestamp: Timestamp.now() });
+      }
+    });
+
+    for (const uid of ["user-1", "admin-1"]) {
+      const db = asUser(uid);
+      for (const path of paths) {
+        await assertFails(getDoc(doc(db, path)));
+        await assertFails(updateDoc(doc(db, path), { podcast_id: "1" }));
+        await assertFails(deleteDoc(doc(db, path)));
+      }
+      for (const name of ["podcast_audit", "converted_podcast_audit", "podcast_audit_state"]) {
+        await assertFails(getDocs(collection(db, name)));
+      }
+    }
+  });
+
+  describe("converted podcast listens written by the app", () => {
+    const listenPath = "converted_podcast_audit/listen_user-1_p-920666";
+    const listen = (overrides = {}) => ({
+      podcast_id: "p-920666",
+      book_guid: "book-guid-1",
+      user_guid: "user-1",
+      action: "listen",
+      timestamp: serverTimestamp(),
+      ...overrides,
+    });
+    const seedListen = async (timestamp) => {
+      await env.withSecurityRulesDisabled(async (context) => {
+        await setDoc(doc(context.firestore(), listenPath), { ...listen(), timestamp });
+      });
+    };
+
+    test("a user creates their own listen", async () => {
+      await assertSucceeds(setDoc(doc(asUser("user-1"), listenPath), listen()));
+    });
+
+    test("a second write within a day is refused", async () => {
+      const db = asUser("user-1");
+      await assertSucceeds(setDoc(doc(db, listenPath), listen()));
+      await assertFails(setDoc(doc(db, listenPath), listen()));
+      await seedListen(Timestamp.fromMillis(Date.now() - 23 * 60 * 60 * 1000));
+      await assertFails(setDoc(doc(db, listenPath), listen()));
+    });
+
+    test("a listen more than a day old is re-dated, keeping its podcast and user", async () => {
+      await seedListen(Timestamp.fromMillis(Date.now() - 25 * 60 * 60 * 1000));
+      const db = asUser("user-1");
+      await assertFails(updateDoc(doc(db, listenPath), { timestamp: serverTimestamp(), podcast_id: "p-1" }));
+      await assertSucceeds(setDoc(doc(db, listenPath), listen({ book_guid: "book-guid-2" })));
+    });
+
+    test("another user, a guest or another id is refused", async () => {
+      await assertFails(setDoc(doc(asUser("user-2"), listenPath), listen()));
+      await assertFails(setDoc(doc(asUser("user-2"), listenPath), listen({ user_guid: "user-2" })));
+      await assertFails(setDoc(doc(asGuest(), listenPath), listen()));
+
+      const db = asUser("user-1");
+      await assertFails(setDoc(doc(db, "converted_podcast_audit/listen_user-1_p-1"), listen()));
+      await assertFails(setDoc(doc(db, "converted_podcast_audit/listen_user-1_920666"), listen()));
+      await assertFails(setDoc(doc(db, "converted_podcast_audit/listen_user-2_p-920666"), listen()));
+      await assertFails(setDoc(doc(db, "converted_podcast_audit/user-1_p-920666"), listen()));
+    });
+
+    test("a client-chosen timestamp, a wrong action or a bad field set is refused", async () => {
+      const db = asUser("user-1");
+      const { book_guid, ...withoutBook } = listen();
+      const bad = [
+        listen({ timestamp: Timestamp.now() }),
+        listen({ timestamp: Timestamp.fromMillis(Date.UTC(2026, 0, 1)) }),
+        listen({ action: "convert" }),
+        listen({ action: "follow" }),
+        listen({ extra: 1 }),
+        withoutBook,
+        listen({ book_guid: "" }),
+        listen({ book_guid: 5 }),
+      ];
+      for (const data of bad) {
+        await assertFails(setDoc(doc(db, listenPath), data));
+      }
+      await assertFails(
+        setDoc(doc(db, "converted_podcast_audit/convert_user-1_p-920666"), listen({ action: "convert" })),
+      );
+    });
+
+    test("the owner cannot read, list or delete their listen", async () => {
+      await seedListen(Timestamp.now());
+      const db = asUser("user-1");
+      await assertFails(getDoc(doc(db, listenPath)));
+      await assertFails(getDocs(collection(db, "converted_podcast_audit")));
+      await assertFails(
+        getDocs(query(collection(db, "converted_podcast_audit"), where("user_guid", "==", "user-1"))),
+      );
+      await assertFails(deleteDoc(doc(db, listenPath)));
+    });
+  });
+
+  test("the rankings are readable by anyone and written by nobody", async () => {
+    await env.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "popular_podcasts_v2/popular_podcasts"), { popular_podcasts: [] });
+    });
+
+    await assertSucceeds(getDoc(doc(asUser("user-1"), "popular_podcasts_v2/popular_podcasts")));
+    await assertSucceeds(getDoc(doc(asUser("user-1"), "popular_podcasts_v2/popular_converted_podcasts")));
+    await assertSucceeds(getDoc(doc(asGuest(), "popular_podcasts_v2/popular_podcasts")));
+
+    await assertFails(setDoc(doc(asUser("user-1"), "popular_podcasts_v2/popular_podcasts"), { popular_podcasts: [] }));
+    await assertFails(setDoc(doc(asUser("admin-1"), "popular_podcasts_v2/popular_podcasts"), { popular_podcasts: [] }));
+    await assertFails(deleteDoc(doc(asUser("user-1"), "popular_podcasts_v2/popular_podcasts")));
   });
 });
 
