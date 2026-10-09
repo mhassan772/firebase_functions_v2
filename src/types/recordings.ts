@@ -36,6 +36,12 @@ export interface AppSettings {
   mostPopularBooksDays: number;
   numberOfMostPopularBooksToReturn: number;
   numberOfDaysToDeleteMostPopularBooksAfter: number;
+  /** Days of podcast audit records the podcast rankings count. Defaults to 60. */
+  popularPodcastsDays?: number;
+  /** Days podcast audit records are kept before pruning. Defaults to 65, never below the window plus a day. */
+  popularPodcastsAuditRetentionDays?: number;
+  /** Entries kept in each podcast ranking. Defaults to 50. */
+  numberOfPopularPodcastsToReturn?: number;
 }
 
 export type Narrators = {
