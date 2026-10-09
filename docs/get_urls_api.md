@@ -66,19 +66,11 @@ Content-Type: application/json
 | `books` | Array | Yes | Array of book objects to fetch URLs for |
 | `books[].bookGuid` | String | Yes | Unique identifier of the book |
 | `books[].quality` | Number | Yes | Audio quality in kbps (64, 128, or 256) |
-| `books[].reason` | String | Yes | Purpose of request - determines which counter to increment |
+| `books[].reason` | String | Yes | Purpose of the request: `download`, `stream` or `sample`. It is validated but not recorded |
 | `platform` | String | Yes | Target platform - determines file format |
-| `deviceId` | String | No | Device identifier for audit tracking |
+| `deviceId` | String | No | Device identifier. Accepted for older apps; not stored |
 | `build_number` | String | No | Client app build number (reserved for future minimum build check) |
 | `uid` | String | NoAuth only | Firebase user ID (only for `getUrlsNoAuth`) |
-
-### Reason Effects
-
-| Reason | Counter Incremented |
-|--------|---------------------|
-| `download` | `num_downloads` |
-| `stream` | `num_streams` |
-| `sample` | `num_samples` |
 
 ### Platform Effects
 
@@ -353,18 +345,6 @@ curl -X POST \
 
 2. **Batch Processing**: All books are processed in parallel for optimal speed. If any book fails (not found, no recordings, etc.), the entire request fails.
 
-3. **Audit Logging**: Each successful request logs to `books_download_audit` collection with:
-   - `book_guid`
-   - `book_name`
-   - `book_id_reference`
-   - `timestamp`
-   - `user_guid`
-   - `device_id`
-   - `reason`
+3. **Nothing is recorded**: The endpoint only reads Firestore. Book popularity comes from listening time, as described in `docs/book-chart.md`.
 
-4. **Counter Increment**: Based on the `reason` field, the appropriate counter is atomically incremented using a Firestore transaction:
-   - `download` → `num_downloads`
-   - `stream` → `num_streams`
-   - `sample` → `num_samples`
-
-5. **Email Verification**: Users must have a verified email to use this endpoint. Unverified users receive error code 608.
+4. **Email Verification**: Users must have a verified email to use this endpoint. Unverified users receive error code 608.

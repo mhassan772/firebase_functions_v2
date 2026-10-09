@@ -6,7 +6,6 @@ import { handleGetUrls } from "../src/handler";
 import {
   createEnv,
   createSigningKey,
-  fakeContext,
   FakeGoogle,
   FakeKV,
   installFakeGoogle,
@@ -73,17 +72,14 @@ describe("handleGetUrls", () => {
     const headers: Record<string, string> = { "content-type": "application/json" };
     const auth = init.auth === undefined ? `Bearer ${token}` : init.auth;
     if (auth !== null) headers.authorization = auth;
-    const { ctx, settle } = fakeContext();
     const response = await handleGetUrls(
       new Request("https://example.test/getUrls", {
         method: init.method ?? "POST",
         headers,
         body: init.method === "GET" ? undefined : typeof body === "string" ? body : JSON.stringify(body),
       }),
-      env,
-      ctx
+      env
     );
-    await settle();
     return { status: response.status, body: (await response.json()) as any };
   }
 
@@ -112,40 +108,19 @@ describe("handleGetUrls", () => {
     expect(body.data.bookB.recordings[0]).toMatchObject({ ext: "m4a", url: `${DOMAIN}/b/128/1.m4a` });
   });
 
-  it("increments each distinct counter once and writes one audit doc per item", async () => {
-    await call({
+  it("writes nothing to Firestore", async () => {
+    const { status } = await call({
       books: [
         { bookGuid: "bookA", quality: 64, reason: "stream" },
         { bookGuid: "bookA", quality: 64, reason: "download" },
-        { bookGuid: "bookA", quality: 64, reason: "stream" },
+        { bookGuid: "bookB", quality: 128, reason: "sample" },
       ],
       platform: "android",
       deviceId: "device-1",
     });
 
-    expect(google.commits).toHaveLength(1);
-    const writes = google.commits[0].writes;
-    const transforms = writes.filter((write: any) => write.transform);
-    const audits = writes.filter((write: any) => write.update);
-
-    expect(transforms).toHaveLength(1);
-    expect(transforms[0].transform.fieldTransforms).toEqual([
-      { fieldPath: "num_streams", increment: { integerValue: "1" } },
-      { fieldPath: "num_downloads", increment: { integerValue: "1" } },
-    ]);
-    expect(audits).toHaveLength(3);
-    expect(audits[0].update.name).toMatch(/\/books_download_audit\/[A-Za-z0-9]{20}$/);
-    expect(audits[0].update.fields).toEqual({
-      book_guid: { stringValue: "bookA" },
-      book_name: { stringValue: "Book A" },
-      book_id_reference: { integerValue: "643" },
-      user_guid: { stringValue: "user-1" },
-      device_id: { stringValue: "device-1" },
-      reason: { stringValue: "stream" },
-    });
-    expect(audits[0].updateTransforms).toEqual([
-      { fieldPath: "timestamp", setToServerValue: "REQUEST_TIME" },
-    ]);
+    expect(status).toBe(200);
+    expect(google.commits).toHaveLength(0);
   });
 
   it.each([

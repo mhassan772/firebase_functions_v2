@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { autoId, decodeFields, encodeValue } from "../src/google/firestore";
+import { decodeFields, encodeValue } from "../src/google/firestore";
 
 describe("decodeFields", () => {
   it("decodes nested maps, arrays and numbers like the Admin SDK", () => {
@@ -39,13 +39,5 @@ describe("encodeValue", () => {
     expect(encodeValue(1.5)).toEqual({ doubleValue: 1.5 });
     expect(encodeValue(undefined)).toEqual({ nullValue: null });
     expect(encodeValue("643")).toEqual({ stringValue: "643" });
-  });
-});
-
-describe("autoId", () => {
-  it("returns 20 alphanumeric characters", () => {
-    for (let i = 0; i < 100; i++) {
-      expect(autoId()).toMatch(/^[A-Za-z0-9]{20}$/);
-    }
   });
 });

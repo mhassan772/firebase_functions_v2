@@ -1,12 +1,11 @@
 # getUrls Worker
 
-A Cloudflare Worker that serves `getUrls` for users who cannot reach Google. Its request, responses and Firestore writes match the Firebase `getUrls` function. Both share `src/shared/getUrlsCore.ts`, so a change to the contract goes there.
+A Cloudflare Worker that serves `getUrls` for users who cannot reach Google. Its request and responses match the Firebase `getUrls` function, and like it, it only reads Firestore. Both share `src/shared/getUrlsCore.ts`, so a change to the contract goes there.
 
 ## Differences from the Firebase function
 
 - **Expired ID tokens.** A token is accepted after it expires, for as long as its account is not deleted, disabled or revoked, because users who cannot reach Google cannot refresh it. Google's signing keys are kept in KV with no expiry so old tokens can still be verified.
 - **Disabled and revoked accounts.** Every request looks up the account, and a disabled account or revoked sessions get a 401.
-- **Usage writes.** Counters and audit docs are written after the response is sent. A write failure is logged and the user still gets their URLs.
 - **Requests.** POST only. A body that is not JSON gets a 400.
 
 ## One-time setup

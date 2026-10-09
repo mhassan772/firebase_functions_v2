@@ -1,23 +1,19 @@
 import {
   ApiErrorBody,
   BookSource,
-  buildAuditFields,
   buildGroupedResponse,
   buildSuccessResponse,
   emailNotVerifiedError,
-  getCounterField,
   GetUrlsError,
   notFoundUserError,
   validateGetUrlsRequest,
 } from "../../../src/shared/getUrlsCore";
-import { BookItem, GetUrlsRequest, Recording } from "../../../src/types";
+import { GetUrlsRequest, Recording } from "../../../src/types";
 import { AuthError, verifyFirebaseIdToken } from "./auth/firebaseIdToken";
 import { Env } from "./env";
 import { lookupAccount } from "./google/identityToolkit";
 import {
-  autoId,
   batchGet,
-  commit,
   decodeFields,
   documentName,
   encodeValue,
@@ -29,15 +25,10 @@ import {
 const IN_FILTER_LIMIT = 30;
 
 /**
- * Serves getUrls with the same request, responses and Firestore writes as the Firebase function.
- *
- * The usage writes run after the response is sent, so a write failure is only logged.
+ * Serves getUrls with the same request and responses as the Firebase function. Like it, it only
+ * reads Firestore.
  */
-export async function handleGetUrls(
-  request: Request,
-  env: Env,
-  ctx: ExecutionContext
-): Promise<Response> {
+export async function handleGetUrls(request: Request, env: Env): Promise<Response> {
   if (request.method !== "POST") {
     return json(405, { code: 405, message: "Method not allowed. Use POST." });
   }
@@ -108,12 +99,6 @@ export async function handleGetUrls(
     }));
     const data = buildGroupedResponse(getUrlsRequest, sources);
 
-    ctx.waitUntil(
-      recordUsage(env, getUrlsRequest, bookDocs, uid).catch((error) =>
-        console.error(JSON.stringify({ event: "getUrls.recordUsage.failed", uid, error: String(error) }))
-      )
-    );
-
     return json(200, buildSuccessResponse(data));
   } catch (error) {
     if (error instanceof GetUrlsError) {
@@ -174,56 +159,6 @@ async function readRecordings(
     }
   }
   return recordings;
-}
-
-/** Increments each book's counter for each distinct reason and writes one audit doc per item. */
-async function recordUsage(
-  env: Env,
-  request: GetUrlsRequest,
-  bookDocs: Map<string, FirestoreFields | null>,
-  uid: string
-): Promise<void> {
-  const counterFields = new Map<string, Set<string>>();
-  for (const item of request.books) {
-    const fields = counterFields.get(item.bookGuid) ?? new Set<string>();
-    fields.add(getCounterField(item.reason));
-    counterFields.set(item.bookGuid, fields);
-  }
-
-  const counterWrites = [...counterFields].map(([guid, fields]) => ({
-    transform: {
-      document: documentName(env, `books/${guid}`),
-      fieldTransforms: [...fields].map((fieldPath) => ({
-        fieldPath,
-        increment: { integerValue: "1" },
-      })),
-    },
-    currentDocument: { exists: true },
-  }));
-
-  const auditWrites = request.books.map((item: BookItem) => {
-    const book = decodeFields(bookDocs.get(item.bookGuid) ?? {});
-    const fields = buildAuditFields(
-      item.bookGuid,
-      book.name as string,
-      book.book_id_reference as string | number | undefined,
-      item.reason,
-      uid,
-      request.deviceId
-    );
-    return {
-      update: {
-        name: documentName(env, `books_download_audit/${autoId()}`),
-        fields: Object.fromEntries(
-          Object.entries(fields).map(([key, value]) => [key, encodeValue(value)])
-        ),
-      },
-      updateTransforms: [{ fieldPath: "timestamp", setToServerValue: "REQUEST_TIME" }],
-      currentDocument: { exists: false },
-    };
-  });
-
-  await commit(env, [...counterWrites, ...auditWrites]);
 }
 
 function unexpected(error: unknown): Response {

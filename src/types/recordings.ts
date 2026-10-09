@@ -33,9 +33,16 @@ export interface RecordingUrlsResponse {
 export interface AppSettings {
   storageBucketNameFirebase: string;
   mp3CloudFrontSigningPrivateKeyFileName: string;
-  mostPopularBooksDays: number;
-  numberOfMostPopularBooksToReturn: number;
-  numberOfDaysToDeleteMostPopularBooksAfter: number;
+  /** Days of listening the popular books chart counts. Defaults to 30. */
+  mostPopularBooksDays?: number;
+  /** Books kept in the popular books chart. Defaults to 100. */
+  numberOfMostPopularBooksToReturn?: number;
+  /** No longer read: the download audit it pruned is no longer written. */
+  numberOfDaysToDeleteMostPopularBooksAfter?: number;
+  /** Lifetime listening on a book, in seconds, that makes someone its listener. Defaults to 300. */
+  popularBooksMinListenSeconds?: number;
+  /** Below this many books the previous popular books chart is kept. Defaults to 20. */
+  popularBooksMinChartSize?: number;
   /** Days of podcast audit records the podcast rankings count. Defaults to 60. */
   popularPodcastsDays?: number;
   /** Days podcast audit records are kept before pruning. Defaults to 65, never below the window plus a day. */
@@ -82,23 +89,4 @@ export interface Recording {
     "32kb_url": string;
     "64kb_url": string;
   };
-}
-
-export interface BookDownloadRecord {
-  book_guid: string;
-  author_details: { author_guid: string; author_name: string };
-  book_id_reference: number;
-  category_details: { category_guid: string; category_name: string };
-  date_added: Date;
-  description: string;
-  goodreads_url: string;
-  is_book_hidden: boolean;
-  name: string;
-  narrators: [Narrators];
-  num_downloads: number;
-  num_votes_for_recording: number;
-  picture_url: { highres_url: string; thumbnail_url: string };
-  publisher: string;
-  tags_list: [string];
-  verification_status: string;
 }

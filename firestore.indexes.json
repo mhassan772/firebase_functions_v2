@@ -112,6 +112,20 @@
           "order": "ASCENDING"
         }
       ]
+    },
+    {
+      "collectionGroup": "book_listeners",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "qualifies",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "addedToBook",
+          "order": "ASCENDING"
+        }
+      ]
     }
   ],
   "fieldOverrides": [

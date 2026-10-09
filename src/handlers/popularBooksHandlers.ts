@@ -1,118 +1,189 @@
-import { DocumentData, DocumentReference, Timestamp } from "firebase-admin/firestore";
+import * as functions from "firebase-functions";
+import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { admin } from "../config/admin";
-import { AppSettings, Book, BookDownloadRecord } from "../types/recordings";
+import { BATCH_WRITE_LIMIT, forEachPage } from "./auditPaging";
+import {
+  BOOK_LISTENERS_COLLECTION,
+  ListenerRecord,
+  RankedBook,
+  rankBooks,
+  resolvePopularBooksSettings,
+} from "./bookListenHandlers";
 import { getSettings } from "./recordingUrlHandlers";
 
-// Ported from the deployed source of mostPopularBooksV3. The lodash and
-// date-fns helpers it used are replaced by the native equivalents below.
+const DAY_MS = 24 * 60 * 60 * 1000;
+/** Lines read per page while ranking; they are small. */
+const LINE_PAGE_SIZE = 5000;
+/** Lines waiting to be added to their books, read per pass. */
+const PENDING_PAGE_SIZE = 1000;
+/** Books checked against the catalog per read. */
+const BOOK_LOOKUP_SIZE = 100;
 
 /**
- * Ranks books by recent downloads, stores the ranking, then deletes old audit records.
+ * Adds listeners not yet counted to each book's `listeners_count`, then ranks books by people
+ * who listened in the window and stores the chart.
  */
 export async function handleMostPopularBooks(): Promise<void> {
-  const settings = await getSettings();
-  const popularBooks = await getPopularBooks(settings);
-  await savePopularBooks(popularBooks);
-  await deleteBookAuditRecords(settings.numberOfDaysToDeleteMostPopularBooksAfter);
-}
+  const settings = resolvePopularBooksSettings(await getSettings());
+  const runStart = new Date();
+  const inCatalog = catalogLookup();
 
-async function getPopularBooks(settings: AppSettings): Promise<BookDownloadRecord[]> {
-  const querySnapshot = await admin
-    .firestore()
-    .collection("books_download_audit")
-    .where("timestamp", ">", daysAgo(settings.mostPopularBooksDays))
-    .get();
+  const added = await addNewListenersToBooks(inCatalog);
 
-  const downloadRecords = querySnapshot.docs.map((doc) => doc.data());
-  const recordsWithCount = await groupDownloadsWithCount(downloadRecords);
-  return takeFirst(recordsWithCount, settings.numberOfMostPopularBooksToReturn);
-}
-
-async function savePopularBooks(records: BookDownloadRecord[]): Promise<void> {
-  const popularBooks = records.map((record) => ({
-    book_guid: record.book_guid,
-    num_downloads: record.num_downloads,
-  }));
-  await admin.firestore().collection("popular_books_v2").doc("popular_books").set({
-    popular_books: popularBooks,
-    date_added: Timestamp.now(),
-    date_updated: Timestamp.now(),
+  const windowStart = new Date(runStart.getTime() - settings.windowDays * DAY_MS);
+  const ranking = rankBooks(await readLinesSince(windowStart));
+  const chart = await keepCatalogBooks(ranking, settings.listLength, inCatalog);
+  const saved = chart.length >= settings.minChartSize;
+  if (saved) {
+    await admin.firestore().collection("popular_books_v2").doc("popular_books").set({
+      popular_books: chart,
+      date_added: Timestamp.now(),
+      date_updated: Timestamp.now(),
+    });
+  } else {
+    functions.logger.warn(
+      `popular books: only ${chart.length} book(s) ranked, below ${settings.minChartSize}; kept the previous chart`,
+    );
+  }
+  functions.logger.info("popular books rebuilt", {
+    ...added,
+    windowDays: settings.windowDays,
+    rankedBooks: ranking.length,
+    chart: chart.length,
+    saved,
   });
 }
 
-async function deleteBookAuditRecords(limitDays: number): Promise<void> {
-  const querySnapshot = await admin
-    .firestore()
-    .collection("books_download_audit")
-    .where("timestamp", "<", daysAgo(limitDays))
-    .get();
+/**
+ * Adds each qualifying line not counted yet to its book once.
+ *
+ * The increment and the flags on the lines it counts are one batch, so a crash or a repeated run
+ * never counts anyone twice. Books outside the catalog (converted podcasts, file books) get their
+ * lines flagged without an increment, so they are not read again.
+ */
+async function addNewListenersToBooks(
+  inCatalog: (guids: string[]) => Promise<Set<string>>,
+): Promise<{ newListeners: number; booksIncremented: number; outsideCatalog: number }> {
+  const firestore = admin.firestore();
+  const query = firestore
+    .collection(BOOK_LISTENERS_COLLECTION)
+    .where("qualifies", "==", true)
+    .where("addedToBook", "==", false)
+    .select("book_guid");
+  const totals = { newListeners: 0, booksIncremented: 0, outsideCatalog: 0 };
+  // Each pass flags what it read, so the next pass starts from the front again.
+  for (;;) {
+    const snapshot = await query.limit(PENDING_PAGE_SIZE).get();
+    if (snapshot.empty) {
+      return totals;
+    }
+    const byBook = new Map<string, FirebaseFirestore.DocumentReference[]>();
+    for (const doc of snapshot.docs) {
+      const guid = String(doc.get("book_guid") ?? "");
+      byBook.set(guid, [...(byBook.get(guid) ?? []), doc.ref]);
+    }
+    const catalog = await inCatalog([...byBook.keys()].filter((guid) => guid !== ""));
 
-  await batchDeleteRecords(querySnapshot.docs.map((doc) => doc.ref));
+    let batch = firestore.batch();
+    let operations = 0;
+    const commits: Promise<unknown>[] = [];
+    for (const [guid, refs] of byBook) {
+      const counted = catalog.has(guid);
+      // A batch holds the increment and the lines it counts, so a long group is split.
+      for (let i = 0; i < refs.length; i += BATCH_WRITE_LIMIT - 1) {
+        const chunk = refs.slice(i, i + BATCH_WRITE_LIMIT - 1);
+        if (operations + chunk.length + 1 > BATCH_WRITE_LIMIT) {
+          commits.push(batch.commit());
+          batch = firestore.batch();
+          operations = 0;
+        }
+        if (counted) {
+          batch.update(firestore.collection("books").doc(guid), { listeners_count: FieldValue.increment(chunk.length) });
+          operations++;
+        }
+        chunk.forEach((ref) => batch.update(ref, { addedToBook: true }));
+        operations += chunk.length;
+      }
+      if (counted) {
+        totals.newListeners += refs.length;
+        totals.booksIncremented++;
+      } else {
+        totals.outsideCatalog += refs.length;
+      }
+    }
+    if (operations > 0) {
+      commits.push(batch.commit());
+    }
+    await Promise.all(commits);
+    if (snapshot.size < PENDING_PAGE_SIZE) {
+      return totals;
+    }
+  }
 }
 
-async function batchDeleteRecords(docs: DocumentReference[]): Promise<void> {
-  const batch = admin.firestore().batch();
-  docs.forEach((doc) => batch.delete(doc));
-  await batch.commit();
+async function readLinesSince(since: Date): Promise<ListenerRecord[]> {
+  const query = admin
+    .firestore()
+    .collection(BOOK_LISTENERS_COLLECTION)
+    .where("updatedAt", ">", Timestamp.fromDate(since))
+    .orderBy("updatedAt")
+    // `updatedAt` must be selected: paging continues after the last document by its orderBy
+    // field, and a cursor built from a document without it fails.
+    .select("book_guid", "qualifies", "updatedAt");
+  const records: ListenerRecord[] = [];
+  await forEachPage(query, LINE_PAGE_SIZE, (docs) => {
+    for (const doc of docs) {
+      records.push(doc.data());
+    }
+  });
+  return records;
+}
+
+/** The ranking without books missing from the catalog, cut to `limit`. */
+async function keepCatalogBooks(
+  ranking: RankedBook[],
+  limit: number,
+  inCatalog: (guids: string[]) => Promise<Set<string>>,
+): Promise<RankedBook[]> {
+  const chart: RankedBook[] = [];
+  for (let i = 0; i < ranking.length && chart.length < limit; i += BOOK_LOOKUP_SIZE) {
+    const page = ranking.slice(i, i + BOOK_LOOKUP_SIZE);
+    const catalog = await inCatalog(page.map((entry) => entry.book_guid));
+    for (const entry of page) {
+      if (catalog.has(entry.book_guid) && chart.length < limit) {
+        chart.push(entry);
+      }
+    }
+  }
+  return chart;
 }
 
 /**
- * Groups audit records by book, skips books that no longer exist, and sorts by download count.
+ * Which guids have a `books` document, remembered for the run so the two steps share reads.
+ *
+ * Only the name is fetched; the rest of a book document is not needed.
  */
-async function groupDownloadsWithCount(records: DocumentData[]): Promise<BookDownloadRecord[]> {
-  const countByBook = new Map<string, number>();
-  for (const record of records) {
-    const bookGuid = String(record.book_guid);
-    countByBook.set(bookGuid, (countByBook.get(bookGuid) ?? 0) + 1);
-  }
-
-  const downloadRecords: BookDownloadRecord[] = [];
-  for (const [bookGuid, count] of countByBook) {
-    const book = (await admin.firestore().collection("books").doc(bookGuid).get()).data() as Book | undefined;
-    if (!book) {
-      continue;
+function catalogLookup(): (guids: string[]) => Promise<Set<string>> {
+  const known = new Map<string, boolean>();
+  return async (guids) => {
+    const firestore = admin.firestore();
+    const unknown = [...new Set(guids)].filter((guid) => !known.has(guid));
+    // An id Firestore cannot address is never a catalog book, and reading it would throw.
+    for (const guid of unknown.filter((guid) => !isDocumentId(guid))) {
+      known.set(guid, false);
     }
-    downloadRecords.push({
-      book_guid: bookGuid,
-      author_details: {
-        author_guid: book.author_details.author_guid,
-        author_name: book.author_details.author_name,
-      },
-      book_id_reference: book.book_id_reference,
-      category_details: {
-        category_guid: book.category_details.category_guid,
-        category_name: book.category_details.category_name,
-      },
-      date_added: book.date_added,
-      description: book.description,
-      goodreads_url: book.goodreads_url,
-      is_book_hidden: book.is_book_hidden,
-      name: book.name,
-      narrators: book.narrators,
-      num_downloads: count,
-      num_votes_for_recording: book.num_votes_for_recording,
-      picture_url: {
-        highres_url: book.picture_url.highres_url,
-        thumbnail_url: book.picture_url.thumbnail_url,
-      },
-      publisher: book.publisher,
-      tags_list: book.tags_list,
-      verification_status: book.verification_status,
-    });
-  }
-  // Array.prototype.sort is stable, so ties keep first-seen order, as lodash orderBy did.
-  return downloadRecords.sort((a, b) => b.num_downloads - a.num_downloads);
+    const readable = unknown.filter(isDocumentId);
+    for (let i = 0; i < readable.length; i += BOOK_LOOKUP_SIZE) {
+      const page = readable.slice(i, i + BOOK_LOOKUP_SIZE);
+      const docs = await firestore.getAll(...page.map((guid) => firestore.collection("books").doc(guid)), {
+        fieldMask: ["name"],
+      });
+      docs.forEach((doc, j) => known.set(page[j], doc.exists));
+    }
+    return new Set(guids.filter((guid) => known.get(guid) === true));
+  };
 }
 
-/** Same as date-fns `subDays(new Date(), days)`. */
-function daysAgo(days: number): Date {
-  const date = new Date();
-  date.setDate(date.getDate() - days);
-  return date;
-}
-
-/** Same as lodash `take`: a missing count means 1. */
-function takeFirst<T>(items: T[], count: number | undefined): T[] {
-  const n = count === undefined ? 1 : Math.trunc(count);
-  return n < 1 ? [] : items.slice(0, n);
+function isDocumentId(id: string): boolean {
+  return id !== "" && id !== "." && id !== ".." && !id.includes("/") && !/^__.*__$/.test(id);
 }
