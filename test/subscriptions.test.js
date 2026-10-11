@@ -23,11 +23,27 @@ const {
 const {
   assertOwnershipClaimAllowed,
   buildMasterProjection,
+  buildSourceSummaries,
   googleOwnershipDocumentId,
   ownershipDocumentId,
   preserveMasterDeviceFields,
   shouldApplyIncomingState,
+  stateData,
+  stateDataToNormalized,
+  STATE_SLOTS,
+  MANUAL_SLOT_INDEX,
+  legacyManualDocumentId,
 } = require("../lib/services/subscriptions/persistence");
+const {
+  addMonthsEndOfDay,
+  endOfDayInZone,
+  replayGrants,
+  grantsFromData,
+  grantToData,
+  nextQueueGrantId,
+  activeGrantForQueue,
+  legacyExpires,
+} = require("../lib/services/subscriptions/manual");
 const {
   applyDeviceAction,
   deviceStateFromMaster,
@@ -308,7 +324,15 @@ test("master projection prefers active production then inactive recency", () => 
     autoRenewing: true,
     now: NOW,
   });
-  assert.equal(selectMasterState([sandbox, production]), production);
+  assert.equal(
+    selectMasterState([sandbox, production], { environmentPriority: true }),
+    production
+  );
+  // With the priority switched off (the live sandbox stage), dates alone decide.
+  assert.equal(
+    selectMasterState([sandbox, production], { environmentPriority: false }),
+    sandbox
+  );
 
   const oldInactive = { ...production, active: false, lastVerifiedAt: PAST };
   const newInactive = { ...sandbox, active: false, lastVerifiedAt: FUTURE };
@@ -573,4 +597,321 @@ test("callable errors do not expose raw store material", () => {
   );
   assert.equal(callable.code, "failed-precondition");
   assert.ok(!callable.message.includes(raw));
+});
+
+// ---------------------------------------------------------------------------
+// Manual grants
+// ---------------------------------------------------------------------------
+
+const CAIRO = "Africa/Cairo";
+
+function grant(overrides) {
+  return {
+    grantId: "g",
+    kind: "months",
+    months: 1,
+    base: "extend",
+    grantedAt: NOW,
+    grantedBy: "admin",
+    metadata: { grantSource: "admin_manual_add" },
+    status: "active",
+    ...overrides,
+  };
+}
+
+test("manual dates end at the last millisecond of the Cairo day", () => {
+  // 2026-01-01T00:00Z is already Jan 1 in Cairo (UTC+2); the day ends 21:59:59.999Z.
+  assert.equal(
+    endOfDayInZone(NOW, CAIRO).toISOString(),
+    "2026-01-01T21:59:59.999Z"
+  );
+  // 23:30Z on Jan 1 is 01:30 on Jan 2 in Cairo.
+  assert.equal(
+    endOfDayInZone(new Date("2026-01-01T23:30:00.000Z"), CAIRO).toISOString(),
+    "2026-01-02T21:59:59.999Z"
+  );
+  // Summer time (UTC+3): the day ends at 20:59:59.999Z.
+  assert.equal(
+    endOfDayInZone(new Date("2026-07-10T12:00:00.000Z"), CAIRO).toISOString(),
+    "2026-07-10T20:59:59.999Z"
+  );
+});
+
+test("adding months follows setMonth overflow and lands on the Cairo end of day", () => {
+  assert.equal(
+    addMonthsEndOfDay(NOW, 3, CAIRO).toISOString(),
+    "2026-04-01T21:59:59.999Z"
+  );
+  // Jan 31 + 1 month rolls into March, as the old portal did.
+  assert.equal(
+    addMonthsEndOfDay(new Date("2026-01-31T10:00:00.000Z"), 1, CAIRO).toISOString(),
+    "2026-03-03T21:59:59.999Z"
+  );
+  assert.equal(
+    addMonthsEndOfDay(NOW, 12, CAIRO).toISOString(),
+    "2027-01-01T21:59:59.999Z"
+  );
+});
+
+test("replay: a grant counts from its own date, an extension from the running end", () => {
+  const first = grant({ grantId: "a", months: 3, grantedAt: NOW });
+  const extension = grant({
+    grantId: "b",
+    months: 12,
+    base: "extend",
+    grantedAt: new Date("2026-02-01T00:00:00.000Z"),
+  });
+  const replay = replayGrants([extension, first], CAIRO);
+  assert.equal(replay.activeGrantCount, 2);
+  // 3 months from Jan 1 ends Apr 1; 12 more from there ends Apr 1 next year.
+  // Egypt's summer time starts on the last Friday of April, so Apr 1 is still UTC+2.
+  assert.equal(replay.expiresAt.toISOString(), "2027-04-01T21:59:59.999Z");
+  assert.equal(replay.latestActive.grantId, "b");
+
+  const fromToday = replayGrants([first, { ...extension, base: "today" }], CAIRO);
+  assert.equal(fromToday.expiresAt.toISOString(), "2027-02-01T21:59:59.999Z");
+});
+
+test("replay: a lapsed grant does not anchor a later one, and absolute grants only move the end forward", () => {
+  const old = grant({ grantId: "a", months: 1, grantedAt: new Date("2025-01-01T00:00:00.000Z") });
+  const later = grant({ grantId: "b", months: 2, grantedAt: NOW });
+  assert.equal(
+    replayGrants([old, later], CAIRO).expiresAt.toISOString(),
+    "2026-03-01T21:59:59.999Z"
+  );
+
+  const absolute = grant({
+    grantId: "legacy_x",
+    kind: "absolute",
+    expiresAt: new Date("2026-02-15T21:59:59.999Z"),
+    grantedAt: PAST,
+  });
+  // The later extension counts from the baseline's end (Feb 15), not from its own date.
+  assert.equal(
+    replayGrants([absolute, later], CAIRO).expiresAt.toISOString(),
+    "2026-04-15T21:59:59.999Z"
+  );
+  // A far baseline: the extension still adds its two months on top of it.
+  const farAbsolute = { ...absolute, expiresAt: new Date("2030-01-01T21:59:59.999Z") };
+  assert.equal(
+    replayGrants([farAbsolute, later], CAIRO).expiresAt.toISOString(),
+    "2030-03-01T21:59:59.999Z"
+  );
+});
+
+test("replay: reversing a grant preserves the others' duration, re-anchored", () => {
+  const jan = grant({ grantId: "jan", months: 3, grantedAt: new Date("2025-01-01T00:00:00.000Z") });
+  const feb = grant({ grantId: "feb", months: 1, grantedAt: new Date("2025-02-01T00:00:00.000Z") });
+  // Together: Jan 1 + 3 = Apr 1; Feb extends from Apr 1 by 1 = May 1.
+  assert.equal(
+    replayGrants([jan, feb], CAIRO).expiresAt.toISOString(),
+    "2025-05-01T20:59:59.999Z"
+  );
+  // Reverse January: February keeps its one month, from its own date.
+  assert.equal(
+    replayGrants([{ ...jan, status: "reversed" }, feb], CAIRO).expiresAt.toISOString(),
+    "2025-03-01T21:59:59.999Z"
+  );
+  // Reverse February: January alone.
+  assert.equal(
+    replayGrants([jan, { ...feb, status: "reversed" }], CAIRO).expiresAt.toISOString(),
+    "2025-04-01T21:59:59.999Z"
+  );
+});
+
+test("replay: revoked grants give nothing, so the next grant counts from its own date", () => {
+  const revoked = grant({ grantId: "a", months: 12, status: "revoked", grantedAt: PAST });
+  assert.equal(replayGrants([revoked], CAIRO).expiresAt, undefined);
+  assert.equal(replayGrants([revoked], CAIRO).activeGrantCount, 0);
+  const fresh = grant({ grantId: "b", months: 1, grantedAt: FUTURE });
+  assert.equal(
+    replayGrants([revoked, fresh], CAIRO).expiresAt.toISOString(),
+    "2026-03-01T21:59:59.999Z"
+  );
+});
+
+test("replay: adjusting a grant changes only its own months", () => {
+  const a = grant({ grantId: "a", months: 3, grantedAt: NOW });
+  const b = grant({ grantId: "b", months: 1, grantedAt: new Date("2026-02-01T00:00:00.000Z") });
+  assert.equal(
+    replayGrants([a, b], CAIRO).expiresAt.toISOString(),
+    "2026-05-01T20:59:59.999Z"
+  );
+  assert.equal(
+    replayGrants([{ ...a, months: 6 }, b], CAIRO).expiresAt.toISOString(),
+    "2026-08-01T20:59:59.999Z"
+  );
+});
+
+test("queue grant ids carry a revision, and only an active one blocks a re-approval", () => {
+  const queue = { collection: "subscriptions_to_be_approved", id: "req-1" };
+  assert.equal(nextQueueGrantId([], queue), "subscriptions_to_be_approved_req-1_r1");
+  const r1 = grant({ grantId: "subscriptions_to_be_approved_req-1_r1", queue });
+  assert.equal(activeGrantForQueue([r1], queue), r1);
+  assert.equal(nextQueueGrantId([r1], queue), "subscriptions_to_be_approved_req-1_r2");
+  assert.equal(activeGrantForQueue([{ ...r1, status: "reversed" }], queue), undefined);
+  // Another request's grants never collide.
+  assert.equal(
+    nextQueueGrantId([r1], { ...queue, id: "req-10" }),
+    "subscriptions_to_be_approved_req-10_r1"
+  );
+});
+
+test("grants round-trip through Firestore data and drop malformed entries", () => {
+  const original = grant({
+    grantId: "x",
+    kind: "absolute",
+    expiresAt: FUTURE,
+    queue: { collection: "subscriptions_to_be_approved", id: "q" },
+    statusChangedAt: NOW,
+    statusReason: "why",
+    metadata: { grantSource: "egypt_request", amountPaid: 200, paymentMethod: "VodafoneCash" },
+  });
+  delete original.months;
+  const [back] = grantsFromData([grantToData(original), null, { grantId: 5 }, { grantId: "no-date" }]);
+  assert.deepEqual(back, original);
+});
+
+test("a manual slot reads back with activity derived from the date, never the stored flag", () => {
+  const manual = {
+    active: true,
+    status: "active",
+    platform: "manual",
+    productId: "manual_grant",
+    expiresAt: PAST,
+    autoRenewing: false,
+    inGracePeriod: false,
+    environment: "production",
+    lastStoreEventAt: PAST,
+    lastVerifiedAt: PAST,
+    manual: { activeGrantCount: 1, grantSource: "egypt_request", ledgerRevision: 3 },
+  };
+  const data = stateData("uid", manual, Timestamp.fromDate(PAST), Timestamp.fromDate(PAST));
+  assert.equal(data.active, true);
+  const lapsed = stateDataToNormalized(data, NOW);
+  assert.equal(lapsed.active, false);
+  assert.equal(lapsed.status, "expired");
+  assert.deepEqual(lapsed.manual, { activeGrantCount: 1, grantSource: "egypt_request", ledgerRevision: 3 });
+
+  const live = stateDataToNormalized(
+    stateData("uid", { ...manual, expiresAt: FUTURE }, Timestamp.fromDate(PAST), Timestamp.fromDate(PAST)),
+    NOW
+  );
+  assert.equal(live.active, true);
+  assert.equal(live.status, "active");
+
+  const revoked = stateDataToNormalized(
+    stateData("uid", { ...manual, status: "revoked", expiresAt: FUTURE }, Timestamp.fromDate(PAST), Timestamp.fromDate(PAST)),
+    NOW
+  );
+  assert.equal(revoked.active, false);
+  assert.equal(revoked.status, "revoked");
+});
+
+test("the manual slot is the fifth slot and its document id follows the slot scheme", () => {
+  assert.equal(STATE_SLOTS.length, 5);
+  assert.deepEqual(STATE_SLOTS[MANUAL_SLOT_INDEX], { platform: "manual", environment: "production" });
+  assert.equal(
+    legacyManualDocumentId("hi3CmRh1nudfKVNjCDoXK8yH4Tl2"),
+    "011edb69606baa720915c24ad1b2995434dfac6b0164b02e3ee1aca61ccf183f"
+  );
+});
+
+test("master projection: an active manual grant competes with store states on dates", () => {
+  const manual = {
+    active: true,
+    status: "active",
+    platform: "manual",
+    productId: "manual_grant",
+    expiresAt: new Date("2026-03-01T21:59:59.999Z"),
+    autoRenewing: false,
+    inGracePeriod: false,
+    environment: "production",
+    lastStoreEventAt: NOW,
+    lastVerifiedAt: NOW,
+    manual: { activeGrantCount: 1, ledgerRevision: 1 },
+  };
+  const google = normalizeGoogleSubscription({
+    productId: "premium_access",
+    environment: "production",
+    purchaseReference: "ref",
+    expiryTime: FUTURE.toISOString(),
+    subscriptionState: "SUBSCRIPTION_STATE_ACTIVE",
+    autoRenewing: true,
+    now: NOW,
+  });
+  // Manual ends later than Google: manual wins.
+  assert.equal(selectMasterState([google, manual], { environmentPriority: true }), manual);
+  // Google renewed past the manual date: Google wins.
+  const renewed = { ...google, expiresAt: new Date("2026-06-01T00:00:00.000Z") };
+  assert.equal(selectMasterState([renewed, manual], { environmentPriority: true }), renewed);
+  // Expired store, active manual: manual wins regardless of dates.
+  const expiredStore = { ...google, active: false, status: "expired", expiresAt: PAST };
+  assert.equal(selectMasterState([expiredStore, manual], { environmentPriority: true }), manual);
+  // Revoked manual vs expired store: nothing active, the store keeps the master so
+  // its own status and references stay visible, however recently the grant was touched.
+  const revokedManual = { ...manual, active: false, status: "revoked", lastVerifiedAt: FUTURE };
+  const staleExpiredStore = { ...expiredStore, lastVerifiedAt: PAST };
+  assert.equal(
+    selectMasterState([staleExpiredStore, revokedManual], { environmentPriority: true }),
+    staleExpiredStore
+  );
+  // Only manual slots inactive: the most recently verified one.
+  const olderRevoked = { ...revokedManual, lastVerifiedAt: PAST };
+  assert.equal(selectMasterState([olderRevoked, revokedManual]), revokedManual);
+});
+
+test("master projection carries the manual summary and one source row per slot", () => {
+  const manual = {
+    active: true,
+    status: "active",
+    platform: "manual",
+    productId: "manual_grant",
+    expiresAt: FUTURE,
+    autoRenewing: false,
+    inGracePeriod: false,
+    environment: "production",
+    lastStoreEventAt: NOW,
+    lastVerifiedAt: NOW,
+    manual: { activeGrantCount: 2, grantSource: "egypt_request", ledgerRevision: 4 },
+  };
+  const apple = normalizeAppleSubscription({
+    productId: "monthly_sub",
+    environment: "production",
+    originalTransactionId: "orig",
+    expiresAtMs: PAST.getTime(),
+    storeStatus: 2,
+    now: NOW,
+  });
+  const projection = buildMasterProjection(
+    manual,
+    Timestamp.fromDate(NOW),
+    Timestamp.fromDate(NOW),
+    buildSourceSummaries([apple, manual])
+  );
+  assert.equal(projection.platform, "manual");
+  assert.equal(projection.productId, "manual_grant");
+  assert.deepEqual(projection.manual, { activeGrantCount: 2, grantSource: "egypt_request", ledgerRevision: 4 });
+  assert.ok(!Object.hasOwn(projection, "originalTransactionId"));
+  assert.equal(projection.sources.length, 2);
+  assert.deepEqual(Object.keys(projection.sources[0]).sort(), [
+    "environment",
+    "expiresAt",
+    "platform",
+    "status",
+  ]);
+  assert.equal(projection.sources[0].platform, "apple");
+  assert.equal(projection.sources[0].status, "expired");
+  assert.equal(projection.sources[1].autoRenewing, false);
+  // No stored activity flag: readers derive it from the date.
+  assert.ok(!Object.hasOwn(projection.sources[1], "active"));
+});
+
+test("legacy expiry tolerates the shapes the old documents used", () => {
+  assert.equal(legacyExpires({ expires: Timestamp.fromDate(FUTURE) }).toISOString(), FUTURE.toISOString());
+  assert.equal(legacyExpires({ expiresAt: Timestamp.fromDate(FUTURE) }).toISOString(), FUTURE.toISOString());
+  assert.equal(legacyExpires({ expires: FUTURE.toISOString() }).toISOString(), FUTURE.toISOString());
+  assert.equal(legacyExpires({ expires: Math.floor(FUTURE.getTime() / 1000) }).toISOString(), FUTURE.toISOString());
+  assert.equal(legacyExpires({ expires: "garbage" }), undefined);
+  assert.equal(legacyExpires(undefined), undefined);
 });

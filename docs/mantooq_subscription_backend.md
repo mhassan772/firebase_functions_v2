@@ -194,6 +194,11 @@ token chain, and then resolves ownership. Invalid permanent messages are
 acknowledged; transient API/configuration failures throw so the function's
 retry policy can redeliver.
 
+## Manual grants
+
+Admin grants live in a fifth projection slot and are managed through the
+`adminManageSubscription` callable. See `docs/admin_manage_subscription.md`.
+
 ## Firestore
 
 `subscription_master/{firebaseUid}` is overwritten as an exact projection.

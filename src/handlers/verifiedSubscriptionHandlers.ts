@@ -352,7 +352,7 @@ export async function handleGoogleSubscriptionNotifications(
   }
 }
 
-function requireAuthenticatedUid(
+export function requireAuthenticatedUid(
   context: functions.https.CallableContext
 ): string {
   if (!context.auth?.uid) {
@@ -411,7 +411,7 @@ function readDeviceId(value: unknown): string {
   return deviceId;
 }
 
-function assertExactKeys(data: unknown, allowedKeys: string[]): void {
+export function assertExactKeys(data: unknown, allowedKeys: string[]): void {
   if (!isPlainRecord(data)) {
     throw new SubscriptionError(
       "invalid-input",
@@ -433,7 +433,7 @@ function assertExactKeys(data: unknown, allowedKeys: string[]): void {
   }
 }
 
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
+export function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return (
     value !== null &&
     typeof value === "object" &&

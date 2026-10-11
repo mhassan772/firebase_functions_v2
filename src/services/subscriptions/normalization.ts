@@ -1,8 +1,14 @@
+import { ENVIRONMENT_PRIORITY_ENABLED } from "../../config/constants";
 import {
   NormalizedSubscription,
   NormalizedSubscriptionStatus,
   StoreEnvironment,
 } from "../../types/subscriptions";
+
+export interface SelectMasterStateOptions {
+  /** Rank production above sandbox and test before comparing dates. */
+  environmentPriority?: boolean;
+}
 
 export interface AppleNormalizationInput {
   productId: string;
@@ -150,21 +156,26 @@ export function normalizeGoogleSubscription(
 }
 
 export function selectMasterState(
-  states: NormalizedSubscription[]
+  states: NormalizedSubscription[],
+  options: SelectMasterStateOptions = {}
 ): NormalizedSubscription | undefined {
   if (states.length === 0) {
     return undefined;
   }
+  const useEnvironmentPriority =
+    options.environmentPriority ?? ENVIRONMENT_PRIORITY_ENABLED;
 
   const activeStates = states.filter((state) => state.active);
   const candidates = activeStates.length > 0 ? activeStates : states;
   return [...candidates].sort((left, right) => {
     if (activeStates.length > 0) {
-      const environmentDifference =
-        environmentPriority(right.environment) -
-        environmentPriority(left.environment);
-      if (environmentDifference !== 0) {
-        return environmentDifference;
+      if (useEnvironmentPriority) {
+        const environmentDifference =
+          environmentPriority(right.environment) -
+          environmentPriority(left.environment);
+        if (environmentDifference !== 0) {
+          return environmentDifference;
+        }
       }
       const expiryDifference =
         right.expiresAt.getTime() - left.expiresAt.getTime();
@@ -173,6 +184,15 @@ export function selectMasterState(
       }
     }
 
+    if (activeStates.length === 0) {
+      // Nothing active: keep the store's own status (billing retry, grace,
+      // canceled) and references on the master rather than a lapsed grant.
+      const manualDifference =
+        Number(left.platform === "manual") - Number(right.platform === "manual");
+      if (manualDifference !== 0) {
+        return manualDifference;
+      }
+    }
     const verifiedDifference =
       right.lastVerifiedAt.getTime() - left.lastVerifiedAt.getTime();
     if (verifiedDifference !== 0) {

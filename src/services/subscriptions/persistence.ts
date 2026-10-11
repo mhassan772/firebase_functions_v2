@@ -1,16 +1,29 @@
-import { DocumentData, Timestamp } from "firebase-admin/firestore";
+import {
+  DocumentData,
+  DocumentReference,
+  DocumentSnapshot,
+  Timestamp,
+  Transaction,
+} from "firebase-admin/firestore";
 import { admin } from "../../config/admin";
 import {
+  MANUAL_GRANT_PRODUCT_ID,
+  MANUAL_SLOT_ENABLED,
+} from "../../config/constants";
+import {
+  ManualProjectionSummary,
   NormalizedSubscription,
   OwnershipIdentity,
   PersistedSubscriptionResult,
+  SourceSummary,
+  SourceSummaryResponse,
   StoreEnvironment,
   StoreEvent,
-  SubscriptionPlatform,
   SubscriptionResponse,
+  SubscriptionSource,
   VerifiedSubscription,
 } from "../../types/subscriptions";
-import { sha256Reference } from "./crypto";
+import { sha256Hex, sha256Reference } from "./crypto";
 import { SubscriptionError } from "./errors";
 import { selectMasterState } from "./normalization";
 
@@ -19,16 +32,146 @@ export const SUBSCRIPTION_OWNERSHIP_COLLECTION =
   "subscription_purchase_ownership";
 export const SUBSCRIPTION_STATE_COLLECTION = "subscription_store_state";
 export const SUBSCRIPTION_EVENT_COLLECTION = "subscription_store_events";
+/** Written by the old admin portal; now only mirrored to for app versions that still read it. */
+export const LEGACY_MANUAL_COLLECTION = "subscriptions_manual";
 
-const STATE_SLOTS: Array<{
-  platform: SubscriptionPlatform;
+export interface StateSlot {
+  platform: SubscriptionSource;
   environment: StoreEnvironment;
-}> = [
+}
+
+export const MANUAL_SLOT: StateSlot = {
+  platform: "manual",
+  environment: "production",
+};
+
+/** Every projection slot, in a fixed order; snapshot arrays are indexed by it. */
+export const STATE_SLOTS: StateSlot[] = [
   { platform: "apple", environment: "production" },
   { platform: "apple", environment: "sandbox" },
   { platform: "google", environment: "production" },
   { platform: "google", environment: "test" },
+  MANUAL_SLOT,
 ];
+
+export const MANUAL_SLOT_INDEX = STATE_SLOTS.indexOf(MANUAL_SLOT);
+
+/**
+ * Everything a projection decision reads, fetched in one `getAll` so that the
+ * store path and the manual path touch the same documents and Firestore
+ * serialises concurrent writes for one account.
+ */
+export interface ProjectionState {
+  masterRef: DocumentReference;
+  masterSnapshot: DocumentSnapshot;
+  slotRefs: DocumentReference[];
+  slotSnapshots: DocumentSnapshot[];
+  legacyRef: DocumentReference;
+  /** Present only when the read asked for the legacy document. */
+  legacySnapshot?: DocumentSnapshot;
+  extraSnapshots: DocumentSnapshot[];
+}
+
+export interface ReadProjectionOptions {
+  /** Also read the legacy `subscriptions_manual` document. Only the manual path needs it. */
+  includeLegacy?: boolean;
+  extraRefs?: DocumentReference[];
+}
+
+export async function readProjectionState(
+  transaction: Transaction,
+  uid: string,
+  options: ReadProjectionOptions = {}
+): Promise<ProjectionState> {
+  const firestore = admin.firestore();
+  const masterRef = firestore.collection(SUBSCRIPTION_MASTER_COLLECTION).doc(uid);
+  const slotRefs = STATE_SLOTS.map((slot) =>
+    firestore
+      .collection(SUBSCRIPTION_STATE_COLLECTION)
+      .doc(stateDocumentId(uid, slot.platform, slot.environment))
+  );
+  const legacyRef = firestore
+    .collection(LEGACY_MANUAL_COLLECTION)
+    .doc(legacyManualDocumentId(uid));
+  const extraRefs = options.extraRefs ?? [];
+  const snapshots = await transaction.getAll(
+    masterRef,
+    ...slotRefs,
+    ...(options.includeLegacy ? [legacyRef] : []),
+    ...extraRefs
+  );
+  const legacyOffset = 1 + slotRefs.length;
+  const extraOffset = legacyOffset + (options.includeLegacy ? 1 : 0);
+  return {
+    masterRef,
+    masterSnapshot: snapshots[0],
+    slotRefs,
+    slotSnapshots: snapshots.slice(1, legacyOffset),
+    legacyRef,
+    legacySnapshot: options.includeLegacy ? snapshots[legacyOffset] : undefined,
+    extraSnapshots: snapshots.slice(extraOffset),
+  };
+}
+
+/** The normalized state of every existing slot, indexed like `STATE_SLOTS`. */
+export function slotStates(
+  slotSnapshots: DocumentSnapshot[],
+  now: Date
+): Array<NormalizedSubscription | undefined> {
+  return slotSnapshots.map((snapshot, index) => {
+    // With the kill switch off the manual document is not even parsed, so a
+    // malformed one cannot disturb the store path.
+    if (index === MANUAL_SLOT_INDEX && !MANUAL_SLOT_ENABLED) {
+      return undefined;
+    }
+    return snapshot.exists ? stateDataToNormalized(snapshot.data()!, now) : undefined;
+  });
+}
+
+/**
+ * Rebuilds and writes the master document from the proposed slot set.
+ *
+ * Takes the states the caller intends to persist, not the snapshots, because a
+ * slot written earlier in the same transaction is not visible through its
+ * snapshot. Only the device fields survive from the previous master.
+ */
+export function projectMaster(
+  transaction: Transaction,
+  state: ProjectionState,
+  proposedStates: Array<NormalizedSubscription | undefined>,
+  now: Timestamp
+): DocumentData {
+  const present = proposedStates.filter(
+    (candidate): candidate is NormalizedSubscription => candidate !== undefined
+  );
+  const considered = MANUAL_SLOT_ENABLED
+    ? present
+    : present.filter((candidate) => candidate.platform !== "manual");
+  const masterState = selectMasterState(considered);
+  if (!masterState) {
+    throw new SubscriptionError(
+      "internal",
+      "master-state-unavailable",
+      "No verified state is available for the subscription projection."
+    );
+  }
+
+  const existing = state.masterSnapshot.exists
+    ? state.masterSnapshot.data()
+    : undefined;
+  const createdAt = existing ? existing.createdAt : now;
+  const masterData = preserveMasterDeviceFields(
+    buildMasterProjection(
+      masterState,
+      createdAt,
+      now,
+      buildSourceSummaries(considered)
+    ),
+    existing
+  );
+  transaction.set(state.masterRef, masterData);
+  return masterData;
+}
 
 export async function persistVerifiedSubscription(
   uid: string,
@@ -44,12 +187,6 @@ export async function persistVerifiedSubscription(
   }
 
   const firestore = admin.firestore();
-  const masterRef = firestore.collection(SUBSCRIPTION_MASTER_COLLECTION).doc(uid);
-  const stateRefs = STATE_SLOTS.map((slot) =>
-    firestore
-      .collection(SUBSCRIPTION_STATE_COLLECTION)
-      .doc(stateDocumentId(uid, slot.platform, slot.environment))
-  );
   const ownershipById = new Map(
     verified.ownership.map((identity) => [
       ownershipDocumentId(identity),
@@ -66,23 +203,19 @@ export async function persistVerifiedSubscription(
     : undefined;
 
   return firestore.runTransaction(async (transaction) => {
-    const allRefs = [
-      masterRef,
-      ...stateRefs,
-      ...ownershipRefs,
-      ...(eventRef ? [eventRef] : []),
-    ];
-    const snapshots = await transaction.getAll(...allRefs);
-    const masterSnapshot = snapshots[0];
-    const stateSnapshots = snapshots.slice(1, 1 + stateRefs.length);
-    const ownershipSnapshots = snapshots.slice(
-      1 + stateRefs.length,
-      1 + stateRefs.length + ownershipRefs.length
+    const state = await readProjectionState(transaction, uid, {
+      extraRefs: [...ownershipRefs, ...(eventRef ? [eventRef] : [])],
+    });
+    const ownershipSnapshots = state.extraSnapshots.slice(
+      0,
+      ownershipRefs.length
     );
-    const eventSnapshot = eventRef ? snapshots[snapshots.length - 1] : undefined;
+    const eventSnapshot = eventRef
+      ? state.extraSnapshots[ownershipRefs.length]
+      : undefined;
 
     if (eventSnapshot?.exists) {
-      if (!masterSnapshot.exists) {
+      if (!state.masterSnapshot.exists) {
         throw new SubscriptionError(
           "internal",
           "duplicate-event-master-missing",
@@ -91,7 +224,7 @@ export async function persistVerifiedSubscription(
       }
       return {
         duplicate: true,
-        subscription: masterDataToResponse(masterSnapshot.data()!),
+        subscription: masterDataToResponse(state.masterSnapshot.data()!),
       };
     }
 
@@ -121,7 +254,7 @@ export async function persistVerifiedSubscription(
         slot.platform === verified.subscription.platform &&
         slot.environment === verified.subscription.environment
     );
-    if (incomingStateIndex < 0) {
+    if (incomingStateIndex < 0 || incomingStateIndex === MANUAL_SLOT_INDEX) {
       throw new SubscriptionError(
         "invalid-store-data",
         "store-environment-unsupported",
@@ -129,7 +262,7 @@ export async function persistVerifiedSubscription(
       );
     }
 
-    const existingIncoming = stateSnapshots[incomingStateIndex];
+    const existingIncoming = state.slotSnapshots[incomingStateIndex];
     const existingEventAt = timestampDate(
       existingIncoming.get("lastStoreEventAt")
     );
@@ -139,14 +272,11 @@ export async function persistVerifiedSubscription(
       Boolean(event)
     );
 
-    const states = stateSnapshots
-      .map((snapshot) =>
-        snapshot.exists ? stateDataToNormalized(snapshot.data()!) : undefined
-      );
+    const states = slotStates(state.slotSnapshots, now.toDate());
     if (!isStaleEvent) {
       states[incomingStateIndex] = verified.subscription;
       transaction.set(
-        stateRefs[incomingStateIndex],
+        state.slotRefs[incomingStateIndex],
         stateData(
           uid,
           verified.subscription,
@@ -156,27 +286,7 @@ export async function persistVerifiedSubscription(
       );
     }
 
-    const masterState = selectMasterState(
-      states.filter(
-        (state): state is NormalizedSubscription => state !== undefined
-      )
-    );
-    if (!masterState) {
-      throw new SubscriptionError(
-        "internal",
-        "master-state-unavailable",
-        "No verified state is available for the subscription projection."
-      );
-    }
-
-    const createdAt = masterSnapshot.exists
-      ? masterSnapshot.get("createdAt")
-      : now;
-    const masterData = preserveMasterDeviceFields(
-      buildMasterProjection(masterState, createdAt, now),
-      masterSnapshot.exists ? masterSnapshot.data() : undefined
-    );
-    transaction.set(masterRef, masterData);
+    const masterData = projectMaster(transaction, state, states, now);
     if (eventRef && event) {
       transaction.create(eventRef, {
         platform: event.platform,
@@ -318,12 +428,17 @@ export function shouldApplyIncomingState(
   );
 }
 
-function stateDocumentId(
+export function stateDocumentId(
   uid: string,
-  platform: SubscriptionPlatform,
+  platform: SubscriptionSource,
   environment: StoreEnvironment
 ): string {
   return `${sha256Reference(uid)}_${platform}_${environment}`;
+}
+
+/** The legacy collection keys by the hex sha256 of the uid, which is what old app versions compute. */
+export function legacyManualDocumentId(uid: string): string {
+  return sha256Hex(uid);
 }
 
 function eventDocumentId(event: StoreEvent): string {
@@ -369,7 +484,7 @@ function ownershipData(
   return data;
 }
 
-function stateData(
+export function stateData(
   uid: string,
   state: NormalizedSubscription,
   createdAt: unknown,
@@ -398,13 +513,27 @@ function stateData(
   if (state.purchaseReference) {
     data.purchaseReference = state.purchaseReference;
   }
+  if (state.manual) {
+    data.manual = withoutUndefined({ ...state.manual });
+  }
   return data;
+}
+
+/** Firestore rejects `undefined`; optional summary fields are dropped rather than written. */
+export function withoutUndefined<T extends Record<string, unknown>>(record: T): T {
+  for (const key of Object.keys(record)) {
+    if (record[key] === undefined) {
+      delete record[key];
+    }
+  }
+  return record;
 }
 
 export function buildMasterProjection(
   state: NormalizedSubscription,
   createdAt: unknown,
-  updatedAt: Timestamp
+  updatedAt: Timestamp,
+  sources?: SourceSummary[]
 ): DocumentData {
   const data: DocumentData = {
     active: state.active,
@@ -428,7 +557,41 @@ export function buildMasterProjection(
   if (state.platform === "google" && state.purchaseReference) {
     data.purchaseReference = state.purchaseReference;
   }
+  if (state.platform === "manual" && state.manual) {
+    data.manual = withoutUndefined({ ...state.manual });
+  }
+  if (sources) {
+    data.sources = sources.map((source) => {
+      const row: DocumentData = {
+        platform: source.platform,
+        environment: source.environment,
+        status: source.status,
+        expiresAt: Timestamp.fromDate(source.expiresAt),
+      };
+      if (source.autoRenewing !== undefined) {
+        row.autoRenewing = source.autoRenewing;
+      }
+      return row;
+    });
+  }
   return data;
+}
+
+/**
+ * One row per existing slot, so a client that may only read the master still
+ * sees every source. Activity is deliberately not stored: a manual grant lapses
+ * with no write to flip it, so readers derive it from the date and status.
+ */
+export function buildSourceSummaries(
+  states: NormalizedSubscription[]
+): SourceSummary[] {
+  return states.map((state) => ({
+    platform: state.platform,
+    environment: state.environment,
+    status: state.status,
+    expiresAt: state.expiresAt,
+    autoRenewing: state.autoRenewing,
+  }));
 }
 
 // Device management fields live on the master doc but are owned by the
@@ -454,7 +617,17 @@ export function preserveMasterDeviceFields(
   return masterData;
 }
 
-function stateDataToNormalized(data: DocumentData): NormalizedSubscription {
+/**
+ * Reads a slot document back into a normalized state.
+ *
+ * A manual slot has no store event to re-verify it, so its `active` flag is
+ * never trusted from the document: it is derived here from the status and the
+ * expiry, and a lapsed grant reads as `expired`.
+ */
+export function stateDataToNormalized(
+  data: DocumentData,
+  now: Date = new Date()
+): NormalizedSubscription {
   const expiresAt = timestampDate(data.expiresAt);
   const lastStoreEventAt = timestampDate(data.lastStoreEventAt);
   const lastVerifiedAt = timestampDate(data.lastVerifiedAt);
@@ -465,17 +638,27 @@ function stateDataToNormalized(data: DocumentData): NormalizedSubscription {
       "A stored subscription state is invalid."
     );
   }
-  return {
-    active: data.active === true,
-    status: data.status,
+  const isManual = data.platform === "manual";
+  let active = data.active === true;
+  let status = data.status;
+  if (isManual) {
+    const revoked = status === "revoked";
+    const inFuture = expiresAt.getTime() > now.getTime();
+    active = !revoked && inFuture;
+    status = revoked ? "revoked" : inFuture ? "active" : "expired";
+  }
+  const normalized: NormalizedSubscription = {
+    active,
+    status,
     platform: data.platform,
-    productId: data.productId,
+    productId: isManual ? MANUAL_GRANT_PRODUCT_ID : data.productId,
     expiresAt,
-    autoRenewing:
-      typeof data.autoRenewing === "boolean"
+    autoRenewing: isManual
+      ? false
+      : typeof data.autoRenewing === "boolean"
         ? data.autoRenewing
         : undefined,
-    inGracePeriod: data.inGracePeriod === true,
+    inGracePeriod: !isManual && data.inGracePeriod === true,
     environment: data.environment,
     originalTransactionId:
       typeof data.originalTransactionId === "string"
@@ -488,9 +671,28 @@ function stateDataToNormalized(data: DocumentData): NormalizedSubscription {
     lastStoreEventAt,
     lastVerifiedAt,
   };
+  if (isManual) {
+    normalized.manual = manualSummaryFromData(data.manual);
+  }
+  return normalized;
 }
 
-function masterDataToResponse(data: DocumentData): SubscriptionResponse {
+function manualSummaryFromData(value: unknown): ManualProjectionSummary {
+  const record =
+    value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+  const summary: ManualProjectionSummary = {
+    activeGrantCount:
+      typeof record.activeGrantCount === "number" ? record.activeGrantCount : 0,
+    ledgerRevision:
+      typeof record.ledgerRevision === "number" ? record.ledgerRevision : 0,
+  };
+  if (typeof record.grantSource === "string") {
+    summary.grantSource = record.grantSource as ManualProjectionSummary["grantSource"];
+  }
+  return summary;
+}
+
+export function masterDataToResponse(data: DocumentData): SubscriptionResponse {
   const expiresAt = timestampDate(data.expiresAt);
   const lastStoreEventAt = timestampDate(data.lastStoreEventAt);
   const lastVerifiedAt = timestampDate(data.lastVerifiedAt);
@@ -532,13 +734,36 @@ function masterDataToResponse(data: DocumentData): SubscriptionResponse {
   if (typeof data.purchaseReference === "string") {
     response.purchaseReference = data.purchaseReference;
   }
+  if (data.manual && typeof data.manual === "object") {
+    response.manual = manualSummaryFromData(data.manual);
+  }
+  if (Array.isArray(data.sources)) {
+    response.sources = data.sources
+      .map((row: DocumentData): SourceSummaryResponse | undefined => {
+        const rowExpiresAt = timestampDate(row.expiresAt);
+        if (!rowExpiresAt) {
+          return undefined;
+        }
+        const summary: SourceSummaryResponse = {
+          platform: row.platform,
+          environment: row.environment,
+          status: row.status,
+          expiresAt: rowExpiresAt.toISOString(),
+        };
+        if (typeof row.autoRenewing === "boolean") {
+          summary.autoRenewing = row.autoRenewing;
+        }
+        return summary;
+      })
+      .filter((row): row is SourceSummaryResponse => row !== undefined);
+  }
   return response;
 }
 
-function timestampDate(value: unknown): Date | undefined {
+export function timestampDate(value: unknown): Date | undefined {
   return value instanceof Timestamp ? value.toDate() : undefined;
 }
 
-function timestampOr(value: unknown, fallback: Timestamp): Timestamp {
+export function timestampOr(value: unknown, fallback: Timestamp): Timestamp {
   return value instanceof Timestamp ? value : fallback;
 }

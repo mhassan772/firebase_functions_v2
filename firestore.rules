@@ -308,15 +308,15 @@ service cloud.firestore {
         && isValidShare(request.resource.data);
       allow delete: if isShareOwner();
     }
-     match /subscriptions_manual/{userId} {
-      allow read: if request.auth != null ;
-      allow write: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
-
-    }
-    match /subscriptions_manual_test/{userId} {
-      allow read: if request.auth != null ;
-      allow write: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
-
+    // Legacy manual grants. App versions before ~90.4 still read their own
+    // document, keyed by sha256hex(uid); nothing on the client writes here any
+    // more, the backend mirrors into it.
+    match /subscriptions_manual/{docId} {
+      allow get: if request.auth != null
+                 && hashing.sha256(request.auth.uid).toHexString().lower() == docId;
+      allow read: if request.auth != null
+                  && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+      allow write: if false;
     }
     match /subscriptions_to_be_approved/{subscriptionId} {
       allow read: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
@@ -445,6 +445,10 @@ service cloud.firestore {
     }
 
     match /subscription_store_state/{document=**} {
+      allow read, write: if false;
+    }
+
+    match /subscription_migration_runs/{document=**} {
       allow read, write: if false;
     }
 

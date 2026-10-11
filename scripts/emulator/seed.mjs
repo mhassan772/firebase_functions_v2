@@ -21,7 +21,10 @@ const AUTH_HOST = '127.0.0.1:9098'
 // Emulator-only accounts. The password exists only in the local Auth emulator.
 const EMULATOR_PASSWORD = 'mantooq-emulator'
 const ACCOUNTS = [
-  { uid: 'emulator-premium', email: 'premium@mantooq.test', displayName: 'Premium tester', premium: true },
+  // A manual (admin) grant, the way the backend writes it: a manual slot with one grant, projected to the master.
+  { uid: 'emulator-premium', email: 'premium@mantooq.test', displayName: 'Premium tester', premium: 'manual' },
+  // An active Google production subscription, so the portal can be tried against an account that already pays a store.
+  { uid: 'emulator-google', email: 'google@mantooq.test', displayName: 'Google subscriber', premium: 'google' },
   { uid: 'emulator-free', email: 'free@mantooq.test', displayName: 'Free tester', premium: false },
   { uid: 'emulator-admin', email: 'admin@mantooq.test', displayName: 'Admin tester', premium: false, role: 'admin' },
 ]
@@ -29,6 +32,74 @@ const ACCOUNTS = [
 process.env.FIRESTORE_EMULATOR_HOST = FIRESTORE_HOST
 process.env.FIREBASE_AUTH_EMULATOR_HOST = AUTH_HOST
 process.env.GCLOUD_PROJECT = PROJECT_ID
+
+// Mirrors the shapes in src/services/subscriptions/persistence.ts and manual.ts: one slot
+// document per source in subscription_store_state, keyed by base64url sha256 of the uid, and
+// the master projection with its `sources` rows. Only the fields the app and the portal read.
+async function seedSubscription(db, uid, kind, now, expiresAt) {
+  const slotKey = createHash('sha256').update(uid).digest('base64url')
+  const common = {
+    uid,
+    active: true,
+    expiresAt,
+    inGracePeriod: false,
+    lastStoreEventAt: now,
+    lastVerifiedAt: now,
+    createdAt: now,
+    updatedAt: now,
+  }
+  let state
+  if (kind === 'manual') {
+    state = {
+      ...common,
+      status: 'active',
+      platform: 'manual',
+      productId: 'manual_grant',
+      environment: 'production',
+      autoRenewing: false,
+      manual: { activeGrantCount: 1, grantSource: 'admin_manual_add', ledgerRevision: 1 },
+      grants: [
+        {
+          grantId: 'seed-grant-1',
+          kind: 'absolute',
+          base: 'extend',
+          expiresAt,
+          grantedAt: now,
+          grantedBy: 'seed',
+          metadata: { grantSource: 'admin_manual_add', note: 'emulator seed' },
+          status: 'active',
+        },
+      ],
+      ledgerRevision: 1,
+      recentOperations: [],
+    }
+    await db.doc(`subscription_store_state/${slotKey}_manual_production`).set(state)
+  } else {
+    state = {
+      ...common,
+      status: 'active',
+      platform: 'google',
+      productId: 'premium_access',
+      environment: 'production',
+      autoRenewing: true,
+      purchaseReference: 'emulator-google-reference',
+    }
+    await db.doc(`subscription_store_state/${slotKey}_google_production`).set(state)
+  }
+  const { uid: _uid, grants, ledgerRevision, recentOperations, ...master } = state
+  await db.doc(`subscription_master/${uid}`).set({
+    ...master,
+    sources: [
+      {
+        platform: state.platform,
+        environment: state.environment,
+        status: state.status,
+        expiresAt,
+        autoRenewing: state.autoRenewing,
+      },
+    ],
+  })
+}
 
 async function wipe() {
   const firestore = await fetch(
@@ -63,9 +134,7 @@ async function seed() {
       createdAt: now,
     })
     if (account.premium) {
-      // The app looks up manual grants by sha256 of the uid.
-      const key = createHash('sha256').update(account.uid).digest('hex')
-      await db.doc(`subscriptions_manual/${key}`).set({ active: true, expiresAt: inOneYear, productId: 'emulator' })
+      await seedSubscription(db, account.uid, account.premium, now, inOneYear)
     }
     if (account.role) {
       await db.doc(`users_adminv2/${account.uid}`).set({ role: account.role, email: account.email })

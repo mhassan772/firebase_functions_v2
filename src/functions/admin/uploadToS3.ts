@@ -1,10 +1,10 @@
 import * as functions from "firebase-functions";
 import { Request, Response } from "express";
-import { admin } from "../../config/admin";
 import { REGION } from "../../config/constants";
 import { validateRequestAuthentication } from "../../utils/authentication";
 import { setCorsHeaders, handleOptionsRequest } from "../../utils/cors";
 import { handleS3Upload } from "../../handlers/s3Handlers";
+import { requireAdminPortalUser } from "../../utils/adminRole";
 
 export const admin_upload_to_S3 = functions.region(REGION).https.onRequest(
   async (req: Request, res: Response) => {
@@ -24,12 +24,9 @@ export const admin_upload_to_S3 = functions.region(REGION).https.onRequest(
         return;
       }
 
-      const adminDoc = await admin.firestore()
-        .collection("users_adminv2")
-        .doc(user_guid)
-        .get();
-
-      if (!adminDoc.exists) {
+      try {
+        await requireAdminPortalUser(user_guid);
+      } catch {
         res.status(403).json({
           code: 403,
           message: "Unauthorized: User is not an admin"
