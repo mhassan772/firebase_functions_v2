@@ -7,7 +7,11 @@ export type SubscriptionErrorKind =
   | "ownership-conflict"
   | "store-unavailable"
   | "configuration"
-  | "internal";
+  | "internal"
+  // Admin API kinds: the message is safe to show and the code is passed in details.
+  | "precondition"
+  | "not-found"
+  | "forbidden";
 
 export class SubscriptionError extends Error {
   constructor(
@@ -27,11 +31,27 @@ export function asCallableError(error: unknown): functions.https.HttpsError {
   }
 
   if (error instanceof SubscriptionError) {
+    const details = { code: error.safeCode };
     switch (error.kind) {
+      case "precondition":
+        return new functions.https.HttpsError(
+          "failed-precondition",
+          error.message,
+          details
+        );
+      case "not-found":
+        return new functions.https.HttpsError("not-found", error.message, details);
+      case "forbidden":
+        return new functions.https.HttpsError(
+          "permission-denied",
+          error.message,
+          details
+        );
       case "invalid-input":
         return new functions.https.HttpsError(
           "invalid-argument",
-          "The purchase verification request is invalid."
+          "The purchase verification request is invalid.",
+          details
         );
       case "invalid-store-data":
         return new functions.https.HttpsError(

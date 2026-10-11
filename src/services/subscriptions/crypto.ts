@@ -1,6 +1,6 @@
 import * as crypto from "crypto";
 import { SubscriptionError } from "./errors";
-import { SubscriptionPlatform } from "../../types/subscriptions";
+import { StorePlatform } from "../../types/subscriptions";
 
 const ACCOUNT_BINDING_VERSION = 1;
 
@@ -8,9 +8,14 @@ export function sha256Reference(value: string): string {
   return crypto.createHash("sha256").update(value, "utf8").digest("base64url");
 }
 
+/** The hex form the app and the legacy manual collection key documents by. */
+export function sha256Hex(value: string): string {
+  return crypto.createHash("sha256").update(value, "utf8").digest("hex");
+}
+
 export function deriveAccountBinding(
   uid: string,
-  platform: SubscriptionPlatform,
+  platform: StorePlatform,
   secret: string
 ): string {
   if (!uid || Buffer.byteLength(secret, "utf8") < 32) {

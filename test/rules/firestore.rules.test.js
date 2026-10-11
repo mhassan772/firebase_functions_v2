@@ -100,6 +100,25 @@ describe("data owned by one user", () => {
     await assertFails(getDocs(collection(asUser("user-2"), "user_books/user-1/user_books_chunk")));
   });
 
+  test("subscriptions_manual: only the owner, by the hash of their uid, can get their document", async () => {
+    // sha256("user-1") in hex.
+    const ownHash = require("node:crypto").createHash("sha256").update("user-1").digest("hex");
+    await env.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), `subscriptions_manual/${ownHash}`), { expires: Timestamp.now() });
+    });
+    await assertSucceeds(getDoc(doc(asUser("user-1"), `subscriptions_manual/${ownHash}`)));
+    await assertFails(getDoc(doc(asUser("user-2"), `subscriptions_manual/${ownHash}`)));
+    await assertFails(getDoc(doc(asGuest(), `subscriptions_manual/${ownHash}`)));
+    await assertFails(getDocs(collection(asUser("user-1"), "subscriptions_manual")));
+    // Nothing on the client writes here any more, admins included.
+    await assertFails(setDoc(doc(asUser("user-1"), `subscriptions_manual/${ownHash}`), { expires: Timestamp.now() }));
+    await assertFails(setDoc(doc(asUser("admin-1"), `subscriptions_manual/${ownHash}`), { expires: Timestamp.now() }));
+    await assertFails(deleteDoc(doc(asUser("admin-1"), `subscriptions_manual/${ownHash}`)));
+    // Admins keep reading for the transition.
+    await assertSucceeds(getDoc(doc(asUser("admin-1"), `subscriptions_manual/${ownHash}`)));
+    await assertSucceeds(getDocs(collection(asUser("admin-1"), "subscriptions_manual")));
+  });
+
   test("subscription_master: the owner can get, but not list or write", async () => {
     await assertSucceeds(getDoc(doc(asUser("user-1"), "subscription_master/user-1")));
     await assertFails(getDoc(doc(asUser("user-2"), "subscription_master/user-1")));
@@ -453,6 +472,17 @@ describe("book listeners", () => {
 });
 
 describe("everything else", () => {
+  test("the backend-only subscription collections are closed to every client", async () => {
+    for (const path of [
+      "subscription_store_state/slot-1",
+      "subscription_migration_runs/run-1",
+      "subscription_purchase_ownership/own-1",
+    ]) {
+      await assertFails(getDoc(doc(asUser("admin-1"), path)));
+      await assertFails(setDoc(doc(asUser("admin-1"), path), { value: 1 }));
+    }
+  });
+
   test("a collection with no rule of its own is closed", async () => {
     await assertFails(getDoc(doc(asUser("admin-1"), "unlisted_collection/doc-1")));
     await assertFails(setDoc(doc(asUser("user-1"), "unlisted_collection/doc-1"), { value: 1 }));

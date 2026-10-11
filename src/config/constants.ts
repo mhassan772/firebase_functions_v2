@@ -16,6 +16,28 @@ export const GOOGLE_SUBSCRIPTION_BASE_PLANS = ["monthly", "yearly"] as const;
 export const GOOGLE_PLAY_SUBSCRIPTION_TOPIC =
   "mantooq-play-subscription-notifications";
 
+// Manual (admin) grants live in a fifth projection slot beside the store slots.
+export const MANUAL_GRANT_PRODUCT_ID = "manual_grant";
+
+// Kill switch: when false the projection ignores the manual slot and admin
+// mutations are refused, so store users get exactly the pre-merge behaviour.
+// Rollback path, not a second code path.
+export const MANUAL_SLOT_ENABLED = true;
+
+// While old app versions (before ~90.4) still read `subscriptions_manual`, every
+// manual mutation also mirrors the replayed expiry there. Flip off once those
+// versions are negligible.
+export const LEGACY_MIRROR_ENABLED = true;
+
+// Production store states outrank sandbox and test ones before dates are
+// compared. It was shipped false for the live sandbox stage on 2026-10-11, so
+// test subscriptions could compete with the (production) manual slot, and set
+// back to true once that stage passed.
+export const ENVIRONMENT_PRIORITY_ENABLED = true;
+
+// Manual grants are dated to the end of the day in the zone the legacy data uses.
+export const MANUAL_GRANT_TIME_ZONE = "Africa/Cairo";
+
 export const SUBSCRIPTION_SECRETS = {
   appleIssuerId: "APPLE_APP_STORE_ISSUER_ID",
   appleKeyId: "APPLE_APP_STORE_KEY_ID",

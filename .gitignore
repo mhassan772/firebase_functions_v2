@@ -69,3 +69,4 @@ backfill-book-listeners-*
 # Firebase service account keys
 service-account-key.json
 firebase-adminsdk-*.json
+migration-reports/
