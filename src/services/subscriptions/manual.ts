@@ -22,6 +22,7 @@ import {
   SourceSummaryResponse,
   SubscriptionResponse,
 } from "../../types/subscriptions";
+import { DeviceLimits } from "./devices";
 import { SubscriptionError } from "./errors";
 import {
   LEGACY_MANUAL_COLLECTION,
@@ -782,7 +783,8 @@ function isPlainDocumentId(value: string): boolean {
 /** Read-only picture of an account, for the admin entitlement card. */
 export async function readAccountSubscription(
   uid: string,
-  now: Date = new Date()
+  now: Date = new Date(),
+  deviceLimits?: DeviceLimits
 ): Promise<AccountSubscriptionView> {
   const firestore = admin.firestore();
   const masterRef = firestore.collection(SUBSCRIPTION_MASTER_COLLECTION).doc(uid);
@@ -804,13 +806,14 @@ export async function readAccountSubscription(
     legacySnapshot: snapshots[1 + slotRefs.length],
     extraSnapshots: [],
   };
-  return accountViewFromState(uid, state, now);
+  return accountViewFromState(uid, state, now, deviceLimits);
 }
 
 function accountViewFromState(
   uid: string,
   state: ProjectionState,
-  now: Date
+  now: Date,
+  deviceLimits?: DeviceLimits
 ): AccountSubscriptionView {
   const states = slotStates(state.slotSnapshots, now).filter(
     (candidate): candidate is NormalizedSubscription => candidate !== undefined
@@ -823,7 +826,7 @@ function accountViewFromState(
   return {
     uid,
     master: state.masterSnapshot.exists
-      ? masterDataToResponse(state.masterSnapshot.data()!)
+      ? masterDataToResponse(state.masterSnapshot.data()!, deviceLimits)
       : undefined,
     sources: sourceSummariesResponse(states),
     manual: manualViewFromGrants(

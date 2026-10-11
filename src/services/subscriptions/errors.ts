@@ -93,7 +93,31 @@ export function safeErrorCode(error: unknown): string {
     return error.safeCode;
   }
   if (error instanceof functions.https.HttpsError) {
-    return error.code;
+    // Device errors carry their safe code in details, like the admin API does.
+    const details = error.details as { code?: unknown } | undefined;
+    return typeof details?.code === "string" ? details.code : error.code;
   }
   return "unexpected";
+}
+
+/** True for a callable refusal the caller caused, which is logged as a rejection rather than a failure. */
+export function isCallerRefusal(error: unknown): boolean {
+  if (error instanceof SubscriptionError) {
+    return (
+      error.kind === "invalid-input" ||
+      error.kind === "invalid-store-data" ||
+      error.kind === "account-binding-mismatch" ||
+      error.kind === "ownership-conflict" ||
+      error.kind === "precondition" ||
+      error.kind === "not-found" ||
+      error.kind === "forbidden"
+    );
+  }
+  return (
+    error instanceof functions.https.HttpsError &&
+    (error.code === "resource-exhausted" ||
+      error.code === "failed-precondition" ||
+      error.code === "invalid-argument" ||
+      error.code === "unauthenticated")
+  );
 }

@@ -24,6 +24,7 @@ import {
   VerifiedSubscription,
 } from "../../types/subscriptions";
 import { sha256Hex, sha256Reference } from "./crypto";
+import { DeviceLimits, devicesBlockFromMaster } from "./devices";
 import { SubscriptionError } from "./errors";
 import { selectMasterState } from "./normalization";
 
@@ -595,9 +596,12 @@ export function buildSourceSummaries(
 }
 
 // Device management fields live on the master doc but are owned by the
-// device callable, not the store projection; renewals must not erase them.
+// device callable and the admin device actions, not the store projection;
+// renewals and manual grants must not erase them.
 export const MASTER_DEVICE_FIELDS = [
   "allowed_devices",
+  "devices",
+  "device_log",
   "last_date_replacing_device",
   "extra_device_seats",
 ] as const;
@@ -692,7 +696,14 @@ function manualSummaryFromData(value: unknown): ManualProjectionSummary {
   return summary;
 }
 
-export function masterDataToResponse(data: DocumentData): SubscriptionResponse {
+/**
+ * Converts a master document for callers. The device block is always present;
+ * its `max_number_of_devices` only when the caller read the app settings.
+ */
+export function masterDataToResponse(
+  data: DocumentData,
+  deviceLimits?: DeviceLimits
+): SubscriptionResponse {
   const expiresAt = timestampDate(data.expiresAt);
   const lastStoreEventAt = timestampDate(data.lastStoreEventAt);
   const lastVerifiedAt = timestampDate(data.lastVerifiedAt);
@@ -724,6 +735,7 @@ export function masterDataToResponse(data: DocumentData): SubscriptionResponse {
     lastVerifiedAt: lastVerifiedAt.toISOString(),
     createdAt: createdAt.toISOString(),
     updatedAt: updatedAt.toISOString(),
+    devices: devicesBlockFromMaster(data, deviceLimits),
   };
   if (typeof data.autoRenewing === "boolean") {
     response.autoRenewing = data.autoRenewing;

@@ -102,6 +102,33 @@ export interface NormalizedSubscription {
   manual?: ManualProjectionSummary;
 }
 
+/** The operating system a registered device reported. The app never sends another value. */
+export type DevicePlatform = "ios" | "android";
+
+/**
+ * One registered device as callers see it.
+ *
+ * A seat registered before devices carried metadata has an id and nothing
+ * else, so the name is empty, the platform `unknown` and the dates absent.
+ */
+export interface DeviceEntryResponse {
+  id: string;
+  name: string;
+  platform: DevicePlatform | "unknown";
+  registered_at?: string;
+  last_seen_at?: string;
+}
+
+/** The device block of a subscription response; membership is `allowed_devices`. */
+export interface SubscriptionDevicesResponse {
+  allowed_devices: string[];
+  devices: DeviceEntryResponse[];
+  /** Present only when the caller read the app settings; the limit lives there. */
+  max_number_of_devices?: number;
+  extra_device_seats: number;
+  last_date_replacing_device?: string;
+}
+
 export interface SubscriptionResponse {
   active: boolean;
   status: NormalizedSubscriptionStatus;
@@ -119,6 +146,7 @@ export interface SubscriptionResponse {
   updatedAt: string;
   manual?: ManualProjectionSummary;
   sources?: SourceSummaryResponse[];
+  devices: SubscriptionDevicesResponse;
 }
 
 export interface AppleOwnershipIdentity {
