@@ -69,6 +69,10 @@ Errors are `HttpsError` with `details.code` set to the safe code below.
 | `migrateLegacy` | `runId, dryRun: true` | `MigrationReport` (the plan; this action never writes) |
 | `importLegacyRows` | `runId, rows: [{ docId, uid }]` (1 to 200, the plan's `imported` rows) | `MigrationReport` |
 | `getMigrationRun` | `runId` | `MigrationReport` |
+| `listDevices` | `user` | `DevicesResult` |
+| `removeDevice` | `user, deviceId` | `DevicesResult` (frees the seat; the user's cooldown is neither checked nor started) |
+| `setExtraSeats` | `user, seats` (integer 0..10) | `DevicesResult` |
+| `resetDeviceCooldown` | `user` | `DevicesResult` (clears `last_date_replacing_device`) |
 
 - `opId`: 8 to 128 url-safe characters, generated per button press and reused
   only when retrying that same press. A repeated `opId` returns the earlier
@@ -87,6 +91,25 @@ Errors are `HttpsError` with `details.code` set to the safe code below.
 - `expectedLedgerRevision`: the `manual.ledgerRevision` from the last `get`.
   Stale → `failed-precondition` / `ledger-revision-stale`; reload and retry.
 
+### Device seats
+
+The four device actions edit the seat fields on `subscription_master` directly;
+they do not touch the grant ledger and take no `opId`, because each one is
+idempotent by nature (removing a device that is gone, setting the seats it
+already has or clearing a cooldown that is clear changes nothing and reports
+`changed: false`). Every change appends `{ at, actor: "admin:<uid>", action,
+deviceId?, seats? }` to `device_log`, capped at 20 rows, which the user's own
+actions share under actor `user`. The account must have a master document
+(`subscription-not-found` otherwise); it need not be active, so a lapsed
+account can be tidied. `deviceId` is 1-128 characters (`device-id-invalid`);
+`seats` outside 0..10 fails with `seats-invalid`. `removeDevice` on an id that
+is not listed is a no-op.
+
+`get` carries the same information on `account.master.devices`, so the card
+needs no `listDevices` after loading an account. The limit comes from
+`settings_app/subscription.max_number_of_devices` (default 2; the app reads the same document)
+plus the account's `extra_device_seats`.
+
 ### Shapes
 
 ```ts
@@ -103,6 +126,16 @@ SourceRow { platform: "apple" | "google" | "manual", environment: "production" |
 Grant { grantId, kind, months?, expiresAt?, base, grantedAt, grantedBy, queue?, metadata, status, statusChangedAt?, statusReason?, isLegacyBaseline }
 
 MutationResult { user: ResolvedUser, replayedOperation: boolean, previousManualExpiresAt?: ISO, account: AccountView }
+
+DeviceEntry { id, name, platform: "ios" | "android" | "unknown", registered_at?: ISO, last_seen_at?: ISO }
+                                          // "unknown" and no dates: a seat registered before devices carried metadata
+SubscriptionResponse.devices {            // on master in get and MutationResult; max_number_of_devices only in get
+  allowed_devices: string[], devices: DeviceEntry[], max_number_of_devices?, extra_device_seats, last_date_replacing_device?: ISO }
+DevicesResult {
+  user: ResolvedUser,
+  devices: { action, changed, max_number_of_devices, allowed_devices: string[], devices: DeviceEntry[],
+             last_date_replacing_device?: ISO, next_replacement_allowed_at?: ISO },
+}
 
 ManualSlotListRow { uid, email?, status, expiresAt?, activeGrantCount, ledgerRevision, grantSource?, updatedAt? }
 
@@ -123,7 +156,8 @@ approval that predates the ledger; offer `setBaseline` or `revokeAccess`
 instead), `grant-not-active`, `duration-unchanged`,
 `hashed-id-mismatch`, `email-not-found`, `uid-not-found`, `manual-slot-disabled`,
 `not-subscription-admin`, `migration-run-exists` (a live run id was reused; pick a new one),
-`queue-id-invalid`.
+`queue-id-invalid`, `subscription-not-found` (device actions on an account with
+no master), `seats-invalid`, `device-id-invalid`.
 
 ## Switches (`src/config/constants.ts`)
 

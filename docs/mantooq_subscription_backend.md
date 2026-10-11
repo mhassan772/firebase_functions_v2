@@ -121,54 +121,110 @@ store rejection uses `failed-precondition`, and retryable store failures use
 
 ### `manageSubscriptionDevice`
 
-Authenticated callable that manages the device list attached to a user's
-subscription. Enforcement is client-side for now: the app reads its own
-`subscription_master` doc and checks that its device ID is listed.
+Authenticated callable that manages the device seats attached to a user's
+subscription. Enforcement is client-side: the app registers its own device,
+reads `subscription_master` and locks premium when its id is not listed.
 
-Request: `{ "action": "register" | "unregister", "deviceId": "..." }`
-(`deviceId` is a client-generated identifier, trimmed, 1-128 characters).
+Request: `{ action, ... }` with exactly the fields of that action; extra fields
+are rejected (`request-fields-invalid`).
+
+| action | fields |
+|---|---|
+| `register` | `deviceId`, `platform`, `name?` |
+| `unregister` | `deviceId` |
+| `replace` | `removeDeviceId`, `deviceId`, `platform`, `name?` |
+| `list` | none |
+
+- `deviceId`: client-generated identifier, trimmed, 1-128 characters
+  (`device-id-invalid`; also when `deviceId` equals `removeDeviceId`).
+- `name`: display name, trimmed, at most 64 characters, defaults to `""`
+  (`device-name-invalid`).
+- `platform`: `ios` or `android`, required wherever a device is added
+  (`device-platform-invalid`).
+- An unknown action fails with `device-action-invalid`.
+
 The user must already have a `subscription_master` doc, otherwise
 `failed-precondition` with details `{ code: "subscription-not-found" }`.
+`register` and `replace` also need the master to be live: `active == true` and
+`expiresAt` in the future, for every source (store, Egypt request or admin
+grant), otherwise `failed-precondition` / `subscription-not-active`.
 
-- `register` succeeds while the device count is below the maximum and is
-  idempotent for an already-registered device. At the limit it fails with
-  `resource-exhausted` and details `{ code: "device-limit-reached", maxDevices }`.
+- `register` adds the device while the count is below the maximum. For a
+  device that is already listed it is a touch: the name and `lastSeenAt` are
+  refreshed only when the last visit is older than 24 hours, otherwise nothing
+  is written. `changed` is `false` either way. At the limit it fails with
+  `resource-exhausted` and details
+  `{ code: "device-limit-reached", maxDevices, devices: [...] }`, the list in
+  the same shape as the response, so the app can offer a replacement without a
+  second call.
 - `unregister` removes a device and records the removal time. Because any
   replacement requires removing a device first, removal is rate-limited: one
   removal per cooldown window. Inside the window it fails with
   `failed-precondition` and details
   `{ code: "device-replacement-cooldown", nextAllowedAt }`. Unregistering a
   device that is not listed is a no-op and does not consume the cooldown.
+- `replace` is an `unregister` of `removeDeviceId` followed by a `register` of
+  `deviceId` in one transaction with one cooldown check. When the register
+  side is refused nothing is written, so a removed seat is never lost.
+- `list` reads without writing.
 
-Both limits are read from `settings/mantooqAppSettings`:
+Both limits are read from the public document `settings_app/subscription`, which the app reads as
+well so the paywall and the device cards show the same number:
 
 ```json
 {
-  "subscription": {
-    "max_number_of_devices": 2,
-    "days_before_replacing_device": 7
-  }
+  "max_number_of_devices": 2,
+  "days_before_replacing_device": 7
 }
 ```
 
 Missing or invalid values fall back to those defaults (2 devices, 7 days).
-The effective maximum also adds the user's `extra_device_seats` field when a
-future extra-seat purchase flow sets it on the master doc.
+The effective maximum adds the account's `extra_device_seats`, which only an
+admin sets (`setExtraSeats` on `adminManageSubscription`).
 
-Response:
+Response, for every action:
 
 ```json
 {
   "devices": {
-    "action": "register",
+    "action": "replace",
     "changed": true,
-    "allowed_devices": ["device-a", "device-b"],
     "max_number_of_devices": 2,
+    "allowed_devices": ["device-b", "device-c"],
+    "devices": [
+      {
+        "id": "device-b",
+        "name": "Pixel 7",
+        "platform": "android",
+        "registered_at": "2026-08-01T00:00:00.000Z",
+        "last_seen_at": "2026-08-24T00:00:00.000Z"
+      },
+      {
+        "id": "device-c",
+        "name": "iPad",
+        "platform": "ios",
+        "registered_at": "2026-08-24T00:00:00.000Z",
+        "last_seen_at": "2026-08-24T00:00:00.000Z"
+      }
+    ],
     "last_date_replacing_device": "2026-08-24T00:00:00.000Z",
     "next_replacement_allowed_at": "2026-08-31T00:00:00.000Z"
   }
 }
 ```
+
+`devices` has one row per id in `allowed_devices`, in registration order. A
+seat registered before devices carried metadata has `name: ""`,
+`platform: "unknown"` and no dates. The two cooldown fields are present only
+after a user removal.
+
+On the master document the seats are stored as `allowed_devices` (membership),
+`devices` (a map keyed by device id: `{ name, platform, registeredAt,
+lastSeenAt }`), `device_log` (the last 20 actions:
+`{ at, actor, action, deviceId?, removedDeviceId?, seats? }`, with actor
+`user` or `admin:<uid>`), `last_date_replacing_device` and
+`extra_device_seats`. Membership is always `allowed_devices`; a `devices` row
+can never disagree with it because rows leave with their seat.
 
 ### `appleSubscriptionNotifications`
 
@@ -209,9 +265,10 @@ It contains only:
 - Apple-only `originalTransactionId`
 - Google-only `purchaseReference` (SHA-256, never a token)
 - `lastStoreEventAt`, `lastVerifiedAt`, `createdAt`, `updatedAt`
-- Device-management fields owned by `manageSubscriptionDevice`, preserved
-  across store-driven rebuilds: `allowed_devices`,
-  `last_date_replacing_device`, and future `extra_device_seats`
+- Device-management fields owned by `manageSubscriptionDevice` and the admin
+  device actions, preserved across store-driven rebuilds and manual grants:
+  `allowed_devices`, `devices`, `device_log`, `last_date_replacing_device`
+  and `extra_device_seats`
 
 Protected collections:
 

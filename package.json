@@ -16,7 +16,7 @@
     "backfill:podcast-audit": "node scripts/backfill/podcast-audit.mjs",
     "backfill:book-listeners": "TZ=UTC node scripts/backfill/book-listeners.mjs",
     "cleanup:delete-collection": "node scripts/cleanup/delete-collection.mjs",
-    "test:integration": "npm run build && bash scripts/emulator/with-java.sh firebase emulators:exec --config firebase.integration-test.json --only firestore,auth --project demo-mantooq 'node --test test/integration/*.test.js'",
+    "test:integration": "npm run build && bash scripts/emulator/with-java.sh firebase emulators:exec --config firebase.integration-test.json --only firestore,auth --project demo-mantooq 'node --test --test-concurrency=1 test/integration/*.test.js'",
     "admin:manual-grant": "node scripts/admin/manual-grant.mjs",
     "admin:migrate-legacy": "node scripts/admin/migrate-legacy.mjs"
   },

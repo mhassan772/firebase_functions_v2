@@ -12,6 +12,7 @@ import {
 } from "../services/subscriptions/crypto";
 import {
   asCallableError,
+  isCallerRefusal,
   safeErrorCode,
   SubscriptionError,
 } from "../services/subscriptions/errors";
@@ -29,12 +30,16 @@ import {
 import { requireRuntimeSecret } from "../services/subscriptions/runtimeSecrets";
 import {
   DeviceAction,
+  DeviceActionInput,
   DeviceManagementResponse,
+  isDevicePlatform,
   manageSubscriptionDevices,
   MAX_DEVICE_ID_LENGTH,
-  resolveDeviceLimits,
+  MAX_DEVICE_NAME_LENGTH,
+  readDeviceLimits,
+  USER_ACTOR,
 } from "../services/subscriptions/devices";
-import { getSettings } from "./downloadHandlers";
+import { DevicePlatform } from "../types/subscriptions";
 
 interface GoogleRtdnPayload {
   packageName?: unknown;
@@ -136,19 +141,21 @@ export async function handleManageSubscriptionDevice(
   const operationId = crypto.randomUUID();
   let action: DeviceAction | undefined;
   try {
-    assertExactKeys(data, ["action", "deviceId"]);
-    const request = data as Record<string, unknown>;
-    action = readDeviceAction(request.action);
-    const deviceId = readDeviceId(request.deviceId);
+    if (!isPlainRecord(data)) {
+      throw new SubscriptionError(
+        "invalid-input",
+        "request-body-invalid",
+        "The request body is invalid."
+      );
+    }
+    action = readDeviceAction(data.action);
+    const input = readDeviceActionInput(action, data);
     const uid = requireAuthenticatedUid(context);
     logInfo("subscription_device_start", operationId, { action });
-    const limits = resolveDeviceLimits(await getSettings());
-    const devices = await manageSubscriptionDevices(
-      uid,
-      action,
-      deviceId,
-      limits
-    );
+    const limits = await readDeviceLimits();
+    const devices = await manageSubscriptionDevices(uid, input, limits, {
+      actor: USER_ACTOR,
+    });
     logInfo("subscription_device_success", operationId, {
       action,
       changed: devices.changed,
@@ -158,6 +165,59 @@ export async function handleManageSubscriptionDevice(
   } catch (error) {
     logCallableFailure("subscription_device", operationId, undefined, error);
     throw asCallableError(error);
+  }
+}
+
+/**
+ * Validates the exact field set of one device action. `name` is optional and
+ * display-only; `platform` is required wherever a device is being added,
+ * because the list is shown to the user with a platform icon.
+ */
+export function readDeviceActionInput(
+  action: DeviceAction,
+  request: Record<string, unknown>
+): DeviceActionInput {
+  const nameKey = request.name !== undefined ? ["name"] : [];
+  switch (action) {
+    case "list":
+      assertExactKeys(request, ["action"]);
+      return { action };
+    case "unregister":
+      assertExactKeys(request, ["action", "deviceId"]);
+      return { action, deviceId: readDeviceId(request.deviceId) };
+    case "register":
+      assertExactKeys(request, ["action", "deviceId", "platform", ...nameKey]);
+      return {
+        action,
+        deviceId: readDeviceId(request.deviceId),
+        name: readDeviceName(request.name),
+        platform: readDevicePlatform(request.platform),
+      };
+    case "replace": {
+      assertExactKeys(request, [
+        "action",
+        "deviceId",
+        "removeDeviceId",
+        "platform",
+        ...nameKey,
+      ]);
+      const deviceId = readDeviceId(request.deviceId);
+      const removeDeviceId = readDeviceId(request.removeDeviceId);
+      if (deviceId === removeDeviceId) {
+        throw new SubscriptionError(
+          "invalid-input",
+          "device-id-invalid",
+          "A device cannot replace itself."
+        );
+      }
+      return {
+        action,
+        deviceId,
+        removeDeviceId,
+        name: readDeviceName(request.name),
+        platform: readDevicePlatform(request.platform),
+      };
+    }
   }
 }
 
@@ -389,7 +449,12 @@ function readPlatform(
 }
 
 function readDeviceAction(value: unknown): DeviceAction {
-  if (value !== "register" && value !== "unregister") {
+  if (
+    value !== "register" &&
+    value !== "unregister" &&
+    value !== "replace" &&
+    value !== "list"
+  ) {
     throw new SubscriptionError(
       "invalid-input",
       "device-action-invalid",
@@ -399,7 +464,7 @@ function readDeviceAction(value: unknown): DeviceAction {
   return value;
 }
 
-function readDeviceId(value: unknown): string {
+export function readDeviceId(value: unknown): string {
   const deviceId = typeof value === "string" ? value.trim() : "";
   if (!deviceId || deviceId.length > MAX_DEVICE_ID_LENGTH) {
     throw new SubscriptionError(
@@ -409,6 +474,39 @@ function readDeviceId(value: unknown): string {
     );
   }
   return deviceId;
+}
+
+function readDeviceName(value: unknown): string {
+  if (value === undefined) {
+    return "";
+  }
+  if (typeof value !== "string") {
+    throw deviceNameInvalid();
+  }
+  const name = value.trim();
+  if (name.length > MAX_DEVICE_NAME_LENGTH) {
+    throw deviceNameInvalid();
+  }
+  return name;
+}
+
+function deviceNameInvalid(): SubscriptionError {
+  return new SubscriptionError(
+    "invalid-input",
+    "device-name-invalid",
+    `The name field must be a string of at most ${MAX_DEVICE_NAME_LENGTH} characters.`
+  );
+}
+
+function readDevicePlatform(value: unknown): DevicePlatform {
+  if (!isDevicePlatform(value)) {
+    throw new SubscriptionError(
+      "invalid-input",
+      "device-platform-invalid",
+      "The platform field must be ios or android."
+    );
+  }
+  return value;
 }
 
 export function assertExactKeys(data: unknown, allowedKeys: string[]): void {
@@ -551,13 +649,7 @@ function logCallableFailure(
     ...(platform ? { platform } : {}),
     code: safeErrorCode(error),
   };
-  if (
-    error instanceof SubscriptionError &&
-    (error.kind === "invalid-input" ||
-      error.kind === "invalid-store-data" ||
-      error.kind === "account-binding-mismatch" ||
-      error.kind === "ownership-conflict")
-  ) {
+  if (isCallerRefusal(error)) {
     logWarning(`${eventPrefix}_rejection`, operationId, fields);
   } else {
     logFailure(eventPrefix, operationId, error, fields);

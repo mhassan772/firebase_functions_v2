@@ -34,10 +34,21 @@ import {
   isHexHash,
   resolveUser,
 } from "../services/subscriptions/userResolution";
+import {
+  DeviceLimits,
+  DeviceManagementResponse,
+  readDeviceLimits,
+} from "../services/subscriptions/devices";
+import {
+  AdminDeviceMutation,
+  adminManageDevices,
+  assertExtraSeats,
+} from "../services/subscriptions/adminDevices";
 import { requireSubscriptionAdmin } from "../utils/adminRole";
 import {
   assertExactKeys,
   isPlainRecord,
+  readDeviceId,
   requireAuthenticatedUid,
 } from "./verifiedSubscriptionHandlers";
 
@@ -64,7 +75,11 @@ type AdminAction =
   | "listManual"
   | "migrateLegacy"
   | "importLegacyRows"
-  | "getMigrationRun";
+  | "getMigrationRun"
+  | "listDevices"
+  | "removeDevice"
+  | "setExtraSeats"
+  | "resetDeviceCooldown";
 
 export interface AccountResponse {
   user: ResolvedUser;
@@ -73,6 +88,11 @@ export interface AccountResponse {
 
 export interface MutationResponse extends ManualMutationResult {
   user: ResolvedUser;
+}
+
+export interface DevicesResponse {
+  user: ResolvedUser;
+  devices: DeviceManagementResponse;
 }
 
 /**
@@ -125,8 +145,30 @@ async function dispatch(
       const user = await resolveUser(readUserReference(request.user));
       return {
         user,
-        account: await readAccountSubscription(user.uid),
+        account: await readAccountSubscription(user.uid, new Date(), await deviceLimits()),
       } satisfies AccountResponse;
+    }
+    case "listDevices": {
+      assertExactKeys(request, ["action", "user"]);
+      return manageDevices(request, adminUid, { action: "listDevices" });
+    }
+    case "removeDevice": {
+      assertExactKeys(request, ["action", "user", "deviceId"]);
+      return manageDevices(request, adminUid, {
+        action: "removeDevice",
+        deviceId: readDeviceId(request.deviceId),
+      });
+    }
+    case "setExtraSeats": {
+      assertExactKeys(request, ["action", "user", "seats"]);
+      return manageDevices(request, adminUid, {
+        action: "setExtraSeats",
+        seats: assertExtraSeats(request.seats),
+      });
+    }
+    case "resetDeviceCooldown": {
+      assertExactKeys(request, ["action", "user"]);
+      return manageDevices(request, adminUid, { action: "resetDeviceCooldown" });
     }
     case "grant": {
       assertExactKeys(request, [
@@ -248,6 +290,25 @@ async function dispatch(
   }
 }
 
+async function manageDevices(
+  request: Record<string, unknown>,
+  adminUid: string,
+  mutation: AdminDeviceMutation
+): Promise<DevicesResponse> {
+  const user = await resolveUser(readUserReference(request.user));
+  const devices = await adminManageDevices(
+    { uid: user.uid, adminUid },
+    mutation,
+    await deviceLimits()
+  );
+  return { user, devices };
+}
+
+/** The device limit lives in the public subscription settings; one read per admin call. */
+async function deviceLimits(): Promise<DeviceLimits> {
+  return readDeviceLimits();
+}
+
 async function mutate(
   request: Record<string, unknown>,
   adminUid: string,
@@ -354,6 +415,10 @@ function readAction(value: unknown): AdminAction {
     case "migrateLegacy":
     case "importLegacyRows":
     case "getMigrationRun":
+    case "listDevices":
+    case "removeDevice":
+    case "setExtraSeats":
+    case "resetDeviceCooldown":
       return value;
     default:
       throw invalid("action-invalid", "The action is not supported.");
