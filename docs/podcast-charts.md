@@ -26,6 +26,7 @@ The app's home shows two podcast charts: popular podcasts and popular converted 
 5. It ranks the podcasts:
    - The popular chart counts the distinct users with a follow or a listen inside the window.
    - The converted chart counts the distinct users with a conversion, or a listen to a converted podcast, inside the window. A user who did both counts once.
+   - A replaced podcast's users count toward its replacement, as listed in `settings_app/replaced_podcasts_{1..n}` (`n` from `settings_app/settings_metadata.replaced_podcasts.number_of_documents`), before the deny check; a user of both counts once. If one of those documents is missing, the run fails and yesterday's charts stay.
    - Podcasts in the admin deny list (`settings_app/admin_deny{n}`) are left out. Category blocking is not applied, because it needs each podcast's categories from Podcast Index.
 6. It adds what the app needs to draw each row, so phones never call Podcast Index for the charts (see "Podcast metadata" below). A podcast with no title or image is left out and logged, and the next podcast down takes its place, so each chart still fills to the list length.
 7. It deletes audit records older than retention, in batches of 500.
@@ -36,7 +37,8 @@ Each entry gets its title, image and ids from the first of these sources that ha
 
 1. The hand-picked lists: `settings_app/popular_podcasts_{1..n}` (field `popular_podcasts`) and `settings_app/popular_converted_podcasts_{1..n}` (field `popular_converted_podcasts`). The values of `n` come from `settings_app/settings_metadata.podcasts_featured.number_of_popular_podcasts` and `number_of_popular_converted_podcasts`, and default to 1.
 2. Yesterday's chart entries, so a podcast that stays in a chart is looked up only once.
-3. The Podcast Index API (`/podcasts/byfeedid`), signed with the keys in `settings_app/settings_metadata.podcast_index_keys`.
+3. The replaced podcast links (`toTitle` and `toImage` in `settings_app/replaced_podcasts_{1..n}`), so a replacement that was never ranked needs no lookup.
+4. The Podcast Index API (`/podcasts/byfeedid`), signed with the keys in `settings_app/settings_metadata.podcast_index_keys`.
    - It makes at most one call per chart entry each run, and each call times out after 5 seconds.
    - A failed call only leaves that podcast out for the day.
    - Without keys, no calls are made.

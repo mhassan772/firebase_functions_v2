@@ -87,6 +87,34 @@ test("curated metadata wins over yesterday's, and the API is only asked for the 
   assert.deepEqual(asked, [5, 4]);
 });
 
+test("a replacement never ranked before takes its title and image from its replaced podcast link", async () => {
+  const curated = metadataByIndexId([[item(1, "curated one")]]);
+  const previous = metadataByIndexId([[item(2, "old two"), { podcastIndexId: 3, title: "no image" }]]);
+  const replaced = metadataByIndexId([
+    [
+      { podcastIndexId: 1, title: "replacement one", image: "https://img/r1.jpg" },
+      { podcastIndexId: 2, title: "replacement two", image: "https://img/r2.jpg" },
+      { podcastIndexId: 3, title: "replacement three", image: "https://img/r3.jpg" },
+      { podcastIndexId: 4, title: "", image: "https://img/r4.jpg" },
+    ],
+  ]);
+  const asked = [];
+  const lookup = async (id) => {
+    asked.push(id);
+    return null;
+  };
+  const ranking = [1, 2, 3, 4].map((id) => ({ podcast_id: `p-${id}`, users: 5 - id }));
+  const result = await enrichRanking(ranking, { curated, previous, replaced, lookup, limit: 30, maxLookups: 30 });
+  assert.deepEqual(result.entries, [
+    { podcast_id: "p-1", users: 4, title: "curated one", image: "https://img/1.jpg", podcastIndexId: 1 },
+    { podcast_id: "p-2", users: 3, title: "old two", image: "https://img/2.jpg", podcastIndexId: 2 },
+    { podcast_id: "p-3", users: 2, title: "replacement three", image: "https://img/r3.jpg", podcastIndexId: 3 },
+  ]);
+  // Only the replacement without a title is looked up.
+  assert.deepEqual(asked, [4]);
+  assert.deepEqual(result.dropped, ["p-4"]);
+});
+
 test("lookups stop at the cap, and a failing lookup only drops that podcast", async () => {
   let calls = 0;
   const lookup = async (id) => {

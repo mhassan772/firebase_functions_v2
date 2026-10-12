@@ -15,7 +15,11 @@ import {
   collectionStart,
   denyDocCountFrom,
   deniedPodcastIdsFrom,
+  missingDocNumbers,
   rankPodcastsByDistinctUsers,
+  replacementDocCountFrom,
+  replacementMetadataFrom,
+  replacementsFrom,
   resolvePopularPodcastsSettings,
 } from "./podcastAuditHandlers";
 import {
@@ -57,27 +61,32 @@ export async function handlePopularPodcasts(): Promise<void> {
   const windowStart = new Date(runStart.getTime() - settings.windowDays * DAY_MS);
   const settingsMetadata = (await admin.firestore().doc("settings_app/settings_metadata").get()).data();
   const denied = await getDeniedPodcastIds(settingsMetadata);
+  const replaced = await getReplacements(settingsMetadata);
   // Unlimited here: entries without metadata are dropped later and the list is filled from below.
   const popularRanking = rankPodcastsByDistinctUsers(
     await readRecordsSince(PODCAST_AUDIT_COLLECTION, windowStart),
     denied,
     Number.MAX_SAFE_INTEGER,
     POPULAR_ACTIONS,
+    replaced.replacements,
   );
   const convertedRanking = rankPodcastsByDistinctUsers(
     await readRecordsSince(CONVERTED_PODCAST_AUDIT_COLLECTION, windowStart),
     denied,
     Number.MAX_SAFE_INTEGER,
     CONVERTED_ACTIONS,
+    replaced.replacements,
   );
 
   const curated = metadataByIndexId(await readCuratedLists(settingsMetadata));
   const previous = metadataByIndexId(await readPreviousRankings());
+  const replacedMetadata = metadataByIndexId([replaced.metadata]);
   const lookup = cachedLookup(settingsMetadata);
   const enrich = async (docId: string, ranking: RankedPodcast[]): Promise<RankedPodcastEntry[]> => {
     const result = await enrichRanking(ranking, {
       curated,
       previous,
+      replaced: replacedMetadata,
       lookup,
       limit: settings.listLength,
       maxLookups: settings.listLength,
@@ -101,6 +110,7 @@ export async function handlePopularPodcasts(): Promise<void> {
     popular: popular.length,
     converted: converted.length,
     denied: denied.size,
+    replaced: replaced.replacements.size,
     pruned,
   });
 }
@@ -174,6 +184,32 @@ async function getDeniedPodcastIds(settingsMetadata: DocumentData | undefined): 
   const refs = Array.from({ length: count }, (_, i) => firestore.collection("settings_app").doc(`admin_deny${i + 1}`));
   const docs = await firestore.getAll(...refs);
   return deniedPodcastIdsFrom(docs.map((doc) => doc.data()));
+}
+
+/**
+ * The replaced podcast links, keyed by `p-` id, and the replacements' titles and images.
+ *
+ * A missing document fails the run, so yesterday's charts stay rather than a chart that hands
+ * a replaced podcast's users to nobody.
+ */
+async function getReplacements(
+  settingsMetadata: DocumentData | undefined,
+): Promise<{ replacements: Map<string, string>; metadata: unknown[] }> {
+  const firestore = admin.firestore();
+  const count = replacementDocCountFrom(settingsMetadata);
+  if (count === 0) {
+    return { replacements: new Map(), metadata: [] };
+  }
+  const refs = Array.from({ length: count }, (_, i) => firestore.doc(`settings_app/replaced_podcasts_${i + 1}`));
+  const docs = await firestore.getAll(...refs);
+  const missing = missingDocNumbers(docs);
+  if (missing.length > 0) {
+    const message = `popular podcasts: replaced_podcasts document(s) ${missing.join(", ")} of ${count} missing`;
+    functions.logger.error(message);
+    throw new Error(message);
+  }
+  const data = docs.map((doc) => doc.data());
+  return { replacements: replacementsFrom(data), metadata: replacementMetadataFrom(data) };
 }
 
 async function readRecordsSince(collection: string, since: Date): Promise<AuditRecord[]> {

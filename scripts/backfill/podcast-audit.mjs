@@ -94,13 +94,23 @@ async function* pagedDocs(db, collection, pageSize) {
   }
 }
 
-async function readDenied(db) {
-  const metadata = await db.doc('settings_app/settings_metadata').get()
-  const count = audit.denyDocCountFrom(metadata.data())
+async function readDenied(db, metadata) {
+  const count = audit.denyDocCountFrom(metadata)
   if (count === 0) return new Set()
   const refs = Array.from({ length: count }, (_, i) => db.doc(`settings_app/admin_deny${i + 1}`))
   const docs = await db.getAll(...refs)
   return audit.deniedPodcastIdsFrom(docs.map((doc) => doc.data()))
+}
+
+// Replaced podcasts count toward their replacement, as in popularPodcastsV1, so the report matches the chart.
+async function readReplacements(db, metadata) {
+  const count = audit.replacementDocCountFrom(metadata)
+  if (count === 0) return new Map()
+  const refs = Array.from({ length: count }, (_, i) => db.doc(`settings_app/replaced_podcasts_${i + 1}`))
+  const docs = await db.getAll(...refs)
+  const missing = audit.missingDocNumbers(docs)
+  if (missing.length > 0) fail(`replaced_podcasts document(s) ${missing.join(', ')} of ${count} missing.`)
+  return audit.replacementsFrom(docs.map((doc) => doc.data()))
 }
 
 async function dryRun(args) {
@@ -135,16 +145,22 @@ async function dryRun(args) {
   }
 
   const inWindow = (event) => event.data.timestamp.getTime() > windowStart
-  const denied = await readDenied(db)
+  const metadata = (await db.doc('settings_app/settings_metadata').get()).data()
+  const denied = await readDenied(db, metadata)
+  const replacements = await readReplacements(db, metadata)
   const top20Popular = audit.rankPodcastsByDistinctUsers(
     all.filter((e) => e.collection === audit.PODCAST_AUDIT_COLLECTION && inWindow(e)).map((e) => e.data),
     denied,
     20,
+    undefined,
+    replacements,
   )
   const top20Converted = audit.rankPodcastsByDistinctUsers(
     all.filter((e) => e.collection === audit.CONVERTED_PODCAST_AUDIT_COLLECTION && inWindow(e)).map((e) => e.data),
     denied,
     20,
+    undefined,
+    replacements,
   )
 
   const createdAt = now.toISOString()
@@ -166,7 +182,7 @@ async function dryRun(args) {
   }
   writeFileSync(file, JSON.stringify(output, null, 2))
 
-  console.log(`Retention ${settings.retentionDays} days, ranking window ${settings.windowDays} days, ${denied.size} denied podcasts.`)
+  console.log(`Retention ${settings.retentionDays} days, ranking window ${settings.windowDays} days, ${denied.size} denied podcasts, ${replacements.size} replaced podcasts.`)
   console.table(totals)
   console.log('Skipped for unreadable data:', skipped)
   console.log(`Events to write: ${all.length}`)
