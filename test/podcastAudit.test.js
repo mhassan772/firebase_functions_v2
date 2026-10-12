@@ -16,8 +16,12 @@ const {
   followEventsFromDoc,
   isListened,
   listenEventsFromDoc,
+  missingDocNumbers,
   parseDate,
   rankPodcastsByDistinctUsers,
+  replacementDocCountFrom,
+  replacementMetadataFrom,
+  replacementsFrom,
   resolvePopularPodcastsSettings,
   withinRetention,
 } = require("../lib/handlers/podcastAuditHandlers");
@@ -352,6 +356,120 @@ test("the ranking drops denied podcasts and malformed records, and keeps ties in
     { podcast_id: "p-4", users: 1 },
     { podcast_id: "p-30", users: 1 },
   ]);
+});
+
+const link = (from, to, overrides = {}) => ({
+  fromPodcastIndexId: from,
+  fromTitle: `from ${from}`,
+  fromImage: "",
+  toPodcastIndexId: to,
+  toTitle: `to ${to}`,
+  toImage: `https://img/${to}.jpg`,
+  replacedAt: Timestamp.fromDate(NOW),
+  ...overrides,
+});
+
+test("a replaced podcast's users count toward its replacement, even though it is denied", () => {
+  const records = [
+    { podcast_id: "p-1", user_guid: "a", action: "follow" },
+    { podcast_id: "1", user_guid: "b", action: "listen" },
+    { podcast_id: "p-9", user_guid: "c", action: "follow" },
+    { podcast_id: "p-2", user_guid: "d", action: "follow" },
+    { podcast_id: "p-2", user_guid: "e", action: "follow" },
+  ];
+  // The portal denies every replaced podcast.
+  const denied = new Set(["1"]);
+  const replacements = new Map([["p-1", "p-9"]]);
+  assert.deepEqual(rankPodcastsByDistinctUsers(records, denied, 10, new Set(["follow", "listen"]), replacements), [
+    { podcast_id: "p-9", users: 3 },
+    { podcast_id: "p-2", users: 2 },
+  ]);
+});
+
+test("a user of both a replaced podcast and its replacement counts once, and a denied replacement stays out", () => {
+  const records = [
+    { podcast_id: "p-1", user_guid: "a", action: "convert" },
+    { podcast_id: "p-9", user_guid: "a", action: "listen" },
+    { podcast_id: "p-3", user_guid: "b", action: "convert" },
+    { podcast_id: "p-4", user_guid: "c", action: "convert" },
+  ];
+  // Several replaced podcasts can share one replacement.
+  const replacements = new Map([["p-1", "p-9"], ["p-3", "p-9"], ["p-4", "p-8"]]);
+  assert.deepEqual(rankPodcastsByDistinctUsers(records, new Set(["1", "3", "4"]), 10, undefined, replacements), [
+    { podcast_id: "p-9", users: 2 },
+    { podcast_id: "p-8", users: 1 },
+  ]);
+  assert.deepEqual(rankPodcastsByDistinctUsers(records, new Set(["1", "3", "4", "9"]), 10, undefined, replacements), [
+    { podcast_id: "p-8", users: 1 },
+  ]);
+});
+
+test("without replacements the ranking is unchanged", () => {
+  const records = [
+    { podcast_id: "p-1", user_guid: "a" },
+    { podcast_id: "p-9", user_guid: "b" },
+    { podcast_id: "p-9", user_guid: "c" },
+    { podcast_id: "other-source", user_guid: "d" },
+  ];
+  const denied = new Set(["1"]);
+  const expected = [
+    { podcast_id: "p-9", users: 2 },
+    { podcast_id: "other-source", users: 1 },
+  ];
+  assert.deepEqual(rankPodcastsByDistinctUsers(records, denied, 10), expected);
+  assert.deepEqual(rankPodcastsByDistinctUsers(records, denied, 10, undefined, undefined), expected);
+  assert.deepEqual(rankPodcastsByDistinctUsers(records, denied, 10, undefined, new Map()), expected);
+});
+
+test("replacement links are read by feed id, skipping unusable ones", () => {
+  const docs = [
+    {
+      replaced_podcasts: [
+        link(1, 9),
+        link("p-2", "9"), // p- and bare string ids are read as the app's ids are
+        link(3, 3), // a podcast replaced by itself
+        link(0, 9),
+        link(-4, 9),
+        link(5, 0),
+        link(6, null),
+        link(undefined, 9),
+        link("abc", 9),
+        link(7, 1.5),
+        null,
+        "x",
+      ],
+    },
+    { replaced_podcasts: [link(1, 8), link(10, 11)] }, // a repeated replaced podcast keeps its first link
+    { replaced_podcasts: [] }, // a leftover chunk
+    { replaced_podcasts: "x" },
+    {},
+    undefined,
+  ];
+  assert.deepEqual([...replacementsFrom(docs)], [
+    ["p-1", "p-9"],
+    ["p-2", "p-9"],
+    ["p-10", "p-11"],
+  ]);
+  assert.equal(replacementsFrom([]).size, 0);
+  assert.deepEqual(replacementMetadataFrom([{ replaced_podcasts: [link(1, 9), link(3, 3), link(10, 11, { toTitle: "" })] }]), [
+    { podcastIndexId: 9, title: "to 9", image: "https://img/9.jpg" },
+    { podcastIndexId: 11, title: "", image: "https://img/11.jpg" },
+  ]);
+});
+
+test("the replacement document count is read from settings_metadata", () => {
+  assert.equal(replacementDocCountFrom({ replaced_podcasts: { number_of_documents: 2, last_update_at: NOW } }), 2);
+  assert.equal(replacementDocCountFrom({ replaced_podcasts: { number_of_documents: "3" } }), 3);
+  for (const bad of [undefined, null, {}, { replaced_podcasts: null }, { replaced_podcasts: { number_of_documents: "x" } }]) {
+    assert.equal(replacementDocCountFrom(bad), 0, JSON.stringify(bad));
+  }
+  assert.equal(replacementDocCountFrom({ replaced_podcasts: { number_of_documents: -2 } }), 0);
+});
+
+test("a missing replacement document is reported by its number", () => {
+  assert.deepEqual(missingDocNumbers([{ exists: true }, { exists: false }, { exists: true }, { exists: false }]), [2, 4]);
+  assert.deepEqual(missingDocNumbers([{ exists: true }]), []);
+  assert.deepEqual(missingDocNumbers([]), []);
 });
 
 test("feed ids are read from p- ids and bare numbers only", () => {

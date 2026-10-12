@@ -395,19 +395,25 @@ export function convertEventsForChange(
  *
  * Counting users rather than records means one user following and listening adds one.
  * Ties are ordered by podcast id so the list does not reshuffle daily.
+ *
+ * A record for a replaced podcast counts toward its replacement, and the deny list is checked
+ * after that: the portal denies every replaced podcast, and a denied replacement stays out.
  */
 export function rankPodcastsByDistinctUsers(
   records: Iterable<AuditRecord>,
   deniedPodcastIds: ReadonlySet<string>,
   limit: number,
   actions?: ReadonlySet<string>,
+  replacements?: ReadonlyMap<string, string>,
 ): RankedPodcast[] {
   const usersByPodcast = new Map<string, Set<string>>();
   for (const record of records) {
     if (actions && !actions.has(String(record.action))) {
       continue;
     }
-    const podcastId = canonicalPodcastId(record.podcast_id);
+    const recordedId = canonicalPodcastId(record.podcast_id);
+    // One lookup is enough: the portal never lets a replacement be replaced itself.
+    const podcastId = recordedId !== null ? replacements?.get(recordedId) ?? recordedId : null;
     const uid = asId(record.user_guid);
     if (podcastId === null || uid === null || isDenied(podcastId, deniedPodcastIds)) {
       continue;
@@ -466,6 +472,69 @@ export function denyDocCountFrom(settingsMetadata: unknown): number {
   const filtering = (settingsMetadata as Record<string, unknown> | undefined)?.podcasts_filtering;
   const count = asNumber((filtering as Record<string, unknown> | undefined)?.number_of_admin_deny);
   return Math.max(0, Math.trunc(count));
+}
+
+/** One replaced podcast link from `settings_app/replaced_podcasts_{n}`, as feed ids. */
+interface Replacement {
+  from: number;
+  to: number;
+  entry: Record<string, unknown>;
+}
+
+/** The usable links in the replacement documents; a link without two distinct feed ids is skipped. */
+function replacementLinks(docs: unknown[]): Replacement[] {
+  const links: Replacement[] = [];
+  for (const doc of docs) {
+    for (const entry of asList(doc, "replaced_podcasts")) {
+      const from = podcastIndexIdOf(entry.fromPodcastIndexId);
+      const to = podcastIndexIdOf(entry.toPodcastIndexId);
+      if (from !== null && to !== null && from !== to) {
+        links.push({ from, to, entry });
+      }
+    }
+  }
+  return links;
+}
+
+/**
+ * Maps each replaced podcast to its replacement, both in the `p-` form the audit records use.
+ *
+ * The portal lists each replaced podcast once; should one repeat, the first link wins.
+ */
+export function replacementsFrom(docs: unknown[]): Map<string, string> {
+  const replacements = new Map<string, string>();
+  for (const { from, to } of replacementLinks(docs)) {
+    const fromId = `${PODCAST_ID_PREFIX}${from}`;
+    if (!replacements.has(fromId)) {
+      replacements.set(fromId, `${PODCAST_ID_PREFIX}${to}`);
+    }
+  }
+  return replacements;
+}
+
+/**
+ * The replacements' titles and images as stored items, so a replacement never ranked before
+ * can be drawn without a Podcast Index lookup. Empty values are rejected where they are read.
+ */
+export function replacementMetadataFrom(docs: unknown[]): { podcastIndexId: number; title: unknown; image: unknown }[] {
+  return replacementLinks(docs).map(({ to, entry }) => ({ podcastIndexId: to, title: entry.toTitle, image: entry.toImage }));
+}
+
+/** How many `replaced_podcasts_{n}` documents `settings_app/settings_metadata` says exist. */
+export function replacementDocCountFrom(settingsMetadata: unknown): number {
+  const replaced = (settingsMetadata as Record<string, unknown> | undefined)?.replaced_podcasts;
+  const count = asNumber((replaced as Record<string, unknown> | undefined)?.number_of_documents);
+  return Math.max(0, Math.trunc(count));
+}
+
+/**
+ * The numbers, from 1, of the replacement documents that were read but do not exist.
+ *
+ * The portal never deletes one, so a gap means the links are incomplete; ranking without them
+ * would hand a replaced podcast's users to nobody.
+ */
+export function missingDocNumbers(docs: { exists: boolean }[]): number[] {
+  return docs.flatMap((doc, i) => (doc.exists ? [] : [i + 1]));
 }
 
 /**

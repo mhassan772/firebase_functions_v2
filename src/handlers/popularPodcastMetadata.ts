@@ -129,15 +129,17 @@ export function listField(data: unknown, field: string): unknown[] {
 /**
  * Turns a ranking into drawable entries, in ranking order, until `limit` entries are found.
  *
- * Metadata comes from the curated lists first, then yesterday's ranking, then `lookup`, which
- * is called at most `maxLookups` times. A podcast with no usable metadata is dropped and the
- * ranking is read further down to fill its place.
+ * Metadata comes from the curated lists first, then yesterday's ranking, then the replaced
+ * podcast links, which name a replacement that may never have been ranked, then `lookup`,
+ * which is called at most `maxLookups` times. A podcast with no usable metadata is dropped and
+ * the ranking is read further down to fill its place.
  */
 export async function enrichRanking(
   ranking: RankedPodcast[],
   options: {
     curated: Map<number, PodcastMetadata>;
     previous: Map<number, PodcastMetadata>;
+    replaced?: Map<number, PodcastMetadata>;
     lookup?: MetadataLookup;
     limit: number;
     maxLookups: number;
@@ -152,7 +154,9 @@ export async function enrichRanking(
     }
     const indexId = podcastIndexIdOf(ranked.podcast_id);
     let metadata: PodcastMetadata | null | undefined =
-      indexId === null ? null : options.curated.get(indexId) ?? options.previous.get(indexId);
+      indexId === null
+        ? null
+        : options.curated.get(indexId) ?? options.previous.get(indexId) ?? options.replaced?.get(indexId);
     if (metadata === undefined && indexId !== null && options.lookup && lookups < options.maxLookups) {
       lookups++;
       metadata = await options.lookup(indexId).catch(() => null);
