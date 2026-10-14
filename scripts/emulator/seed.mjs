@@ -7,7 +7,8 @@
  * until it has confirmed the emulators answer: the emulator hosts are forced below, and the
  * first request is an emulator-only wipe that fails when no emulator is running.
  *
- * Everything here is made up; nothing is copied from production.
+ * No user data is copied from production. The only production values are the public
+ * category names in SUB_CATEGORIES, which the admin portal matches by exact name.
  */
 import { createHash } from 'node:crypto'
 import { initializeApp } from 'firebase-admin/app'
@@ -28,6 +29,82 @@ const ACCOUNTS = [
   { uid: 'emulator-free', email: 'free@mantooq.test', displayName: 'Free tester', premium: false },
   { uid: 'emulator-admin', email: 'admin@mantooq.test', displayName: 'Admin tester', premium: false, role: 'admin' },
 ]
+
+// categories/main.sub_categories as in production (ids 1000–1070). The admin portal's add-book
+// details step lists these names, and the content classifier skill's JSON names them exactly.
+const SUB_CATEGORIES = {
+  '1000': 'تدبر القرآن',
+  '1001': 'التهيئة والعلاقة مع القرآن',
+  '1002': 'التنمية وتطوير السلوك',
+  '1003': 'الروايات',
+  '1004': 'القصص القصيرة',
+  '1005': 'بوصلة المصلح',
+  '1006': 'وعي المسلم المعاصر',
+  '1007': 'أخلاق وفضائل طلب العلم',
+  '1008': 'مهارات طالب العلم',
+  '1009': 'التفاسير وغريب القرآن',
+  '1010': 'علوم القرآن',
+  '1011': 'التجويد والقراءات',
+  '1012': 'آداب حملة القرآن وفضائله',
+  '1013': 'السيرة النبوية والمغازي',
+  '1014': 'شمائل النبي وفضله',
+  '1015': 'المرأة المسلمة',
+  '1016': 'جمالية الإسلام',
+  '1017': 'التفنيدات والمناقشات',
+  '1018': 'إثبات صحة الإسلام',
+  '1019': 'الدفاع عن السنة وحجيتها',
+  '1020': 'كتب الحديث وشروحها',
+  '1021': 'علوم الحديث',
+  '1022': 'كتب التاريخ الموجزة والشاملة',
+  '1023': 'التاريخ الحديث',
+  '1024': 'التاريخ الإسلامي',
+  '1025': 'الدولة العثمانية',
+  '1026': 'الدولة الأموية',
+  '1027': 'الدولة العباسية',
+  '1028': 'دولة المغرب',
+  '1029': 'تاريخ الدول الغربية',
+  '1030': 'رحلات ومذكرات',
+  '1031': 'التاريخ القديم',
+  '1032': 'أدعية وأذكار',
+  '1033': 'فضائل الأعمال والأوقات',
+  '1034': 'المواعظ',
+  '1035': 'الأخلاق',
+  '1036': 'التزكية وأعمال القلوب',
+  '1037': 'الفقه الميسر',
+  '1038': 'الفقه العام',
+  '1039': 'بحوث فقهية',
+  '1040': 'اليوم الآخر وعلاماته',
+  '1041': 'الفقه الشافعي وأصوله',
+  '1042': 'الفقه الحنبلي وأصوله',
+  '1043': 'الفقه المالكي وأصوله',
+  '1044': 'الفقه الحنفي وأصوله',
+  '1045': 'العقيدة المبسطة الشاملة',
+  '1046': 'كتب تأصيلية عقدية',
+  '1047': 'كتب ردود عقدية',
+  '1048': 'بحوث في العقيدة',
+  '1049': 'مقارنة الأديان',
+  '1050': 'الفكر الإسلامي',
+  '1051': 'الفلسفة وعلم المنطق',
+  '1052': 'السياسة والاقتصاد',
+  '1053': 'التربية',
+  '1054': 'علم النفس',
+  '1055': 'علم الاجتماع ونفس الجماهير',
+  '1056': 'تراجم الصحابة والتابعين',
+  '1057': 'تراجم المسلمين',
+  '1058': 'تراجم غير المسلمين',
+  '1059': 'رواية حفص عن عاصم',
+  '1060': 'الروايات الأخرى',
+  '1061': 'النحو والصرف والإملاء',
+  '1062': 'البلاغة',
+  '1063': 'الشعر',
+  '1064': 'المقالات',
+  '1065': 'لغة عربية وأدب - أخرى',
+  '1066': 'أخرى',
+  '1067': 'الفقه المقارن',
+  '1068': 'مصاحف الحدر للحفاظ',
+  '1069': 'الزواج',
+  '1070': 'قصص للأطفال',
+}
 
 process.env.FIRESTORE_EMULATOR_HOST = FIRESTORE_HOST
 process.env.FIREBASE_AUTH_EMULATOR_HOST = AUTH_HOST
@@ -137,7 +214,8 @@ async function seed() {
       await seedSubscription(db, account.uid, account.premium, now, inOneYear)
     }
     if (account.role) {
-      await db.doc(`users_adminv2/${account.uid}`).set({ role: account.role, email: account.email })
+      // The admin portal lets a user in only when the record is active and has a valid role.
+      await db.doc(`users_adminv2/${account.uid}`).set({ role: account.role, email: account.email, active: true })
     }
   }
 
@@ -145,6 +223,7 @@ async function seed() {
   // catalog it already has instead of downloading one.
   await db.doc('settings_app/settings_metadata').set({ note: 'Firestore emulator' })
   await db.doc('settings_app/archived_books').set({ books: [] })
+  await db.doc('categories/main').set({ sub_categories: SUB_CATEGORIES })
 }
 
 await wipe()
