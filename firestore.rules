@@ -187,6 +187,11 @@ service cloud.firestore {
       allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
 
 		}
+     match /hidden_podcasts/{userId} {
+ 		  allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
+      allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+
+		}
      match /playlists/{userId} {
       allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
       allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';

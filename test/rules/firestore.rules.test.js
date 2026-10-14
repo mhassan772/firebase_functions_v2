@@ -81,6 +81,7 @@ describe("data owned by one user", () => {
     "episode_progress/{uid}",
     "converted_podcasts/{uid}",
     "archived_episodes/{uid}",
+    "hidden_podcasts/{uid}",
   ];
 
   for (const template of ownedPaths) {
