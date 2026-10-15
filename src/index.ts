@@ -13,6 +13,7 @@ export { adminManageSubscription } from "./functions/subscriptions/adminManageSu
 export { appleSubscriptionNotifications } from "./functions/subscriptions/appleSubscriptionNotifications";
 export { googleSubscriptionNotifications } from "./functions/subscriptions/googleSubscriptionNotifications";
 export { admin_upload_to_S3 } from "./functions/admin/uploadToS3";
+export { adminBlurCover } from "./functions/admin/adminBlurCover";
 export { review } from "./functions/reviews/review";
 export { reviewNoAuth } from "./functions/reviews/reviewNoAuth";
 export { like } from "./functions/reviews/like";
