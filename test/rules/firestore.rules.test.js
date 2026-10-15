@@ -81,7 +81,7 @@ describe("data owned by one user", () => {
     "episode_progress/{uid}",
     "converted_podcasts/{uid}",
     "archived_episodes/{uid}",
-    "hidden_podcasts/{uid}",
+    "blocked_content/{uid}",
   ];
 
   for (const template of ownedPaths) {
@@ -95,6 +95,11 @@ describe("data owned by one user", () => {
       await assertFails(getDoc(doc(asGuest(), ownPath)));
     });
   }
+
+  test("hidden_podcasts, replaced by blocked_content, is closed to its owner", async () => {
+    await assertFails(setDoc(doc(asUser("user-1"), "hidden_podcasts/user-1"), { value: 1 }));
+    await assertFails(getDoc(doc(asUser("user-1"), "hidden_podcasts/user-1")));
+  });
 
   test("user_books chunks of one user cannot be listed by another", async () => {
     await assertSucceeds(getDocs(collection(asUser("user-1"), "user_books/user-1/user_books_chunk")));

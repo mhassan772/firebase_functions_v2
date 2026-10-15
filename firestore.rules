@@ -187,7 +187,9 @@ service cloud.firestore {
       allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
 
 		}
-     match /hidden_podcasts/{userId} {
+     // Podcasts and books the user blocked, one document per user. It stays its own document so older
+     // app versions, which rewrite the followed-podcasts and archive documents whole, cannot erase it.
+     match /blocked_content/{userId} {
  		  allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
       allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
 
