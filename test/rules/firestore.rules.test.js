@@ -477,6 +477,134 @@ describe("book listeners", () => {
   });
 });
 
+describe("content_reports", () => {
+  const podcastReport = (overrides = {}) => ({
+    uid: "user-1",
+    contentType: "podcast",
+    contentId: "p-534524",
+    title: "بودكاست",
+    image: "https://img.example.com/p.jpg",
+    reason: "picture",
+    request: "hide_picture",
+    status: "pending",
+    appVersion: "90.6.0",
+    platform: "ios",
+    createdAt: serverTimestamp(),
+    ...overrides,
+  });
+  const copyright = {
+    claimantName: "صاحب الحق",
+    email: "owner@example.com",
+    relationship: "owner",
+    originalWork: "كتاب منشور عام 2020",
+    statementAccepted: true,
+  };
+  const without = (data, ...keys) => Object.fromEntries(Object.entries(data).filter(([k]) => !keys.includes(k)));
+  const create = (uid, id, data) => setDoc(doc(asUser(uid), `content_reports/${id}`), data);
+
+  test("the user reports a podcast, an episode's podcast and a book once each", async () => {
+    await assertSucceeds(create("user-1", "user-1_p-534524", podcastReport()));
+    await assertSucceeds(
+      create(
+        "user-1",
+        "user-1_p-77",
+        podcastReport({
+          contentId: "p-77",
+          episode: { episodeId: "e-41928399210", title: "حلقة", image: "" },
+          reason: "content",
+          request: "remove",
+          details: "تفاصيل",
+        })
+      )
+    );
+    await assertSucceeds(
+      create(
+        "user-1",
+        "user-1_6f1c2a0e-1b2d_4c3e",
+        podcastReport({ contentType: "book", contentId: "6f1c2a0e-1b2d_4c3e", reason: "copyright", request: "remove", copyright })
+      )
+    );
+  });
+
+  test("a second report of the same item is refused", async () => {
+    await assertSucceeds(create("user-1", "user-1_p-534524", podcastReport()));
+    await assertFails(create("user-1", "user-1_p-534524", podcastReport({ reason: "both" })));
+    await assertFails(updateDoc(doc(asUser("user-1"), "content_reports/user-1_p-534524"), { details: "x" }));
+    await assertFails(deleteDoc(doc(asUser("user-1"), "content_reports/user-1_p-534524")));
+  });
+
+  test("a report under someone else's name, a wrong id, or as a guest is refused", async () => {
+    await assertFails(create("user-2", "user-1_p-534524", podcastReport()));
+    await assertFails(create("user-2", "user-2_p-534524", podcastReport()));
+    await assertFails(create("user-1", "user-1_p-1", podcastReport()));
+    await assertFails(create("user-1", "user-1-p-534524", podcastReport()));
+    await assertFails(setDoc(doc(asGuest(), "content_reports/user-1_p-534524"), podcastReport()));
+  });
+
+  test("a report with a bad shape is refused", async () => {
+    const id = "user-1_p-534524";
+    const bad = [
+      podcastReport({ contentId: "534524" }),
+      podcastReport({ contentType: "author" }),
+      podcastReport({ reason: "spam" }),
+      podcastReport({ request: "ban" }),
+      podcastReport({ reason: "content", request: "hide_picture" }),
+      podcastReport({ reason: "copyright", request: "remove" }),
+      podcastReport({ reason: "copyright", request: "hide_picture", copyright }),
+      podcastReport({ reason: "picture", copyright }),
+      podcastReport({ reason: "copyright", request: "remove", copyright: { ...copyright, statementAccepted: false } }),
+      podcastReport({ reason: "copyright", request: "remove", copyright: { ...copyright, email: "nope" } }),
+      podcastReport({ reason: "copyright", request: "remove", copyright: { ...copyright, relationship: "fan" } }),
+      podcastReport({ reason: "copyright", request: "remove", copyright: without(copyright, "originalWork") }),
+      podcastReport({ details: "x".repeat(2001) }),
+      podcastReport({ title: "x".repeat(501) }),
+      podcastReport({ episode: { episodeId: "77", title: "", image: "" } }),
+      podcastReport({ episode: { episodeId: "e-77", title: "", image: "", extra: 1 } }),
+      podcastReport({ status: "actioned" }),
+      podcastReport({ createdAt: Timestamp.now() }),
+      podcastReport({ action: "blur" }),
+      without(podcastReport(), "appVersion"),
+      without(podcastReport(), "image"),
+    ];
+    for (const data of bad) {
+      await assertFails(create("user-1", id, data));
+    }
+    // A book report cannot carry an episode.
+    await assertFails(
+      create(
+        "user-1",
+        "user-1_book-1",
+        podcastReport({ contentType: "book", contentId: "book-1", episode: { episodeId: "e-1", title: "", image: "" } })
+      )
+    );
+  });
+
+  test("the reporter gets only their own report, and nobody but admins lists or acts", async () => {
+    await assertSucceeds(create("user-1", "user-1_p-534524", podcastReport()));
+
+    await assertSucceeds(getDoc(doc(asUser("user-1"), "content_reports/user-1_p-534524")));
+    // A report not sent yet reads as missing to its would-be owner, not as denied.
+    await assertSucceeds(getDoc(doc(asUser("user-1"), "content_reports/user-1_p-1")));
+    await assertFails(getDoc(doc(asUser("user-2"), "content_reports/user-1_p-534524")));
+    await assertFails(getDoc(doc(asUser("user"), "content_reports/user-1_p-534524")));
+    await assertFails(getDoc(doc(asGuest(), "content_reports/user-1_p-534524")));
+    await assertFails(getDocs(collection(asUser("user-1"), "content_reports")));
+    await assertFails(getDocs(query(collection(asUser("user-1"), "content_reports"), where("uid", "==", "user-1"))));
+    await assertFails(getDocs(collection(asUser("dev-1"), "content_reports")));
+
+    await assertSucceeds(getDocs(collection(asUser("admin-1"), "content_reports")));
+    await assertSucceeds(
+      updateDoc(doc(asUser("admin-1"), "content_reports/user-1_p-534524"), {
+        status: "actioned",
+        action: "blur",
+        reviewedBy: "admin-1",
+        reviewedAt: serverTimestamp(),
+      })
+    );
+    await assertFails(updateDoc(doc(asUser("dev-1"), "content_reports/user-1_p-534524"), { status: "dismissed" }));
+  });
+});
+
 describe("everything else", () => {
   test("the backend-only subscription collections are closed to every client", async () => {
     for (const path of [
