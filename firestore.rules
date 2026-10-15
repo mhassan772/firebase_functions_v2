@@ -367,6 +367,72 @@ service cloud.firestore {
       allow read, write, create, delete: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role in ['admin', 'developer'];
 
     }
+    // A user's report of a podcast or a book, one per user and item: the id is the reporter's uid
+    // and the item's id, and users cannot update, so a second report of the same item is refused.
+    // The reporter may get their own report to learn they already sent it; only admins list or act.
+    match /content_reports/{reportId} {
+      function isText(value, min, max) {
+        return value is string && value.size() >= min && value.size() <= max;
+      }
+
+      function isValidEpisode(e) {
+        return e is map
+          && e.keys().hasOnly(['episodeId', 'title', 'image'])
+          && e.keys().hasAll(['episodeId', 'title', 'image'])
+          && e.episodeId is string && e.episodeId.matches('e-[0-9]{1,20}')
+          && isText(e.title, 0, 500)
+          && isText(e.image, 0, 2048);
+      }
+
+      function isValidCopyright(c) {
+        return c is map
+          && c.keys().hasOnly(['claimantName', 'email', 'relationship', 'originalWork', 'statementAccepted'])
+          && c.keys().hasAll(['claimantName', 'email', 'relationship', 'originalWork', 'statementAccepted'])
+          && isText(c.claimantName, 1, 200)
+          && isText(c.email, 3, 320) && c.email.matches('[^@ ]+@[^@ ]+')
+          && c.relationship in ['owner', 'agent']
+          && isText(c.originalWork, 1, 2000)
+          && c.statementAccepted == true;
+      }
+
+      function isOwnReport(d) {
+        return request.auth != null
+          && d.keys().hasOnly(['uid', 'contentType', 'contentId', 'title', 'image', 'episode', 'reason',
+               'request', 'details', 'copyright', 'status', 'appVersion', 'platform', 'createdAt'])
+          && d.keys().hasAll(['uid', 'contentType', 'contentId', 'title', 'image', 'reason', 'request',
+               'status', 'appVersion', 'platform', 'createdAt'])
+          && d.uid == request.auth.uid
+          && d.contentId is string
+          && reportId == request.auth.uid + '_' + d.contentId
+          && ((d.contentType == 'podcast' && d.contentId.matches('p-[0-9]{1,20}'))
+              || (d.contentType == 'book' && d.contentId.matches('[A-Za-z0-9_-]{1,128}')))
+          && isText(d.title, 0, 500)
+          && isText(d.image, 0, 2048)
+          && (!('episode' in d) || (d.contentType == 'podcast' && isValidEpisode(d.episode)))
+          && d.reason in ['content', 'picture', 'both', 'copyright']
+          && d.request in ['remove', 'hide_picture']
+          && (d.request == 'remove' || d.reason in ['picture', 'both'])
+          && (d.reason == 'copyright') == ('copyright' in d)
+          && (!('copyright' in d) || isValidCopyright(d.copyright))
+          && (!('details' in d) || isText(d.details, 0, 2000))
+          && d.status == 'pending'
+          && isText(d.appVersion, 1, 40)
+          && isText(d.platform, 1, 20)
+          && d.createdAt == request.time;
+      }
+
+      function isAdmin() {
+        return request.auth != null
+          && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+      }
+
+      allow create: if isOwnReport(request.resource.data);
+      // Matched on the id as well, so a missing report reads as missing only to its would-be owner.
+      allow get: if request.auth != null
+        && reportId.matches(request.auth.uid + '_.+')
+        && (resource == null || resource.data.uid == request.auth.uid);
+      allow read, write: if isAdmin();
+    }
     
     // Users collection - authenticated users can read their own document
     match /users_adminv2/{userId} {
