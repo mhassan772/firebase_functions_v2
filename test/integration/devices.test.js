@@ -187,6 +187,9 @@ describe("device seats on an active subscription", () => {
     await persistVerifiedSubscription(uid, googleVerified(uid, new Date(start.getTime() + 400 * DAY), start));
     await register(uid, "phone-a", "iPhone", "ios");
     await register(uid, "phone-b", "Pixel 7", "android");
+    // Stands in for a device field added after the writing build: the
+    // projection must not erase what it does not know.
+    await db().collection(SUBSCRIPTION_MASTER_COLLECTION).doc(uid).update({ future_device_field: "kept" });
     const before = await master(uid);
 
     const later = new Date(start.getTime() + 60 * 1000);
@@ -201,6 +204,7 @@ describe("device seats on an active subscription", () => {
     assert.deepEqual(renewed.allowed_devices, before.allowed_devices);
     assert.deepEqual(renewed.devices, before.devices);
     assert.deepEqual(renewed.device_log, before.device_log);
+    assert.equal(renewed.future_device_field, "kept");
 
     const granted = await applyManualMutation(
       { uid, opId: "op-grant-devices", actor: "admin-1" },
@@ -215,6 +219,7 @@ describe("device seats on an active subscription", () => {
     const afterGrant = await master(uid);
     assert.deepEqual(afterGrant.devices, before.devices);
     assert.deepEqual(afterGrant.device_log, before.device_log);
+    assert.equal(afterGrant.future_device_field, "kept");
     assert.deepEqual(ids(await list(uid)), ["phone-a", "phone-b"]);
   });
 });

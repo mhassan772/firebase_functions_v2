@@ -26,7 +26,9 @@ const {
   buildSourceSummaries,
   googleOwnershipDocumentId,
   ownershipDocumentId,
-  preserveMasterDeviceFields,
+  masterAfterProjection,
+  masterProjectionUpdate,
+  MASTER_PROJECTION_OPTIONAL_FIELDS,
   shouldApplyIncomingState,
   stateData,
   stateDataToNormalized,
@@ -729,7 +731,7 @@ test("admin device actions ignore the cooldown, set seats within bounds and clea
   assert.equal(listed.state, cooling);
 });
 
-test("device fields on the master doc survive store-driven rebuilds", () => {
+test("a store-driven rebuild updates only the fields the projection owns", () => {
   const state = normalizeGoogleSubscription({
     productId: "premium_access",
     environment: "production",
@@ -742,7 +744,8 @@ test("device fields on the master doc survive store-driven rebuilds", () => {
   const rebuilt = buildMasterProjection(
     state,
     Timestamp.fromDate(NOW),
-    Timestamp.fromDate(NOW)
+    Timestamp.fromDate(NOW),
+    buildSourceSummaries([state])
   );
   const existing = {
     allowed_devices: ["device-a", "device-b"],
@@ -752,24 +755,117 @@ test("device fields on the master doc survive store-driven rebuilds", () => {
     device_log: [{ at: Timestamp.fromDate(PAST), actor: "user", action: "register", deviceId: "device-a" }],
     last_date_replacing_device: Timestamp.fromDate(PAST),
     extra_device_seats: 1,
+    // A field this build has never heard of, as a newer device feature would add.
+    future_device_field: "kept",
     productId: "stale-value-not-carried",
+    originalTransactionId: "apple-original-from-the-previous-state",
+    manual: { activeGrantCount: 1, grantSource: "admin_manual_add", ledgerRevision: 5 },
   };
-  const preserved = preserveMasterDeviceFields(rebuilt, existing);
-  assert.deepEqual(preserved.allowed_devices, ["device-a", "device-b"]);
-  assert.equal(preserved.devices, existing.devices);
-  assert.equal(preserved.device_log, existing.device_log);
-  assert.equal(preserved.last_date_replacing_device, existing.last_date_replacing_device);
-  assert.equal(preserved.extra_device_seats, 1);
-  assert.equal(preserved.productId, "premium_access");
 
-  const fresh = buildMasterProjection(
-    state,
+  // The written update names no field the projection does not own.
+  const update = masterProjectionUpdate(rebuilt);
+  for (const field of Object.keys(existing).filter((key) => key !== "productId" && !MASTER_PROJECTION_OPTIONAL_FIELDS.includes(key))) {
+    assert.ok(!Object.hasOwn(update, field), `${field} must not be written by the projection`);
+  }
+  assert.equal(update.productId, "premium_access");
+  assert.equal(update.purchaseReference, rebuilt.purchaseReference);
+  assert.equal(update.autoRenewing, true);
+  assert.deepEqual(update.originalTransactionId, FieldValue.delete());
+  assert.deepEqual(update.manual, FieldValue.delete());
+  assert.deepEqual(update.sources, rebuilt.sources);
+
+  // The returned document is what the update leaves behind.
+  const after = masterAfterProjection(rebuilt, existing);
+  assert.deepEqual(after.allowed_devices, ["device-a", "device-b"]);
+  assert.equal(after.devices, existing.devices);
+  assert.equal(after.device_log, existing.device_log);
+  assert.equal(after.last_date_replacing_device, existing.last_date_replacing_device);
+  assert.equal(after.extra_device_seats, 1);
+  assert.equal(after.future_device_field, "kept");
+  assert.equal(after.productId, "premium_access");
+  assert.ok(!Object.hasOwn(after, "originalTransactionId"));
+  assert.ok(!Object.hasOwn(after, "manual"));
+  assert.equal(masterDataToResponse(after).devices.devices[0].name, "iPhone");
+
+  const fresh = masterAfterProjection(rebuilt, undefined);
+  assert.deepEqual(fresh, rebuilt);
+  assert.ok(!Object.hasOwn(fresh, "allowed_devices"));
+  assert.ok(!Object.hasOwn(fresh, "devices"));
+});
+
+test("every field the projection writes only sometimes is listed as optional", () => {
+  const full = buildMasterProjection(
+    {
+      active: true,
+      status: "active",
+      platform: "apple",
+      productId: "premium_access",
+      expiresAt: FUTURE,
+      autoRenewing: true,
+      inGracePeriod: false,
+      environment: "production",
+      originalTransactionId: "original",
+      lastStoreEventAt: NOW,
+      lastVerifiedAt: NOW,
+    },
+    Timestamp.fromDate(NOW),
+    Timestamp.fromDate(NOW),
+    []
+  );
+  const minimal = buildMasterProjection(
+    {
+      active: false,
+      status: "expired",
+      platform: "google",
+      productId: "premium_access",
+      expiresAt: PAST,
+      inGracePeriod: false,
+      environment: "production",
+      lastStoreEventAt: NOW,
+      lastVerifiedAt: NOW,
+    },
     Timestamp.fromDate(NOW),
     Timestamp.fromDate(NOW)
   );
-  assert.equal(preserveMasterDeviceFields(fresh, undefined), fresh);
-  assert.ok(!Object.hasOwn(fresh, "allowed_devices"));
-  assert.ok(!Object.hasOwn(fresh, "devices"));
+  const manual = buildMasterProjection(
+    {
+      active: true,
+      status: "active",
+      platform: "manual",
+      productId: "manual_grant",
+      expiresAt: FUTURE,
+      inGracePeriod: false,
+      environment: "production",
+      lastStoreEventAt: NOW,
+      lastVerifiedAt: NOW,
+      manual: { activeGrantCount: 1 },
+    },
+    Timestamp.fromDate(NOW),
+    Timestamp.fromDate(NOW)
+  );
+  const google = buildMasterProjection(
+    {
+      active: true,
+      status: "active",
+      platform: "google",
+      productId: "premium_access",
+      expiresAt: FUTURE,
+      inGracePeriod: false,
+      environment: "production",
+      purchaseReference: "reference",
+      lastStoreEventAt: NOW,
+      lastVerifiedAt: NOW,
+    },
+    Timestamp.fromDate(NOW),
+    Timestamp.fromDate(NOW)
+  );
+  const always = Object.keys(minimal);
+  const sometimes = [...new Set([full, manual, google].flatMap((data) => Object.keys(data)))]
+    .filter((field) => !always.includes(field));
+  assert.deepEqual([...sometimes].sort(), [...MASTER_PROJECTION_OPTIONAL_FIELDS].sort());
+  for (const field of MASTER_PROJECTION_OPTIONAL_FIELDS) {
+    assert.ok(!always.includes(field), `${field} is always written, so it is not optional`);
+  }
 });
 
 test("device state parsing tolerates missing and malformed fields", () => {
