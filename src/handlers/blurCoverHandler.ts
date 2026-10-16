@@ -1,6 +1,5 @@
 import * as crypto from "crypto";
 import * as functions from "firebase-functions";
-import sharp from "sharp";
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 import { requireAdminPortalUser } from "../utils/adminRole";
 import { getSecret } from "../utils/secrets";
@@ -101,7 +100,14 @@ export function blurredCoverUrl(key: string): string {
   return `${BLURRED_COVERS_PUBLIC_BASE}/${key}`;
 }
 
+/**
+ * Blurs and shrinks a cover.
+ *
+ * sharp is loaded here rather than at the top: index.js loads every handler in
+ * every function's cold start, and only this callable needs the native library.
+ */
 export async function blurImage(input: Buffer): Promise<Buffer> {
+  const { default: sharp } = await import("sharp");
   return sharp(input, { failOn: "error" })
     .rotate()
     .resize(BLUR_MAX_DIMENSION, BLUR_MAX_DIMENSION, { fit: "inside", withoutEnlargement: true })
