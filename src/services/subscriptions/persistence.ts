@@ -2,6 +2,7 @@ import {
   DocumentData,
   DocumentReference,
   DocumentSnapshot,
+  FieldValue,
   Timestamp,
   Transaction,
 } from "firebase-admin/firestore";
@@ -134,7 +135,12 @@ export function slotStates(
  *
  * Takes the states the caller intends to persist, not the snapshots, because a
  * slot written earlier in the same transaction is not visible through its
- * snapshot. Only the device fields survive from the previous master.
+ * snapshot.
+ *
+ * An existing master is updated, not replaced, so fields the projection does
+ * not own (the device seats) are never touched here. A replace that copied
+ * them back from a list erased every field added after the writing build was
+ * deployed, and the store notifications are deployed by name on their own.
  */
 export function projectMaster(
   transaction: Transaction,
@@ -161,17 +167,18 @@ export function projectMaster(
     ? state.masterSnapshot.data()
     : undefined;
   const createdAt = existing ? existing.createdAt : now;
-  const masterData = preserveMasterDeviceFields(
-    buildMasterProjection(
-      masterState,
-      createdAt,
-      now,
-      buildSourceSummaries(considered)
-    ),
-    existing
+  const projection = buildMasterProjection(
+    masterState,
+    createdAt,
+    now,
+    buildSourceSummaries(considered)
   );
-  transaction.set(state.masterRef, masterData);
-  return masterData;
+  if (existing) {
+    transaction.update(state.masterRef, masterProjectionUpdate(projection));
+  } else {
+    transaction.set(state.masterRef, projection);
+  }
+  return masterAfterProjection(projection, existing);
 }
 
 export async function persistVerifiedSubscription(
@@ -595,30 +602,47 @@ export function buildSourceSummaries(
   }));
 }
 
-// Device management fields live on the master doc but are owned by the
-// device callable and the admin device actions, not the store projection;
-// renewals and manual grants must not erase them.
-export const MASTER_DEVICE_FIELDS = [
-  "allowed_devices",
-  "devices",
-  "device_log",
-  "last_date_replacing_device",
-  "extra_device_seats",
+/**
+ * The fields `buildMasterProjection` writes only for some states.
+ *
+ * Every other field it writes is always present. Keep this in step with that
+ * function: a field missing here would outlive the state that set it.
+ */
+export const MASTER_PROJECTION_OPTIONAL_FIELDS = [
+  "autoRenewing",
+  "originalTransactionId",
+  "purchaseReference",
+  "manual",
+  "sources",
 ] as const;
 
-export function preserveMasterDeviceFields(
-  masterData: DocumentData,
-  existing: DocumentData | undefined
-): DocumentData {
-  if (!existing) {
-    return masterData;
-  }
-  for (const field of MASTER_DEVICE_FIELDS) {
-    if (existing[field] !== undefined) {
-      masterData[field] = existing[field];
+/**
+ * The update that applies a projection to an existing master.
+ *
+ * Top-level keys replace whole values, so a stale nested `manual` key cannot
+ * linger, and an optional field the new state lacks is deleted. Fields the
+ * projection does not own are left as they are.
+ */
+export function masterProjectionUpdate(projection: DocumentData): DocumentData {
+  const update: DocumentData = { ...projection };
+  for (const field of MASTER_PROJECTION_OPTIONAL_FIELDS) {
+    if (!(field in update)) {
+      update[field] = FieldValue.delete();
     }
   }
-  return masterData;
+  return update;
+}
+
+/** The master as `masterProjectionUpdate` leaves it, for the caller's response. */
+export function masterAfterProjection(
+  projection: DocumentData,
+  existing: DocumentData | undefined
+): DocumentData {
+  const merged: DocumentData = { ...existing };
+  for (const field of MASTER_PROJECTION_OPTIONAL_FIELDS) {
+    delete merged[field];
+  }
+  return { ...merged, ...projection };
 }
 
 /**

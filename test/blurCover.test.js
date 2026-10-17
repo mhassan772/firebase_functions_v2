@@ -13,6 +13,20 @@ const {
 } = require("../lib/handlers/blurCoverHandler");
 
 const ADMIN = { auth: { uid: "admin-uid" } };
+
+test("loading the functions does not load sharp until a cover is blurred", () => {
+  const { execFileSync } = require("node:child_process");
+  const path = require("node:path");
+  const loaded = execFileSync(
+    process.execPath,
+    [
+      "-e",
+      'require("./lib/index"); process.stdout.write(String(Object.keys(require.cache).some((file) => file.includes("/node_modules/sharp/"))));',
+    ],
+    { cwd: path.join(__dirname, ".."), encoding: "utf8" }
+  );
+  assert.equal(loaded, "false");
+});
 const IMAGE_URL = "https://img.example.com/cover.png";
 
 // A sharp-edged pattern, so the test can tell a blurred output from a merely resized one.
