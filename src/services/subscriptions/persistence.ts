@@ -25,7 +25,12 @@ import {
   SubscriptionSource,
   VerifiedSubscription,
 } from "../../types/subscriptions";
-import { sha256Hex, sha256Reference } from "./crypto";
+import {
+  deriveAccountBinding,
+  sha256Hex,
+  sha256Reference,
+  timingSafeEqualText,
+} from "./crypto";
 import { DeviceLimits, devicesBlockFromMaster } from "./devices";
 import { SubscriptionError } from "./errors";
 import { selectMasterState } from "./normalization";
@@ -437,6 +442,99 @@ export async function resolveVerifiedOwner(
     );
   }
   return owners.values().next().value;
+}
+
+/**
+ * The account a verified purchase belongs to, or undefined when nobody has
+ * claimed it yet.
+ *
+ * The chain's own ownership records decide first. A Play Store resubscription
+ * after expiry starts a new chain with no link to the old one, so Play points
+ * at the last expired token instead; its owner is accepted only when the
+ * binding that expired purchase carried, if any, is that owner's. The same
+ * answer is given to every entry point, so who claims a purchase never depends
+ * on whether the app's verify or the store's notification lands first.
+ */
+export async function resolvePurchaseOwner(
+  verified: VerifiedSubscription,
+  accountBindingSecret: () => string
+): Promise<string | undefined> {
+  const chainOwner = await resolveVerifiedOwner(verified.ownership);
+  if (chainOwner) {
+    return chainOwner;
+  }
+  const expiredToken = verified.google?.expiredPurchaseToken;
+  if (!expiredToken) {
+    return undefined;
+  }
+  const snapshot = await admin
+    .firestore()
+    .collection(SUBSCRIPTION_OWNERSHIP_COLLECTION)
+    .doc(googleOwnershipDocumentId(expiredToken))
+    .get();
+  const owner = snapshot.get("uid");
+  if (!snapshot.exists || typeof owner !== "string" || !owner) {
+    return undefined;
+  }
+  const expiredBinding = verified.google?.expiredAccountBinding;
+  const accepted = expiredTokenOwnerAccepted(
+    owner,
+    expiredBinding,
+    expiredBinding ? accountBindingSecret() : undefined
+  );
+  if (!accepted) {
+    functions.logger.warn("subscription_expired_token_binding_mismatch", {
+      purchaseReference: verified.subscription.purchaseReference,
+      expiredPurchaseReference: sha256Reference(expiredToken),
+    });
+    return undefined;
+  }
+  functions.logger.info("subscription_owner_resolved_from_expired_token", {
+    purchaseReference: verified.subscription.purchaseReference,
+    expiredPurchaseReference: sha256Reference(expiredToken),
+  });
+  return owner;
+}
+
+/** Whether the expired purchase's binding, when it carried one, names this owner. */
+export function expiredTokenOwnerAccepted(
+  owner: string,
+  expiredBinding: string | undefined,
+  accountBindingSecret: string | undefined
+): boolean {
+  if (!expiredBinding) {
+    return true;
+  }
+  if (!accountBindingSecret) {
+    throw new SubscriptionError(
+      "configuration",
+      "account-binding-secret-missing",
+      "The account binding secret is unavailable."
+    );
+  }
+  return timingSafeEqualText(
+    expiredBinding,
+    deriveAccountBinding(owner, "google", accountBindingSecret)
+  );
+}
+
+/**
+ * Refuses a claim by the caller when the purchase already has another owner,
+ * through its chain or through the expired token it replaced.
+ */
+export async function assertCallerMayClaim(
+  uid: string,
+  verified: VerifiedSubscription,
+  accountBindingSecret: () => string
+): Promise<void> {
+  const owner = await resolvePurchaseOwner(verified, accountBindingSecret);
+  if (owner !== undefined && owner !== uid) {
+    throw new SubscriptionError(
+      "ownership-conflict",
+      "purchase-owned-by-another-user",
+      "The verified purchase belongs to another Firebase account."
+    );
+  }
 }
 
 export async function resolveGoogleCurrentToken(

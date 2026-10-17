@@ -31,6 +31,7 @@ const {
   masterProjectionUpdate,
   MASTER_PROJECTION_OPTIONAL_FIELDS,
   mayReplaceSlotPurchase,
+  expiredTokenOwnerAccepted,
   shouldApplyIncomingState,
   stateData,
   stateDataToNormalized,
@@ -491,6 +492,21 @@ test("two lapsed states about different purchases: the slot keeps the one that r
     expiryTime: OLDER_PAST,
   });
   assert.equal(mayReplaceSlotPurchase(storedLapsed, ownEarlierVoid, NOW), true);
+});
+
+test("an expired purchase's owner is accepted only when its binding, if any, is that owner's", () => {
+  const secret = "unit-test-account-binding-secret-with-32-bytes";
+  const ownerBinding = deriveAccountBinding("owner-uid", "google", secret);
+  assert.equal(expiredTokenOwnerAccepted("owner-uid", undefined, undefined), true);
+  assert.equal(expiredTokenOwnerAccepted("owner-uid", ownerBinding, secret), true);
+  assert.equal(
+    expiredTokenOwnerAccepted("someone-else", ownerBinding, secret),
+    false
+  );
+  assert.throws(
+    () => expiredTokenOwnerAccepted("owner-uid", ownerBinding, undefined),
+    (error) => error instanceof SubscriptionError && error.kind === "configuration"
+  );
 });
 
 test("master projection and document keys never expose protected purchase data", () => {

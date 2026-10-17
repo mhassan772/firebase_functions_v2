@@ -6,6 +6,7 @@ import {
 } from "../../config/constants";
 import {
   GoogleOwnershipIdentity,
+  GooglePurchaseMetadata,
   VerifiedSubscription,
 } from "../../types/subscriptions";
 import {
@@ -118,10 +119,36 @@ export async function verifyGoogleSubscription(
       });
     }
 
-    return { subscription: normalized, ownership };
+    return {
+      subscription: normalized,
+      ownership,
+      google: purchaseMetadata(current.data),
+    };
   } catch (error) {
     throw mapGoogleError(error);
   }
+}
+
+function purchaseMetadata(
+  purchase: androidpublisher_v3.Schema$SubscriptionPurchaseV2
+): GooglePurchaseMetadata {
+  const startTime = purchase.startTime ? new Date(purchase.startTime) : undefined;
+  const context = purchase.outOfAppPurchaseContext;
+  const metadata: GooglePurchaseMetadata = {
+    acknowledgementState: purchase.acknowledgementState ?? undefined,
+    subscriptionState: purchase.subscriptionState ?? undefined,
+    startTime:
+      startTime && Number.isFinite(startTime.getTime()) ? startTime : undefined,
+  };
+  if (context?.expiredPurchaseToken) {
+    metadata.expiredPurchaseToken = context.expiredPurchaseToken;
+  }
+  const expiredBinding =
+    context?.expiredExternalAccountIdentifiers?.obfuscatedExternalAccountId;
+  if (expiredBinding) {
+    metadata.expiredAccountBinding = expiredBinding;
+  }
+  return metadata;
 }
 
 function getPublisherClient(): androidpublisher_v3.Androidpublisher {

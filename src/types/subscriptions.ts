@@ -167,9 +167,24 @@ export type OwnershipIdentity =
   | AppleOwnershipIdentity
   | GoogleOwnershipIdentity;
 
+/**
+ * What Play reports about the current token beyond its state. Read by the
+ * handlers for acknowledgement and ownership; never persisted or returned.
+ */
+export interface GooglePurchaseMetadata {
+  acknowledgementState?: string;
+  subscriptionState?: string;
+  startTime?: Date;
+  /** The last expired token for this product, set on a Play Store resubscription. */
+  expiredPurchaseToken?: string;
+  /** The account binding that expired purchase carried, when the app set one. */
+  expiredAccountBinding?: string;
+}
+
 export interface VerifiedSubscription {
   subscription: NormalizedSubscription;
   ownership: OwnershipIdentity[];
+  google?: GooglePurchaseMetadata;
 }
 
 export interface StoreEvent {
