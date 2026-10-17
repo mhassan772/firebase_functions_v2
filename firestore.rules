@@ -529,6 +529,14 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    match /subscription_acknowledgements/{document=**} {
+      allow read, write: if false;
+    }
+
+    match /subscription_reconcile_state/{document=**} {
+      allow read, write: if false;
+    }
+
 		
     // DONATION PAGE
     // Storefront catalog: public read, server-only writes.

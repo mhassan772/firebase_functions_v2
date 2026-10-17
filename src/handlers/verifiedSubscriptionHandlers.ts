@@ -26,11 +26,14 @@ import {
 } from "../services/subscriptions/apple";
 import { verifyGoogleSubscription } from "../services/subscriptions/google";
 import {
+  assertCallerMayClaim,
   persistVerifiedSubscription,
   recordUnclaimedStoreEvent,
   resolveGoogleCurrentToken,
+  resolvePurchaseOwner,
   resolveVerifiedOwner,
 } from "../services/subscriptions/persistence";
+import { acknowledgeNow } from "../services/subscriptions/acknowledgements";
 import { requireRuntimeSecret } from "../services/subscriptions/runtimeSecrets";
 import {
   DeviceAction,
@@ -142,7 +145,11 @@ export async function handleVerifySubscription(
           requirePurchaseMaterial(request.purchaseToken, "purchaseToken"),
           binding
         );
+    await assertCallerMayClaim(uid, verified, accountBindingSecret);
     const result = await persistVerifiedSubscription(uid, verified);
+    if (result.acknowledgementPending && verified.subscription.purchaseReference) {
+      await acknowledgeNow(verified.subscription.purchaseReference);
+    }
     logInfo("subscription_verification_success", operationId, {
       platform,
       productId: verified.subscription.productId,
@@ -265,43 +272,11 @@ export async function handleAppleSubscriptionNotifications(
       (req.body as Record<string, unknown>).signedPayload,
       "signedPayload"
     );
-    const result = await verifyAppleNotification(signedPayload);
-    if (!("verified" in result)) {
-      await recordUnclaimedStoreEvent(result.event);
-      logInfo("apple_subscription_notification_success", operationId, {
-        eventType: result.event.eventType,
-        environment: result.event.environment,
-        claimed: false,
-      });
-      res.status(200).json({ received: true });
-      return;
-    }
-
-    const ownerUid = await resolveVerifiedOwner(result.verified.ownership);
-    if (!ownerUid) {
-      await recordUnclaimedStoreEvent(result.event);
-      logInfo("apple_subscription_notification_success", operationId, {
-        eventType: result.event.eventType,
-        environment: result.event.environment,
-        claimed: false,
-      });
-      res.status(200).json({ received: true });
-      return;
-    }
-
-    const persisted = await persistVerifiedSubscription(
-      ownerUid,
-      result.verified,
-      result.event
+    await applyAppleNotification(
+      signedPayload,
+      operationId,
+      "apple_subscription_notification_success"
     );
-    logInfo("apple_subscription_notification_success", operationId, {
-      eventType: result.event.eventType,
-      environment: result.event.environment,
-      status: result.verified.subscription.status,
-      active: result.verified.subscription.active,
-      duplicate: persisted.duplicate,
-      claimed: true,
-    });
     res.status(200).json({ received: true });
   } catch (error) {
     if (
@@ -390,53 +365,14 @@ export async function handleGoogleSubscriptionNotifications(
       return;
     }
 
-    const { notificationType, purchaseToken, refundType } = classification;
-    const currentToken = await resolveGoogleCurrentToken(purchaseToken);
-    const verified = await verifyGoogleSubscription(
-      currentToken,
-      undefined,
-      eventAt
-    );
-    if (
-      (notificationType === "SUBSCRIPTION_REVOKED" ||
-        notificationType === "VOIDED_PURCHASE") &&
-      !verified.subscription.active
-    ) {
-      verified.subscription.status = "revoked";
-    }
-
-    const event: StoreEvent = {
-      key: eventId,
-      platform: "google",
-      environment: verified.subscription.environment,
-      eventType: notificationType,
+    await applyGoogleStoreEvent({
+      purchaseToken: classification.purchaseToken,
+      eventType: classification.notificationType,
+      eventKey: eventId,
       eventAt,
-    };
-    const ownerUid = await resolveVerifiedOwner(verified.ownership);
-    if (!ownerUid) {
-      await recordUnclaimedStoreEvent(event);
-      logInfo("google_subscription_notification_success", operationId, {
-        eventType: notificationType,
-        environment: event.environment,
-        ...googleStateLogFields(verified, refundType),
-        claimed: false,
-      });
-      return;
-    }
-
-    const persisted = await persistVerifiedSubscription(
-      ownerUid,
-      verified,
-      event
-    );
-    logInfo("google_subscription_notification_success", operationId, {
-      eventType: notificationType,
-      environment: event.environment,
-      status: verified.subscription.status,
-      active: verified.subscription.active,
-      ...googleStateLogFields(verified, refundType),
-      duplicate: persisted.duplicate,
-      claimed: true,
+      refundType: classification.refundType,
+      operationId,
+      logEvent: "google_subscription_notification_success",
     });
   } catch (error) {
     if (
@@ -453,6 +389,159 @@ export async function handleGoogleSubscriptionNotifications(
     logFailure("google_subscription_notification", operationId, error);
     throw new Error(`Google subscription notification retry: ${safeErrorCode(error)}`);
   }
+}
+
+export interface AppleNotificationOutcome {
+  claimed: boolean;
+  duplicate: boolean;
+  stateApplied: boolean;
+}
+
+/**
+ * Applies one App Store Server notification: the HTTP endpoint and the
+ * recovery pass both go through here. The signed payload is verified and the
+ * current status re-read from Apple, so a replayed notification carries no
+ * old state.
+ */
+export async function applyAppleNotification(
+  signedPayload: string,
+  operationId: string,
+  logEvent: string
+): Promise<AppleNotificationOutcome> {
+  const result = await verifyAppleNotification(signedPayload);
+  const ownerUid =
+    "verified" in result
+      ? await resolveVerifiedOwner(result.verified.ownership)
+      : undefined;
+  if (!("verified" in result) || !ownerUid) {
+    const recorded = await recordUnclaimedStoreEvent(result.event);
+    logInfo(logEvent, operationId, {
+      eventType: result.event.eventType,
+      environment: result.event.environment,
+      duplicate: !recorded,
+      claimed: false,
+    });
+    return { claimed: false, duplicate: !recorded, stateApplied: false };
+  }
+
+  const persisted = await persistVerifiedSubscription(
+    ownerUid,
+    result.verified,
+    result.event
+  );
+  logInfo(logEvent, operationId, {
+    eventType: result.event.eventType,
+    environment: result.event.environment,
+    status: result.verified.subscription.status,
+    active: result.verified.subscription.active,
+    duplicate: persisted.duplicate,
+    stateApplied: persisted.stateApplied,
+    claimed: true,
+  });
+  return {
+    claimed: true,
+    duplicate: persisted.duplicate,
+    stateApplied: persisted.stateApplied,
+  };
+}
+
+export interface GoogleStoreEventInput {
+  purchaseToken: string;
+  /** The RTDN type name, or `VOIDED_PURCHASE` for a voided-purchases entry. */
+  eventType: string;
+  /** Dedupe key: the Pub/Sub event id, or `voided:<orderId>` from the voided list. */
+  eventKey: string;
+  eventAt: Date;
+  refundType?: number;
+  voidedReason?: number;
+  voidedSource?: number;
+  operationId: string;
+  /** The success log's event name, so each caller's logs stay distinguishable. */
+  logEvent: string;
+}
+
+export interface GoogleStoreEventOutcome {
+  claimed: boolean;
+  duplicate: boolean;
+  stateApplied: boolean;
+}
+
+/**
+ * Applies one Play store event: the notification handler and the recovery
+ * pass both go through here, so a replayed event is treated exactly like a
+ * live one. Verifies the chain's current token, maps a void or revoke onto a
+ * lapsed state, resolves the owner (through the expired token for a Play
+ * Store resubscription), then persists or records the event unclaimed.
+ */
+export async function applyGoogleStoreEvent(
+  input: GoogleStoreEventInput
+): Promise<GoogleStoreEventOutcome> {
+  const currentToken = await resolveGoogleCurrentToken(input.purchaseToken);
+  const verified = await verifyGoogleSubscription(
+    currentToken,
+    undefined,
+    input.eventAt
+  );
+  if (
+    (input.eventType === "SUBSCRIPTION_REVOKED" ||
+      input.eventType === "VOIDED_PURCHASE") &&
+    !verified.subscription.active
+  ) {
+    verified.subscription.status = "revoked";
+  }
+
+  const event: StoreEvent = {
+    key: input.eventKey,
+    platform: "google",
+    environment: verified.subscription.environment,
+    eventType: input.eventType,
+    eventAt: input.eventAt,
+    purchaseReference: verified.subscription.purchaseReference,
+    ...(input.refundType !== undefined ? { refundType: input.refundType } : {}),
+    ...(input.voidedReason !== undefined
+      ? { voidedReason: input.voidedReason }
+      : {}),
+    ...(input.voidedSource !== undefined
+      ? { voidedSource: input.voidedSource }
+      : {}),
+  };
+  const ownerUid = await resolvePurchaseOwner(verified, accountBindingSecret);
+  if (!ownerUid) {
+    const recorded = await recordUnclaimedStoreEvent(event, verified);
+    logInfo(input.logEvent, input.operationId, {
+      eventType: input.eventType,
+      environment: event.environment,
+      ...googleStateLogFields(verified, input.refundType),
+      duplicate: !recorded,
+      claimed: false,
+    });
+    return { claimed: false, duplicate: !recorded, stateApplied: false };
+  }
+
+  const persisted = await persistVerifiedSubscription(ownerUid, verified, event);
+  if (persisted.acknowledgementPending && verified.subscription.purchaseReference) {
+    await acknowledgeNow(verified.subscription.purchaseReference);
+  }
+  logInfo(input.logEvent, input.operationId, {
+    eventType: input.eventType,
+    environment: event.environment,
+    status: verified.subscription.status,
+    active: verified.subscription.active,
+    ...googleStateLogFields(verified, input.refundType),
+    duplicate: persisted.duplicate,
+    stateApplied: persisted.stateApplied,
+    claimed: true,
+  });
+  return {
+    claimed: true,
+    duplicate: persisted.duplicate,
+    stateApplied: persisted.stateApplied,
+  };
+}
+
+/** Read on demand: only a resubscription whose expired purchase carried a binding needs it. */
+function accountBindingSecret(): string {
+  return requireRuntimeSecret(SUBSCRIPTION_SECRETS.accountBindingHmacKey);
 }
 
 export function requireAuthenticatedUid(

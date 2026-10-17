@@ -167,9 +167,24 @@ export type OwnershipIdentity =
   | AppleOwnershipIdentity
   | GoogleOwnershipIdentity;
 
+/**
+ * What Play reports about the current token beyond its state. Read by the
+ * handlers for acknowledgement and ownership; never persisted or returned.
+ */
+export interface GooglePurchaseMetadata {
+  acknowledgementState?: string;
+  subscriptionState?: string;
+  startTime?: Date;
+  /** The last expired token for this product, set on a Play Store resubscription. */
+  expiredPurchaseToken?: string;
+  /** The account binding that expired purchase carried, when the app set one. */
+  expiredAccountBinding?: string;
+}
+
 export interface VerifiedSubscription {
   subscription: NormalizedSubscription;
   ownership: OwnershipIdentity[];
+  google?: GooglePurchaseMetadata;
 }
 
 export interface StoreEvent {
@@ -178,9 +193,28 @@ export interface StoreEvent {
   environment: StoreEnvironment;
   eventType: string;
   eventAt: Date;
+  /** The Play purchase the event is about, as a reference; never the token. */
+  purchaseReference?: string;
+  /** The Apple purchase the event is about. */
+  originalTransactionId?: string;
+  /** Play's refund type on a voided purchase. */
+  refundType?: number;
+  /** Play's reason and source on an entry from the Voided Purchases API. */
+  voidedReason?: number;
+  voidedSource?: number;
 }
 
 export interface PersistedSubscriptionResult {
   duplicate: boolean;
+  /** False when the verified state was too old, or about a purchase the slot no longer holds. */
+  stateApplied: boolean;
+  /**
+   * True when an active state took the slot from a different purchase that was
+   * still active and unexpired. The user then holds two living purchases on
+   * one store, which is the one case the slot model cannot represent.
+   */
+  displacedLivingPurchase: boolean;
+  /** True when Play still waits for this purchase's acknowledgement after the commit. */
+  acknowledgementPending: boolean;
   subscription: SubscriptionResponse;
 }

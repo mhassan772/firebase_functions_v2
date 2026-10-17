@@ -7,14 +7,30 @@ const {
 const {
   accountBindingVersion,
   deriveAccountBinding,
+  sha256Reference,
 } = require("../lib/services/subscriptions/crypto");
 const {
   claimedAppleEnvironment,
+  decodeAppleNotificationIdentity,
   validateAppleTransaction,
 } = require("../lib/services/subscriptions/apple");
 const {
+  isRetainableFailure,
+  reconcileWindow,
+  voidedEventKey,
+} = require("../lib/handlers/subscriptionReconcileHandlers");
+const {
+  setPlayApi,
   validateGooglePurchase,
 } = require("../lib/services/subscriptions/google");
+const {
+  ACKNOWLEDGEMENT_DEADLINE_MS,
+  acknowledgementData,
+  acknowledgementNeeded,
+  attemptUpdate,
+  classifyAcknowledgeFailure,
+  retryDelayMs,
+} = require("../lib/services/subscriptions/acknowledgements");
 const {
   normalizeAppleSubscription,
   normalizeGoogleSubscription,
@@ -29,6 +45,8 @@ const {
   masterAfterProjection,
   masterProjectionUpdate,
   MASTER_PROJECTION_OPTIONAL_FIELDS,
+  mayReplaceSlotPurchase,
+  expiredTokenOwnerAccepted,
   shouldApplyIncomingState,
   stateData,
   stateDataToNormalized,
@@ -368,6 +386,255 @@ test("ownership cannot transfer and older notifications cannot regress state", (
   assert.equal(shouldApplyIncomingState(FUTURE, PAST, true), false);
   assert.equal(shouldApplyIncomingState(FUTURE, PAST, false), true);
   assert.equal(shouldApplyIncomingState(PAST, FUTURE, true), true);
+});
+
+function googlePurchase(token, { state, expiryTime, linkedToken } = {}) {
+  return {
+    subscription: normalizeGoogleSubscription({
+      productId: "premium_access",
+      environment: "test",
+      purchaseReference: sha256Reference(token),
+      expiryTime: (expiryTime ?? FUTURE).toISOString(),
+      subscriptionState: state ?? "SUBSCRIPTION_STATE_ACTIVE",
+      autoRenewing: state === undefined,
+      eventAt: NOW,
+      now: NOW,
+    }),
+    ownership: [
+      {
+        platform: "google",
+        environment: "test",
+        purchaseToken: token,
+        currentPurchaseToken: token,
+        ...(linkedToken ? { linkedPurchaseToken: linkedToken } : {}),
+      },
+      ...(linkedToken
+        ? [{ platform: "google", environment: "test", purchaseToken: linkedToken, currentPurchaseToken: token }]
+        : []),
+    ],
+  };
+}
+
+function applePurchase(originalTransactionId, storeStatus) {
+  return {
+    subscription: normalizeAppleSubscription({
+      productId: "monthly_sub",
+      environment: "sandbox",
+      originalTransactionId,
+      expiresAtMs: (storeStatus === 1 ? FUTURE : PAST).getTime(),
+      signedAtMs: NOW.getTime(),
+      storeStatus,
+      autoRenewing: storeStatus === 1,
+      now: NOW,
+    }),
+    ownership: [{ platform: "apple", environment: "sandbox", originalTransactionId }],
+  };
+}
+
+test("a lapsed report about an older purchase never replaces the active one in its slot", () => {
+  // The release QA timeline: token B was voided, C was bought, then Play re-delivered B's void.
+  const current = googlePurchase("token-C-yearly").subscription;
+  const voidedOlder = googlePurchase("token-B-monthly", {
+    state: "SUBSCRIPTION_STATE_EXPIRED",
+    expiryTime: PAST,
+  });
+  voidedOlder.subscription.status = "revoked";
+  assert.equal(mayReplaceSlotPurchase(current, voidedOlder, NOW), false);
+
+  // The same purchase ending does replace it.
+  const currentVoided = googlePurchase("token-C-yearly", {
+    state: "SUBSCRIPTION_STATE_EXPIRED",
+    expiryTime: PAST,
+  });
+  assert.equal(mayReplaceSlotPurchase(current, currentVoided, NOW), true);
+
+  // So does a lapsed upgrade that replaced it through linkedPurchaseToken.
+  const lapsedUpgrade = googlePurchase("token-D-upgrade", {
+    state: "SUBSCRIPTION_STATE_EXPIRED",
+    expiryTime: PAST,
+    linkedToken: "token-C-yearly",
+  });
+  assert.equal(mayReplaceSlotPurchase(current, lapsedUpgrade, NOW), true);
+
+  // An active purchase always takes the slot, and nothing guards a slot that already lapsed.
+  assert.equal(mayReplaceSlotPurchase(current, googlePurchase("token-E-new"), NOW), true);
+  const lapsedStored = googlePurchase("token-C-yearly", { expiryTime: PAST }).subscription;
+  assert.equal(lapsedStored.active, false);
+  assert.equal(mayReplaceSlotPurchase(lapsedStored, voidedOlder, NOW), true);
+  const staleActiveFlag = { ...current, expiresAt: PAST };
+  assert.equal(mayReplaceSlotPurchase(staleActiveFlag, voidedOlder, NOW), true);
+  assert.equal(mayReplaceSlotPurchase(undefined, voidedOlder, NOW), true);
+  assert.equal(
+    mayReplaceSlotPurchase({ ...current, purchaseReference: undefined }, voidedOlder, NOW),
+    true
+  );
+});
+
+test("an expired purchase under another Apple ID never replaces the active one in its slot", () => {
+  const current = applePurchase("original-apple-id-2", 1).subscription;
+  assert.equal(current.active, true);
+  assert.equal(mayReplaceSlotPurchase(current, applePurchase("original-apple-id-1", 2), NOW), false);
+  assert.equal(mayReplaceSlotPurchase(current, applePurchase("original-apple-id-1", 5), NOW), false);
+  assert.equal(mayReplaceSlotPurchase(current, applePurchase("original-apple-id-2", 5), NOW), true);
+  assert.equal(mayReplaceSlotPurchase(current, applePurchase("original-apple-id-1", 1), NOW), true);
+});
+
+test("two lapsed states about different purchases: the slot keeps the one that ran later", () => {
+  const OLDER_PAST = new Date("2025-11-01T00:00:00.000Z");
+  const storedLapsed = googlePurchase("token-C-yearly", {
+    state: "SUBSCRIPTION_STATE_EXPIRED",
+    expiryTime: PAST,
+  }).subscription;
+  const olderVoid = googlePurchase("token-B-monthly", {
+    state: "SUBSCRIPTION_STATE_EXPIRED",
+    expiryTime: OLDER_PAST,
+  });
+  assert.equal(mayReplaceSlotPurchase(storedLapsed, olderVoid, NOW), false);
+  const laterLapse = googlePurchase("token-E-later", {
+    state: "SUBSCRIPTION_STATE_EXPIRED",
+    expiryTime: PAST,
+  });
+  assert.equal(mayReplaceSlotPurchase(storedLapsed, laterLapse, NOW), true);
+
+  // A stored purchase whose active flag outlived its expiry counts as lapsed too.
+  const staleActive = { ...googlePurchase("token-C-yearly").subscription, expiresAt: PAST };
+  assert.equal(mayReplaceSlotPurchase(staleActive, olderVoid, NOW), false);
+  assert.equal(mayReplaceSlotPurchase(staleActive, laterLapse, NOW), true);
+
+  // The same purchase or its chain is never held back by its expiry.
+  const ownEarlierVoid = googlePurchase("token-C-yearly", {
+    state: "SUBSCRIPTION_STATE_EXPIRED",
+    expiryTime: OLDER_PAST,
+  });
+  assert.equal(mayReplaceSlotPurchase(storedLapsed, ownEarlierVoid, NOW), true);
+});
+
+test("an expired purchase's owner is accepted only when its binding, if any, is that owner's", () => {
+  const secret = "unit-test-account-binding-secret-with-32-bytes";
+  const ownerBinding = deriveAccountBinding("owner-uid", "google", secret);
+  assert.equal(expiredTokenOwnerAccepted("owner-uid", undefined, undefined), true);
+  assert.equal(expiredTokenOwnerAccepted("owner-uid", ownerBinding, secret), true);
+  assert.equal(
+    expiredTokenOwnerAccepted("someone-else", ownerBinding, secret),
+    false
+  );
+  assert.throws(
+    () => expiredTokenOwnerAccepted("owner-uid", ownerBinding, undefined),
+    (error) => error instanceof SubscriptionError && error.kind === "configuration"
+  );
+});
+
+test("acknowledgement is queued only for an unacknowledged, non-pending Play purchase", () => {
+  const google = (state, acknowledgementState) => ({
+    ...googlePurchase("token-ack"),
+    google: { acknowledgementState, subscriptionState: state, startTime: NOW },
+  });
+  assert.equal(acknowledgementNeeded(google("SUBSCRIPTION_STATE_ACTIVE", "ACKNOWLEDGEMENT_STATE_PENDING")), true);
+  assert.equal(acknowledgementNeeded(google("SUBSCRIPTION_STATE_ACTIVE", "ACKNOWLEDGEMENT_STATE_ACKNOWLEDGED")), false);
+  assert.equal(acknowledgementNeeded(google("SUBSCRIPTION_STATE_PENDING", "ACKNOWLEDGEMENT_STATE_PENDING")), false);
+  assert.equal(acknowledgementNeeded(googlePurchase("token-no-metadata")), false);
+  assert.equal(acknowledgementNeeded(applePurchase("original-1", 1)), false);
+
+  const owned = acknowledgementData(google("SUBSCRIPTION_STATE_ACTIVE", "ACKNOWLEDGEMENT_STATE_PENDING"), "uid-1", Timestamp.fromDate(NOW));
+  assert.equal(owned.status, "pending");
+  assert.equal(owned.uid, "uid-1");
+  assert.equal(owned.purchaseToken, "token-ack");
+  assert.equal(owned.deadlineAt.toMillis() - owned.purchasedAt.toMillis(), ACKNOWLEDGEMENT_DEADLINE_MS);
+  const unowned = acknowledgementData(google("SUBSCRIPTION_STATE_ACTIVE", "ACKNOWLEDGEMENT_STATE_PENDING"), undefined, Timestamp.fromDate(NOW));
+  assert.equal(unowned.status, "awaiting-owner");
+  assert.ok(!Object.hasOwn(unowned, "uid"));
+});
+
+test("acknowledgement attempts move the document and keep nextAttemptAt only while work remains", () => {
+  const done = attemptUpdate(0, "done", NOW);
+  assert.equal(done.status, "done");
+  assert.equal(done.attempts, 1);
+  assert.ok(done.nextAttemptAt instanceof FieldValue);
+  const retry = attemptUpdate(2, "transient", NOW);
+  assert.equal(retry.status, "pending");
+  assert.equal(retry.attempts, 3);
+  assert.equal(retry.nextAttemptAt.toMillis(), NOW.getTime() + retryDelayMs(3));
+  const abandoned = attemptUpdate(4, "permanent", NOW, "http-400");
+  assert.equal(abandoned.status, "abandoned");
+  assert.equal(abandoned.abandonReason, "http-400");
+  assert.ok(abandoned.nextAttemptAt instanceof FieldValue);
+
+  assert.equal(retryDelayMs(1), 15 * 60 * 1000);
+  assert.equal(retryDelayMs(2), 30 * 60 * 1000);
+  assert.equal(retryDelayMs(10), 6 * 60 * 60 * 1000);
+});
+
+test("acknowledge failures: conflicts, limits, permissions and outages retry; a rejection is final unless Play shows it acknowledged", async () => {
+  const states = { "token-done": "ACKNOWLEDGEMENT_STATE_ACKNOWLEDGED", "token-open": "ACKNOWLEDGEMENT_STATE_PENDING" };
+  setPlayApi({
+    async getSubscription(token) {
+      if (!(token in states)) throw { code: 500 };
+      return { acknowledgementState: states[token] };
+    },
+    async acknowledgeSubscription() {},
+    async listVoidedPurchases() { return {}; },
+  });
+  try {
+    for (const code of [409, 429, 500, 503, 401, 403]) {
+      assert.equal((await classifyAcknowledgeFailure({ code }, "premium_access", "token-open")).outcome, "transient", String(code));
+    }
+    assert.equal((await classifyAcknowledgeFailure(new Error("socket hang up"), "premium_access", "token-open")).outcome, "transient");
+    assert.deepEqual(await classifyAcknowledgeFailure({ code: 400 }, "premium_access", "token-done"), { outcome: "done", code: "already-acknowledged" });
+    assert.equal((await classifyAcknowledgeFailure({ code: 400 }, "premium_access", "token-open")).outcome, "permanent");
+    assert.equal((await classifyAcknowledgeFailure({ code: 400 }, "premium_access", "token-unknown")).outcome, "transient");
+  } finally {
+    setPlayApi(undefined);
+  }
+});
+
+test("the recovery window resumes a stored page, else runs checkpoint to now within what the feed serves", () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  const fresh = reconcileWindow({ retained: [] }, NOW, 30 * DAY);
+  assert.equal(fresh.window.startAt.getTime(), NOW.getTime() - 30 * DAY);
+  assert.equal(fresh.window.endAt.getTime(), NOW.getTime());
+  assert.equal(fresh.gapMs, 0);
+
+  const recent = reconcileWindow({ checkpointAt: new Date(NOW.getTime() - 6 * 60 * 60 * 1000), retained: [] }, NOW, 30 * DAY);
+  assert.equal(recent.window.startAt.getTime(), NOW.getTime() - 6 * 60 * 60 * 1000);
+  assert.equal(recent.gapMs, 0);
+
+  const stale = reconcileWindow({ checkpointAt: new Date(NOW.getTime() - 40 * DAY), retained: [] }, NOW, 30 * DAY);
+  assert.equal(stale.window.startAt.getTime(), NOW.getTime() - 30 * DAY);
+  assert.equal(stale.gapMs, 10 * DAY);
+
+  const stored = { startAt: PAST, endAt: new Date(NOW.getTime() - DAY), pageToken: "page-3" };
+  const resumed = reconcileWindow({ checkpointAt: PAST, window: stored, retained: [] }, NOW, 30 * DAY);
+  assert.deepEqual(resumed, { window: stored, gapMs: 0 });
+
+  assert.equal(voidedEventKey({ orderId: "GPA.1234", purchaseToken: "token-a" }), "voided:GPA.1234");
+  const fallback = voidedEventKey({ purchaseToken: "token-promo", voidedTimeMillis: "1700000000000" });
+  assert.equal(fallback, `voided:${sha256Reference("token-promo")}:1700000000000`);
+  assert.ok(!fallback.includes("token-promo"));
+
+  assert.equal(isRetainableFailure(new SubscriptionError("store-unavailable", "x", "x", true)), true);
+  assert.equal(isRetainableFailure(new SubscriptionError("configuration", "x", "x")), true);
+  assert.equal(isRetainableFailure(new SubscriptionError("internal", "x", "x")), true);
+  assert.equal(isRetainableFailure(new Error("socket hang up")), true);
+  assert.equal(isRetainableFailure(new SubscriptionError("invalid-store-data", "x", "x")), false);
+  assert.equal(isRetainableFailure(new SubscriptionError("ownership-conflict", "x", "x")), false);
+});
+
+test("a notification's id and environment can be read for the dedupe lookup without verifying it", () => {
+  const encode = (payload) =>
+    `${Buffer.from("{}").toString("base64url")}.${Buffer.from(JSON.stringify(payload)).toString("base64url")}.sig`;
+  assert.deepEqual(
+    decodeAppleNotificationIdentity(encode({ notificationUUID: "uuid-1", data: { environment: "Sandbox" } })),
+    { notificationUUID: "uuid-1", environment: "sandbox" }
+  );
+  assert.deepEqual(
+    decodeAppleNotificationIdentity(encode({ notificationUUID: "uuid-2", environment: "Production" })),
+    { notificationUUID: "uuid-2", environment: "production" }
+  );
+  assert.throws(
+    () => decodeAppleNotificationIdentity(encode({ data: { environment: "Sandbox" } })),
+    (error) => error instanceof SubscriptionError && error.safeCode === "apple-notification-id-missing"
+  );
+  assert.throws(() => decodeAppleNotificationIdentity("not-a-jws"), (error) => error instanceof SubscriptionError);
 });
 
 test("master projection and document keys never expose protected purchase data", () => {

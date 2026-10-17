@@ -6,6 +6,7 @@ import {
   Timestamp,
   Transaction,
 } from "firebase-admin/firestore";
+import * as functions from "firebase-functions";
 import { admin } from "../../config/admin";
 import {
   MANUAL_GRANT_PRODUCT_ID,
@@ -20,18 +21,38 @@ import {
   SourceSummaryResponse,
   StoreEnvironment,
   StoreEvent,
+  StorePlatform,
   SubscriptionResponse,
   SubscriptionSource,
   VerifiedSubscription,
 } from "../../types/subscriptions";
-import { sha256Hex, sha256Reference } from "./crypto";
+import {
+  deriveAccountBinding,
+  sha256Hex,
+  sha256Reference,
+  timingSafeEqualText,
+} from "./crypto";
 import { DeviceLimits, devicesBlockFromMaster } from "./devices";
 import { SubscriptionError } from "./errors";
+import {
+  googleOwnershipDocumentId,
+  ownershipDocumentId,
+  SUBSCRIPTION_OWNERSHIP_COLLECTION,
+} from "./keys";
 import { selectMasterState } from "./normalization";
+import {
+  acknowledgementData,
+  acknowledgementNeeded,
+  claimedAcknowledgementUpdate,
+  SUBSCRIPTION_ACKNOWLEDGEMENT_COLLECTION,
+} from "./acknowledgements";
 
 export const SUBSCRIPTION_MASTER_COLLECTION = "subscription_master";
-export const SUBSCRIPTION_OWNERSHIP_COLLECTION =
-  "subscription_purchase_ownership";
+export {
+  googleOwnershipDocumentId,
+  ownershipDocumentId,
+  SUBSCRIPTION_OWNERSHIP_COLLECTION,
+} from "./keys";
 export const SUBSCRIPTION_STATE_COLLECTION = "subscription_store_state";
 export const SUBSCRIPTION_EVENT_COLLECTION = "subscription_store_events";
 /** Written by the old admin portal; now only mirrored to for app versions that still read it. */
@@ -209,10 +230,19 @@ export async function persistVerifiedSubscription(
       .collection(SUBSCRIPTION_EVENT_COLLECTION)
       .doc(eventDocumentId(event))
     : undefined;
+  const acknowledgementRef = acknowledgementRefFor(verified);
 
-  return firestore.runTransaction(async (transaction) => {
+  // Set by the last transaction attempt and logged once it has committed, so a
+  // retried attempt never counts twice.
+  let displaced: { stored: string; incoming: string } | undefined;
+  const result = await firestore.runTransaction(async (transaction) => {
+    displaced = undefined;
     const state = await readProjectionState(transaction, uid, {
-      extraRefs: [...ownershipRefs, ...(eventRef ? [eventRef] : [])],
+      extraRefs: [
+        ...ownershipRefs,
+        ...(eventRef ? [eventRef] : []),
+        ...(acknowledgementRef ? [acknowledgementRef] : []),
+      ],
     });
     const ownershipSnapshots = state.extraSnapshots.slice(
       0,
@@ -220,6 +250,9 @@ export async function persistVerifiedSubscription(
     );
     const eventSnapshot = eventRef
       ? state.extraSnapshots[ownershipRefs.length]
+      : undefined;
+    const acknowledgementSnapshot = acknowledgementRef
+      ? state.extraSnapshots[ownershipRefs.length + (eventRef ? 1 : 0)]
       : undefined;
 
     if (eventSnapshot?.exists) {
@@ -232,6 +265,9 @@ export async function persistVerifiedSubscription(
       }
       return {
         duplicate: true,
+        stateApplied: false,
+        displacedLivingPurchase: false,
+        acknowledgementPending: false,
         subscription: masterDataToResponse(state.masterSnapshot.data()!),
       };
     }
@@ -271,17 +307,40 @@ export async function persistVerifiedSubscription(
     }
 
     const existingIncoming = state.slotSnapshots[incomingStateIndex];
-    const existingEventAt = timestampDate(
-      existingIncoming.get("lastStoreEventAt")
-    );
-    const isStaleEvent = !shouldApplyIncomingState(
-      existingEventAt,
-      verified.subscription.lastStoreEventAt,
-      Boolean(event)
-    );
-
     const states = slotStates(state.slotSnapshots, now.toDate());
-    if (!isStaleEvent) {
+    const stored = states[incomingStateIndex];
+    // The event clock orders events of one purchase. Across purchases it says
+    // nothing: an older purchase's later-dated expiry must not outrank a new
+    // purchase's delayed notice. A slot with no identity keeps the old rule.
+    const storedPurchase = stored ? purchaseIdentity(stored) : undefined;
+    const clockApplies =
+      storedPurchase === undefined ||
+      storedPurchase === purchaseIdentity(verified.subscription);
+    const isStaleEvent =
+      clockApplies &&
+      !shouldApplyIncomingState(
+        timestampDate(existingIncoming.get("lastStoreEventAt")),
+        verified.subscription.lastStoreEventAt,
+        Boolean(event)
+      );
+
+    const stateApplied =
+      !isStaleEvent &&
+      mayReplaceSlotPurchase(stored, verified, now.toDate());
+    if (stateApplied) {
+      if (
+        stored &&
+        storedPurchase !== undefined &&
+        verified.subscription.active &&
+        stored.active &&
+        stored.expiresAt.getTime() > now.toMillis() &&
+        !verifiedPurchaseIdentities(verified).has(storedPurchase)
+      ) {
+        displaced = {
+          stored: storedPurchase,
+          incoming: purchaseIdentity(verified.subscription) ?? "",
+        };
+      }
       states[incomingStateIndex] = verified.subscription;
       transaction.set(
         state.slotRefs[incomingStateIndex],
@@ -296,45 +355,139 @@ export async function persistVerifiedSubscription(
 
     const masterData = projectMaster(transaction, state, states, now);
     if (eventRef && event) {
-      transaction.create(eventRef, {
-        platform: event.platform,
-        environment: event.environment,
-        eventType: event.eventType,
-        eventAt: Timestamp.fromDate(event.eventAt),
-        claimed: true,
-        createdAt: now,
-      });
+      transaction.create(
+        eventRef,
+        eventData(event, now, { claimed: true, stateApplied })
+      );
+    }
+
+    // The entitlement and the acknowledgement work commit together, so Play
+    // is never acknowledged for a purchase nobody was granted.
+    let acknowledgementPending = false;
+    if (acknowledgementRef && acknowledgementSnapshot) {
+      const status = acknowledgementSnapshot.get("status");
+      if (!acknowledgementSnapshot.exists) {
+        transaction.set(
+          acknowledgementRef,
+          acknowledgementData(verified, uid, now)
+        );
+        acknowledgementPending = true;
+      } else if (status === "awaiting-owner") {
+        transaction.update(
+          acknowledgementRef,
+          claimedAcknowledgementUpdate(uid, now)
+        );
+        acknowledgementPending = true;
+      } else if (status === "pending") {
+        acknowledgementPending = true;
+      }
     }
 
     return {
       duplicate: false,
+      stateApplied,
+      displacedLivingPurchase: displaced !== undefined,
+      acknowledgementPending,
       subscription: masterDataToResponse(masterData),
     };
   });
+
+  if (displaced) {
+    // Counts the case the slot model cannot hold: two living purchases on one
+    // store for one account. Whether that case ever needs a per-purchase model
+    // is decided from this count.
+    functions.logger.info("subscription_slot_concurrent_purchases", {
+      platform: verified.subscription.platform,
+      environment: verified.subscription.environment,
+      storedPurchase: displaced.stored,
+      incomingPurchase: displaced.incoming,
+    });
+  }
+  return result;
 }
 
+/** The event document: dedupe key plus an audit trail, never a raw token. */
+function eventData(
+  event: StoreEvent,
+  now: Timestamp,
+  outcome: { claimed: boolean; stateApplied: boolean }
+): DocumentData {
+  const data: DocumentData = {
+    platform: event.platform,
+    environment: event.environment,
+    eventType: event.eventType,
+    eventAt: Timestamp.fromDate(event.eventAt),
+    claimed: outcome.claimed,
+    stateApplied: outcome.stateApplied,
+    createdAt: now,
+  };
+  if (event.purchaseReference) {
+    data.purchaseReference = event.purchaseReference;
+  }
+  if (event.originalTransactionId) {
+    data.originalTransactionId = event.originalTransactionId;
+  }
+  if (event.refundType !== undefined) {
+    data.refundType = event.refundType;
+  }
+  if (event.voidedReason !== undefined) {
+    data.voidedReason = event.voidedReason;
+  }
+  if (event.voidedSource !== undefined) {
+    data.voidedSource = event.voidedSource;
+  }
+  return data;
+}
+
+/**
+ * Records an event nobody owns yet. A Play purchase among them still has to be
+ * acknowledged once an account claims it, so its acknowledgement is queued as
+ * `awaiting-owner` in the same commit.
+ */
 export async function recordUnclaimedStoreEvent(
-  event: StoreEvent
+  event: StoreEvent,
+  verified?: VerifiedSubscription
 ): Promise<boolean> {
   const firestore = admin.firestore();
   const eventRef = firestore
     .collection(SUBSCRIPTION_EVENT_COLLECTION)
     .doc(eventDocumentId(event));
+  const acknowledgementRef = verified
+    ? acknowledgementRefFor(verified)
+    : undefined;
   return firestore.runTransaction(async (transaction) => {
-    const snapshot = await transaction.get(eventRef);
+    const [snapshot, acknowledgementSnapshot] = await transaction.getAll(
+      eventRef,
+      ...(acknowledgementRef ? [acknowledgementRef] : [])
+    );
     if (snapshot.exists) {
       return false;
     }
-    transaction.create(eventRef, {
-      platform: event.platform,
-      environment: event.environment,
-      eventType: event.eventType,
-      eventAt: Timestamp.fromDate(event.eventAt),
-      claimed: false,
-      createdAt: Timestamp.now(),
-    });
+    const now = Timestamp.now();
+    transaction.create(
+      eventRef,
+      eventData(event, now, { claimed: false, stateApplied: false })
+    );
+    if (acknowledgementRef && verified && !acknowledgementSnapshot?.exists) {
+      transaction.set(
+        acknowledgementRef,
+        acknowledgementData(verified, undefined, now)
+      );
+    }
     return true;
   });
+}
+
+function acknowledgementRefFor(
+  verified: VerifiedSubscription
+): DocumentReference | undefined {
+  if (!acknowledgementNeeded(verified) || !verified.subscription.purchaseReference) {
+    return undefined;
+  }
+  return admin
+    .firestore()
+    .collection(SUBSCRIPTION_ACKNOWLEDGEMENT_COLLECTION)
+    .doc(verified.subscription.purchaseReference);
 }
 
 export async function resolveVerifiedOwner(
@@ -375,6 +528,99 @@ export async function resolveVerifiedOwner(
   return owners.values().next().value;
 }
 
+/**
+ * The account a verified purchase belongs to, or undefined when nobody has
+ * claimed it yet.
+ *
+ * The chain's own ownership records decide first. A Play Store resubscription
+ * after expiry starts a new chain with no link to the old one, so Play points
+ * at the last expired token instead; its owner is accepted only when the
+ * binding that expired purchase carried, if any, is that owner's. The same
+ * answer is given to every entry point, so who claims a purchase never depends
+ * on whether the app's verify or the store's notification lands first.
+ */
+export async function resolvePurchaseOwner(
+  verified: VerifiedSubscription,
+  accountBindingSecret: () => string
+): Promise<string | undefined> {
+  const chainOwner = await resolveVerifiedOwner(verified.ownership);
+  if (chainOwner) {
+    return chainOwner;
+  }
+  const expiredToken = verified.google?.expiredPurchaseToken;
+  if (!expiredToken) {
+    return undefined;
+  }
+  const snapshot = await admin
+    .firestore()
+    .collection(SUBSCRIPTION_OWNERSHIP_COLLECTION)
+    .doc(googleOwnershipDocumentId(expiredToken))
+    .get();
+  const owner = snapshot.get("uid");
+  if (!snapshot.exists || typeof owner !== "string" || !owner) {
+    return undefined;
+  }
+  const expiredBinding = verified.google?.expiredAccountBinding;
+  const accepted = expiredTokenOwnerAccepted(
+    owner,
+    expiredBinding,
+    expiredBinding ? accountBindingSecret() : undefined
+  );
+  if (!accepted) {
+    functions.logger.warn("subscription_expired_token_binding_mismatch", {
+      purchaseReference: verified.subscription.purchaseReference,
+      expiredPurchaseReference: sha256Reference(expiredToken),
+    });
+    return undefined;
+  }
+  functions.logger.info("subscription_owner_resolved_from_expired_token", {
+    purchaseReference: verified.subscription.purchaseReference,
+    expiredPurchaseReference: sha256Reference(expiredToken),
+  });
+  return owner;
+}
+
+/** Whether the expired purchase's binding, when it carried one, names this owner. */
+export function expiredTokenOwnerAccepted(
+  owner: string,
+  expiredBinding: string | undefined,
+  accountBindingSecret: string | undefined
+): boolean {
+  if (!expiredBinding) {
+    return true;
+  }
+  if (!accountBindingSecret) {
+    throw new SubscriptionError(
+      "configuration",
+      "account-binding-secret-missing",
+      "The account binding secret is unavailable."
+    );
+  }
+  return timingSafeEqualText(
+    expiredBinding,
+    deriveAccountBinding(owner, "google", accountBindingSecret)
+  );
+}
+
+/**
+ * Refuses a claim by the caller when the purchase already has another owner,
+ * through its chain or through the expired token it replaced.
+ */
+export async function assertCallerMayClaim(
+  uid: string,
+  verified: VerifiedSubscription,
+  accountBindingSecret: () => string
+): Promise<void> {
+  const owner = await resolvePurchaseOwner(verified, accountBindingSecret);
+  if (owner !== undefined && owner !== uid) {
+    throw new SubscriptionError(
+      "ownership-conflict",
+      "purchase-owned-by-another-user",
+      "The verified purchase belongs to another Firebase account."
+    );
+  }
+}
+
 export async function resolveGoogleCurrentToken(
   purchaseToken: string
 ): Promise<string> {
@@ -387,19 +633,6 @@ export async function resolveGoogleCurrentToken(
   return typeof currentToken === "string" && currentToken
     ? currentToken
     : purchaseToken;
-}
-
-export function ownershipDocumentId(identity: OwnershipIdentity): string {
-  if (identity.platform === "apple") {
-    return `apple_${sha256Reference(
-      `${identity.environment}:${identity.originalTransactionId}`
-    )}`;
-  }
-  return googleOwnershipDocumentId(identity.purchaseToken);
-}
-
-export function googleOwnershipDocumentId(purchaseToken: string): string {
-  return `google_${sha256Reference(purchaseToken)}`;
 }
 
 export function assertOwnershipClaimAllowed(
@@ -436,6 +669,76 @@ export function shouldApplyIncomingState(
   );
 }
 
+/**
+ * Whether a verified state may take the slot from the purchase stored in it.
+ *
+ * A slot holds one purchase per platform and environment, but a user can own
+ * several over time: Play issues a new token for every resubscription, and a
+ * second Apple ID brings its own original transaction. The stores keep
+ * reporting on an older purchase after a newer one starts (a re-delivered
+ * void, a late refund, an expiry), so a lapsed state for another purchase must
+ * not replace one that is still active. A lapsed state still replaces it when
+ * it is the same purchase, or a later link in its chain such as an upgrade,
+ * because then the stored purchase has really ended.
+ *
+ * When both are lapsed and about different purchases, the slot keeps the one
+ * that ran later, so a replayed void for an old purchase never puts that
+ * purchase's reference on a master that was showing the newer one.
+ */
+export function mayReplaceSlotPurchase(
+  stored: NormalizedSubscription | undefined,
+  incoming: VerifiedSubscription,
+  now: Date
+): boolean {
+  if (!stored || incoming.subscription.active) {
+    return true;
+  }
+  const storedPurchase = purchaseIdentity(stored);
+  if (
+    storedPurchase === undefined ||
+    verifiedPurchaseIdentities(incoming).has(storedPurchase)
+  ) {
+    return true;
+  }
+  if (stored.active && stored.expiresAt.getTime() > now.getTime()) {
+    return false;
+  }
+  return (
+    incoming.subscription.expiresAt.getTime() >= stored.expiresAt.getTime()
+  );
+}
+
+/** The purchase a state describes, in the form the slot document stores it. */
+function purchaseIdentity(state: NormalizedSubscription): string | undefined {
+  if (state.platform === "apple") {
+    return state.originalTransactionId;
+  }
+  if (state.platform === "google") {
+    return state.purchaseReference;
+  }
+  return undefined;
+}
+
+/** Every purchase the verified state covers: its own and, on Play, each token it replaced. */
+function verifiedPurchaseIdentities(verified: VerifiedSubscription): Set<string> {
+  const identities = new Set<string>();
+  const own = purchaseIdentity(verified.subscription);
+  if (own) {
+    identities.add(own);
+  }
+  for (const identity of verified.ownership) {
+    if (identity.platform === "apple") {
+      identities.add(identity.originalTransactionId);
+    } else {
+      identities.add(sha256Reference(identity.purchaseToken));
+      if (identity.linkedPurchaseToken) {
+        identities.add(sha256Reference(identity.linkedPurchaseToken));
+      }
+    }
+  }
+  return identities;
+}
+
 export function stateDocumentId(
   uid: string,
   platform: SubscriptionSource,
@@ -450,9 +753,29 @@ export function legacyManualDocumentId(uid: string): string {
 }
 
 function eventDocumentId(event: StoreEvent): string {
-  return `${event.platform}_${sha256Reference(
-    `${event.environment}:${event.key}`
-  )}`;
+  return storeEventDocumentId(event.platform, event.environment, event.key);
+}
+
+export function storeEventDocumentId(
+  platform: StorePlatform,
+  environment: StoreEnvironment,
+  key: string
+): string {
+  return `${platform}_${sha256Reference(`${environment}:${key}`)}`;
+}
+
+/** Whether a store event with this key was already handled, claimed or not. */
+export async function storeEventExists(
+  platform: StorePlatform,
+  environment: StoreEnvironment,
+  key: string
+): Promise<boolean> {
+  const snapshot = await admin
+    .firestore()
+    .collection(SUBSCRIPTION_EVENT_COLLECTION)
+    .doc(storeEventDocumentId(platform, environment, key))
+    .get();
+  return snapshot.exists;
 }
 
 function ownershipData(
