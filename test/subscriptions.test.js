@@ -1314,3 +1314,71 @@ test("legacy expiry tolerates the shapes the old documents used", () => {
   assert.equal(legacyExpires({ expires: "garbage" }), undefined);
   assert.equal(legacyExpires(undefined), undefined);
 });
+
+const { classifyGoogleRtdn } = require("../lib/handlers/verifiedSubscriptionHandlers");
+
+test("Play notifications sort into the kinds the handler acts on", () => {
+  assert.deepEqual(classifyGoogleRtdn({ testNotification: { version: "1.0" } }), { kind: "test" });
+  assert.deepEqual(
+    classifyGoogleRtdn({ oneTimeProductNotification: { notificationType: 1 } }),
+    { kind: "oneTimeProduct" }
+  );
+  assert.deepEqual(
+    classifyGoogleRtdn({
+      pendingRefundReviewNotification: { pendingRefundToken: "secret", orderId: "GPA.1", refundReason: 7 },
+    }),
+    { kind: "pendingRefundReview", refundReason: 7 }
+  );
+  assert.deepEqual(
+    classifyGoogleRtdn({ subscriptionNotification: { notificationType: 2, purchaseToken: "token-renewed" } }),
+    { kind: "store", notificationType: "SUBSCRIPTION_RENEWED", purchaseToken: "token-renewed" }
+  );
+  assert.deepEqual(
+    classifyGoogleRtdn({ subscriptionNotification: { notificationType: 99, purchaseToken: "token-new" } }),
+    { kind: "store", notificationType: "SUBSCRIPTION_99", purchaseToken: "token-new" }
+  );
+  assert.deepEqual(
+    classifyGoogleRtdn({
+      voidedPurchaseNotification: { purchaseToken: "token-voided", orderId: "GPA.2", productType: 1, refundType: 1 },
+    }),
+    { kind: "store", notificationType: "VOIDED_PURCHASE", purchaseToken: "token-voided", refundType: 1 }
+  );
+});
+
+test("an unrecognised Play notification reports its key names only", () => {
+  const classification = classifyGoogleRtdn({
+    version: "1.0",
+    packageName: "ca.basira.mantooqapp",
+    eventTimeMillis: "1760646423000",
+    futureNotification: { token: "must-not-leak" },
+    "bad key": 1,
+  });
+  assert.deepEqual(classification, {
+    kind: "unknown",
+    payloadKeys: ["eventTimeMillis", "futureNotification", "packageName", "version"],
+  });
+  assert.ok(!JSON.stringify(classification).includes("must-not-leak"));
+  const many = Object.fromEntries(Array.from({ length: 30 }, (_, index) => [`key${index}`, index]));
+  assert.equal(classifyGoogleRtdn(many).payloadKeys.length, 10);
+});
+
+test("malformed Play store notifications are rejected with their own codes", () => {
+  const codeOf = (payload) => {
+    try {
+      classifyGoogleRtdn(payload);
+    } catch (error) {
+      return error.safeCode;
+    }
+    return undefined;
+  };
+  assert.equal(
+    codeOf({ voidedPurchaseNotification: { purchaseToken: "token-voided", productType: 2 } }),
+    "google-voided-product-not-subscription"
+  );
+  assert.equal(codeOf({ voidedPurchaseNotification: { productType: 1 } }), "google-purchase-token-missing");
+  assert.equal(codeOf({ subscriptionNotification: { notificationType: 2 } }), "google-purchase-token-missing");
+  assert.equal(
+    codeOf({ subscriptionNotification: { notificationType: "2", purchaseToken: "token" } }),
+    "google-notification-type-invalid"
+  );
+});

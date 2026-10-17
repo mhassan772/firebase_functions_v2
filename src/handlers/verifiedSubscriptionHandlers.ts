@@ -5,7 +5,11 @@ import {
   SUBSCRIPTION_SECRETS,
   GOOGLE_PACKAGE_NAME,
 } from "../config/constants";
-import { SubscriptionPlatform, StoreEvent } from "../types/subscriptions";
+import {
+  SubscriptionPlatform,
+  StoreEvent,
+  VerifiedSubscription,
+} from "../types/subscriptions";
 import {
   accountBindingVersion,
   deriveAccountBinding,
@@ -41,7 +45,7 @@ import {
 } from "../services/subscriptions/devices";
 import { DevicePlatform } from "../types/subscriptions";
 
-interface GoogleRtdnPayload {
+export interface GoogleRtdnPayload {
   packageName?: unknown;
   eventTimeMillis?: unknown;
   subscriptionNotification?: {
@@ -51,10 +55,29 @@ interface GoogleRtdnPayload {
   voidedPurchaseNotification?: {
     purchaseToken?: unknown;
     productType?: unknown;
+    refundType?: unknown;
+  };
+  pendingRefundReviewNotification?: {
+    refundReason?: unknown;
   };
   oneTimeProductNotification?: unknown;
   testNotification?: unknown;
 }
+
+/** What a Play notification asks the handler to do, decided before any store or Firestore call. */
+export type GoogleRtdnClassification =
+  | { kind: "test" }
+  | { kind: "oneTimeProduct" }
+  | { kind: "pendingRefundReview"; refundReason?: number }
+  | {
+    kind: "store";
+    notificationType: string;
+    purchaseToken: string;
+    refundType?: number;
+  }
+  | { kind: "unknown"; payloadKeys: string[] };
+
+const MAX_LOGGED_PAYLOAD_KEYS = 10;
 
 export async function handleGetSubscriptionAccountBinding(
   data: unknown,
@@ -324,7 +347,8 @@ export async function handleGoogleSubscriptionNotifications(
       throw invalidNotification("google-event-id-missing");
     }
 
-    if (payload.testNotification) {
+    const classification = classifyGoogleRtdn(payload);
+    if (classification.kind === "test") {
       const event: StoreEvent = {
         key: eventId,
         platform: "google",
@@ -341,15 +365,32 @@ export async function handleGoogleSubscriptionNotifications(
       return;
     }
 
-    if (payload.oneTimeProductNotification) {
+    if (classification.kind === "oneTimeProduct") {
       logWarning("google_subscription_notification_rejection", operationId, {
         code: "google-one-time-product-ignored",
       });
       return;
     }
 
-    const notificationType = googleNotificationType(payload);
-    const purchaseToken = googleNotificationPurchaseToken(payload);
+    if (classification.kind === "pendingRefundReview") {
+      // Play decides the chargeback itself when nobody answers through
+      // orders.reviewRefund; the outcome arrives later as a voided purchase.
+      logInfo("google_subscription_notification_ignored", operationId, {
+        kind: classification.kind,
+        refundReason: classification.refundReason,
+      });
+      return;
+    }
+
+    if (classification.kind === "unknown") {
+      logWarning("google_subscription_notification_rejection", operationId, {
+        code: "google-subscription-notification-missing",
+        payloadKeys: classification.payloadKeys,
+      });
+      return;
+    }
+
+    const { notificationType, purchaseToken, refundType } = classification;
     const currentToken = await resolveGoogleCurrentToken(purchaseToken);
     const verified = await verifyGoogleSubscription(
       currentToken,
@@ -377,6 +418,7 @@ export async function handleGoogleSubscriptionNotifications(
       logInfo("google_subscription_notification_success", operationId, {
         eventType: notificationType,
         environment: event.environment,
+        ...googleStateLogFields(verified, refundType),
         claimed: false,
       });
       return;
@@ -392,6 +434,7 @@ export async function handleGoogleSubscriptionNotifications(
       environment: event.environment,
       status: verified.subscription.status,
       active: verified.subscription.active,
+      ...googleStateLogFields(verified, refundType),
       duplicate: persisted.duplicate,
       claimed: true,
     });
@@ -581,33 +624,92 @@ function parseGoogleEventTime(value: unknown, fallback: string): Date {
   return parsed;
 }
 
-function googleNotificationType(payload: GoogleRtdnPayload): string {
+/**
+ * Sorts a Play notification into what the handler does with it.
+ *
+ * The checks keep the handler's original order. A payload with none of the
+ * known fields comes back as unknown with its top-level key names, never
+ * their values, so the log can say what Play sent without carrying tokens.
+ */
+export function classifyGoogleRtdn(
+  payload: GoogleRtdnPayload
+): GoogleRtdnClassification {
+  if (payload.testNotification) {
+    return { kind: "test" };
+  }
+  if (payload.oneTimeProductNotification) {
+    return { kind: "oneTimeProduct" };
+  }
+  if (payload.pendingRefundReviewNotification) {
+    return {
+      kind: "pendingRefundReview",
+      refundReason: optionalInteger(
+        payload.pendingRefundReviewNotification.refundReason
+      ),
+    };
+  }
   if (payload.subscriptionNotification) {
     const type = payload.subscriptionNotification.notificationType;
     if (typeof type !== "number" || !Number.isInteger(type)) {
       throw invalidNotification("google-notification-type-invalid");
     }
-    return GOOGLE_NOTIFICATION_TYPES[type] ?? `SUBSCRIPTION_${type}`;
+    return {
+      kind: "store",
+      notificationType:
+        GOOGLE_NOTIFICATION_TYPES[type] ?? `SUBSCRIPTION_${type}`,
+      purchaseToken: requireNotificationToken(
+        payload.subscriptionNotification.purchaseToken
+      ),
+    };
   }
   if (payload.voidedPurchaseNotification) {
     if (payload.voidedPurchaseNotification.productType !== 1) {
       throw invalidNotification("google-voided-product-not-subscription");
     }
-    return "VOIDED_PURCHASE";
+    return {
+      kind: "store",
+      notificationType: "VOIDED_PURCHASE",
+      purchaseToken: requireNotificationToken(
+        payload.voidedPurchaseNotification.purchaseToken
+      ),
+      refundType: optionalInteger(
+        payload.voidedPurchaseNotification.refundType
+      ),
+    };
   }
-  throw invalidNotification("google-subscription-notification-missing");
+  return {
+    kind: "unknown",
+    payloadKeys: Object.keys(payload)
+      .filter((key) => /^[A-Za-z][A-Za-z0-9]{0,63}$/.test(key))
+      .sort()
+      .slice(0, MAX_LOGGED_PAYLOAD_KEYS),
+  };
 }
 
-function googleNotificationPurchaseToken(
-  payload: GoogleRtdnPayload
-): string {
-  const token =
-    payload.subscriptionNotification?.purchaseToken ??
-    payload.voidedPurchaseNotification?.purchaseToken;
+function requireNotificationToken(token: unknown): string {
   if (typeof token !== "string" || !token) {
     throw invalidNotification("google-purchase-token-missing");
   }
   return token;
+}
+
+function optionalInteger(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value)
+    ? value
+    : undefined;
+}
+
+/** Store state behind a notification, so a void followed by a renewal can be read back from the logs. */
+function googleStateLogFields(
+  verified: VerifiedSubscription,
+  refundType: number | undefined
+): Record<string, unknown> {
+  return {
+    purchaseReference: verified.subscription.purchaseReference,
+    expiresAt: verified.subscription.expiresAt.toISOString(),
+    autoRenewing: verified.subscription.autoRenewing,
+    ...(refundType !== undefined ? { refundType } : {}),
+  };
 }
 
 const GOOGLE_NOTIFICATION_TYPES: Record<number, string> = {
