@@ -6,6 +6,7 @@ import {
   Timestamp,
   Transaction,
 } from "firebase-admin/firestore";
+import * as functions from "firebase-functions";
 import { admin } from "../../config/admin";
 import {
   MANUAL_GRANT_PRODUCT_ID,
@@ -210,7 +211,11 @@ export async function persistVerifiedSubscription(
       .doc(eventDocumentId(event))
     : undefined;
 
-  return firestore.runTransaction(async (transaction) => {
+  // Set by the last transaction attempt and logged once it has committed, so a
+  // retried attempt never counts twice.
+  let displaced: { stored: string; incoming: string } | undefined;
+  const result = await firestore.runTransaction(async (transaction) => {
+    displaced = undefined;
     const state = await readProjectionState(transaction, uid, {
       extraRefs: [...ownershipRefs, ...(eventRef ? [eventRef] : [])],
     });
@@ -233,6 +238,7 @@ export async function persistVerifiedSubscription(
       return {
         duplicate: true,
         stateApplied: false,
+        displacedLivingPurchase: false,
         subscription: masterDataToResponse(state.masterSnapshot.data()!),
       };
     }
@@ -272,24 +278,40 @@ export async function persistVerifiedSubscription(
     }
 
     const existingIncoming = state.slotSnapshots[incomingStateIndex];
-    const existingEventAt = timestampDate(
-      existingIncoming.get("lastStoreEventAt")
-    );
-    const isStaleEvent = !shouldApplyIncomingState(
-      existingEventAt,
-      verified.subscription.lastStoreEventAt,
-      Boolean(event)
-    );
-
     const states = slotStates(state.slotSnapshots, now.toDate());
+    const stored = states[incomingStateIndex];
+    // The event clock orders events of one purchase. Across purchases it says
+    // nothing: an older purchase's later-dated expiry must not outrank a new
+    // purchase's delayed notice. A slot with no identity keeps the old rule.
+    const storedPurchase = stored ? purchaseIdentity(stored) : undefined;
+    const clockApplies =
+      storedPurchase === undefined ||
+      storedPurchase === purchaseIdentity(verified.subscription);
+    const isStaleEvent =
+      clockApplies &&
+      !shouldApplyIncomingState(
+        timestampDate(existingIncoming.get("lastStoreEventAt")),
+        verified.subscription.lastStoreEventAt,
+        Boolean(event)
+      );
+
     const stateApplied =
       !isStaleEvent &&
-      mayReplaceSlotPurchase(
-        states[incomingStateIndex],
-        verified,
-        now.toDate()
-      );
+      mayReplaceSlotPurchase(stored, verified, now.toDate());
     if (stateApplied) {
+      if (
+        stored &&
+        storedPurchase !== undefined &&
+        verified.subscription.active &&
+        stored.active &&
+        stored.expiresAt.getTime() > now.toMillis() &&
+        !verifiedPurchaseIdentities(verified).has(storedPurchase)
+      ) {
+        displaced = {
+          stored: storedPurchase,
+          incoming: purchaseIdentity(verified.subscription) ?? "",
+        };
+      }
       states[incomingStateIndex] = verified.subscription;
       transaction.set(
         state.slotRefs[incomingStateIndex],
@@ -304,22 +326,59 @@ export async function persistVerifiedSubscription(
 
     const masterData = projectMaster(transaction, state, states, now);
     if (eventRef && event) {
-      transaction.create(eventRef, {
-        platform: event.platform,
-        environment: event.environment,
-        eventType: event.eventType,
-        eventAt: Timestamp.fromDate(event.eventAt),
-        claimed: true,
-        createdAt: now,
-      });
+      transaction.create(
+        eventRef,
+        eventData(event, now, { claimed: true, stateApplied })
+      );
     }
 
     return {
       duplicate: false,
       stateApplied,
+      displacedLivingPurchase: displaced !== undefined,
       subscription: masterDataToResponse(masterData),
     };
   });
+
+  if (displaced) {
+    // Counts the case the slot model cannot hold: two living purchases on one
+    // store for one account. Whether that case ever needs a per-purchase model
+    // is decided from this count.
+    functions.logger.info("subscription_slot_concurrent_purchases", {
+      platform: verified.subscription.platform,
+      environment: verified.subscription.environment,
+      storedPurchase: displaced.stored,
+      incomingPurchase: displaced.incoming,
+    });
+  }
+  return result;
+}
+
+/** The event document: dedupe key plus an audit trail, never a raw token. */
+function eventData(
+  event: StoreEvent,
+  now: Timestamp,
+  outcome: { claimed: boolean; stateApplied: boolean }
+): DocumentData {
+  const data: DocumentData = {
+    platform: event.platform,
+    environment: event.environment,
+    eventType: event.eventType,
+    eventAt: Timestamp.fromDate(event.eventAt),
+    claimed: outcome.claimed,
+    stateApplied: outcome.stateApplied,
+    createdAt: now,
+  };
+  if (event.purchaseReference) {
+    data.purchaseReference = event.purchaseReference;
+  }
+  if (event.originalTransactionId) {
+    data.originalTransactionId = event.originalTransactionId;
+  }
+  if (event.refundType !== undefined) {
+    data.refundType = event.refundType;
+  }
+  return data;
 }
 
 export async function recordUnclaimedStoreEvent(
@@ -334,14 +393,10 @@ export async function recordUnclaimedStoreEvent(
     if (snapshot.exists) {
       return false;
     }
-    transaction.create(eventRef, {
-      platform: event.platform,
-      environment: event.environment,
-      eventType: event.eventType,
-      eventAt: Timestamp.fromDate(event.eventAt),
-      claimed: false,
-      createdAt: Timestamp.now(),
-    });
+    transaction.create(
+      eventRef,
+      eventData(event, Timestamp.now(), { claimed: false, stateApplied: false })
+    );
     return true;
   });
 }
@@ -456,24 +511,31 @@ export function shouldApplyIncomingState(
  * not replace one that is still active. A lapsed state still replaces it when
  * it is the same purchase, or a later link in its chain such as an upgrade,
  * because then the stored purchase has really ended.
+ *
+ * When both are lapsed and about different purchases, the slot keeps the one
+ * that ran later, so a replayed void for an old purchase never puts that
+ * purchase's reference on a master that was showing the newer one.
  */
 export function mayReplaceSlotPurchase(
   stored: NormalizedSubscription | undefined,
   incoming: VerifiedSubscription,
   now: Date
 ): boolean {
-  if (
-    !stored ||
-    incoming.subscription.active ||
-    !stored.active ||
-    stored.expiresAt.getTime() <= now.getTime()
-  ) {
+  if (!stored || incoming.subscription.active) {
     return true;
   }
   const storedPurchase = purchaseIdentity(stored);
-  return (
+  if (
     storedPurchase === undefined ||
     verifiedPurchaseIdentities(incoming).has(storedPurchase)
+  ) {
+    return true;
+  }
+  if (stored.active && stored.expiresAt.getTime() > now.getTime()) {
+    return false;
+  }
+  return (
+    incoming.subscription.expiresAt.getTime() >= stored.expiresAt.getTime()
   );
 }
 

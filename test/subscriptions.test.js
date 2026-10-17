@@ -463,6 +463,36 @@ test("an expired purchase under another Apple ID never replaces the active one i
   assert.equal(mayReplaceSlotPurchase(current, applePurchase("original-apple-id-1", 1), NOW), true);
 });
 
+test("two lapsed states about different purchases: the slot keeps the one that ran later", () => {
+  const OLDER_PAST = new Date("2025-11-01T00:00:00.000Z");
+  const storedLapsed = googlePurchase("token-C-yearly", {
+    state: "SUBSCRIPTION_STATE_EXPIRED",
+    expiryTime: PAST,
+  }).subscription;
+  const olderVoid = googlePurchase("token-B-monthly", {
+    state: "SUBSCRIPTION_STATE_EXPIRED",
+    expiryTime: OLDER_PAST,
+  });
+  assert.equal(mayReplaceSlotPurchase(storedLapsed, olderVoid, NOW), false);
+  const laterLapse = googlePurchase("token-E-later", {
+    state: "SUBSCRIPTION_STATE_EXPIRED",
+    expiryTime: PAST,
+  });
+  assert.equal(mayReplaceSlotPurchase(storedLapsed, laterLapse, NOW), true);
+
+  // A stored purchase whose active flag outlived its expiry counts as lapsed too.
+  const staleActive = { ...googlePurchase("token-C-yearly").subscription, expiresAt: PAST };
+  assert.equal(mayReplaceSlotPurchase(staleActive, olderVoid, NOW), false);
+  assert.equal(mayReplaceSlotPurchase(staleActive, laterLapse, NOW), true);
+
+  // The same purchase or its chain is never held back by its expiry.
+  const ownEarlierVoid = googlePurchase("token-C-yearly", {
+    state: "SUBSCRIPTION_STATE_EXPIRED",
+    expiryTime: OLDER_PAST,
+  });
+  assert.equal(mayReplaceSlotPurchase(storedLapsed, ownEarlierVoid, NOW), true);
+});
+
 test("master projection and document keys never expose protected purchase data", () => {
   const state = normalizeGoogleSubscription({
     productId: "premium_access",

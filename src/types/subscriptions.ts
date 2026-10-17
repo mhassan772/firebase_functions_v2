@@ -178,11 +178,23 @@ export interface StoreEvent {
   environment: StoreEnvironment;
   eventType: string;
   eventAt: Date;
+  /** The Play purchase the event is about, as a reference; never the token. */
+  purchaseReference?: string;
+  /** The Apple purchase the event is about. */
+  originalTransactionId?: string;
+  /** Play's refund type on a voided purchase. */
+  refundType?: number;
 }
 
 export interface PersistedSubscriptionResult {
   duplicate: boolean;
   /** False when the verified state was too old, or about a purchase the slot no longer holds. */
   stateApplied: boolean;
+  /**
+   * True when an active state took the slot from a different purchase that was
+   * still active and unexpired. The user then holds two living purchases on
+   * one store, which is the one case the slot model cannot represent.
+   */
+  displacedLivingPurchase: boolean;
   subscription: SubscriptionResponse;
 }

@@ -17,3 +17,4 @@ Going back is safe for data: no existing document changes shape across these ver
 |---|---|---|---|---|
 | 5 | `subscriptions/v5` | 2026-10-17 | Baseline: `master` as live before the guard | yes |
 | 6 | `subscriptions/v6` | 2026-10-17 | Guard `mayReplaceSlotPurchase`: a lapsed state for another purchase never replaces a living one; `stateApplied` in results and logs; tests pinning the guard | |
+| 7 | `subscriptions/v7` | 2026-10-17 | Event clock compares only the same purchase, so a new purchase's delayed notice is never outranked by an older purchase's later-dated event; two lapsed states keep the later-running purchase; event docs carry `purchaseReference`/`originalTransactionId`, `stateApplied`, `refundType`; `subscription_slot_concurrent_purchases` log counts two living purchases on one store | |

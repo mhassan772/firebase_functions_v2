@@ -53,13 +53,23 @@ function googleVerified(token, { active, status, expiresAt, eventAt, linkedToken
   };
 }
 
-const notification = (key, eventType, eventAt) => ({
+const notification = (key, eventType, eventAt, extra = {}) => ({
   key,
   platform: "google",
   environment: "test",
   eventType,
   eventAt,
+  ...extra,
 });
+
+async function eventDocs(eventType) {
+  const snapshot = await admin
+    .firestore()
+    .collection(SUBSCRIPTION_EVENT_COLLECTION)
+    .where("eventType", "==", eventType)
+    .get();
+  return snapshot.docs.map((doc) => doc.data());
+}
 
 async function clearFirestore() {
   const response = await fetch(
@@ -108,10 +118,21 @@ describe("a resubscription followed by a late notification for the old token", (
     const redelivered = await persistVerifiedSubscription(
       uid,
       voidedB(at(0)),
-      notification("void-B-2", "VOIDED_PURCHASE", at(0))
+      notification("void-B-2", "VOIDED_PURCHASE", at(0), {
+        purchaseReference: sha256Reference(tokenB),
+        refundType: 2,
+      })
     );
     assert.equal(redelivered.duplicate, false);
     assert.equal(redelivered.stateApplied, false);
+    assert.equal(redelivered.displacedLivingPurchase, false);
+
+    // The event doc says which purchase it was about and that it changed nothing.
+    const skipped = (await eventDocs("VOIDED_PURCHASE")).find((doc) => doc.refundType === 2);
+    assert.equal(skipped.claimed, true);
+    assert.equal(skipped.stateApplied, false);
+    assert.equal(skipped.purchaseReference, sha256Reference(tokenB));
+    assert.ok(!Object.hasOwn(skipped, "purchaseToken"));
     assert.equal(redelivered.subscription.active, true);
     const after = await master(uid);
     assert.equal(after.active, true);
@@ -237,14 +258,21 @@ describe("the guard around the purchase a slot holds", () => {
     assert.equal(after.purchaseReference, sha256Reference(tokenA));
   });
 
-  test("renewal window: a purchase whose stored expiry has passed is replaceable until its renewal lands", async () => {
-    // Intended: between the stored expiry and the renewal notice the guard treats the
-    // purchase as lapsed, so an old-purchase event in that window takes the slot. The
-    // renewal that follows takes it back.
+  test("renewal window: between a stored expiry and its renewal, only a purchase that ran later can take the slot", async () => {
+    // Between the stored expiry and the renewal notice the guard treats the purchase as
+    // lapsed. An older purchase's event still loses to it on expiry; a purchase that
+    // ended later wins, and the renewal takes the slot back either way.
     await persistVerifiedSubscription(uid, activeB(at(-20), at(-1)));
     const inWindow = await persistVerifiedSubscription(uid, lapsedA(at(0)), notification("expire-A-2", "SUBSCRIPTION_EXPIRED", at(0)));
-    assert.equal(inWindow.stateApplied, true);
-    assert.equal((await master(uid)).purchaseReference, sha256Reference(tokenA));
+    assert.equal(inWindow.stateApplied, false);
+    assert.equal((await master(uid)).purchaseReference, sha256Reference(tokenB));
+    const laterLapse = await persistVerifiedSubscription(
+      uid,
+      googleVerified("token-X-later", { active: false, status: "expired", expiresAt: at(0), eventAt: at(0) }),
+      notification("expire-X-1", "SUBSCRIPTION_EXPIRED", at(0))
+    );
+    assert.equal(laterLapse.stateApplied, true);
+    assert.equal((await master(uid)).purchaseReference, sha256Reference("token-X-later"));
 
     const renewed = await persistVerifiedSubscription(uid, activeB(at(1), at(40)), notification("renew-B-1", "SUBSCRIPTION_RENEWED", at(1)));
     assert.equal(renewed.stateApplied, true);
@@ -286,8 +314,7 @@ describe("the guard around the purchase a slot holds", () => {
     assert.equal(after.purchaseReference, sha256Reference(tokenB));
   });
 
-  // Pending until step 1 makes the event clock purchase-aware.
-  test("a delayed notification for the new purchase still applies after an older purchase's later-dated void", { todo: true }, async () => {
+  test("a delayed notification for the new purchase still applies after an older purchase's later-dated void", async () => {
     await persistVerifiedSubscription(
       uid,
       googleVerified(tokenA, { active: false, status: "revoked", expiresAt: at(-10), eventAt: at(0) }),
@@ -300,8 +327,7 @@ describe("the guard around the purchase a slot holds", () => {
     assert.equal(after.purchaseReference, sha256Reference(tokenB));
   });
 
-  // Pending until step 1 keeps the later-expiring purchase when both are lapsed.
-  test("a current purchase on account hold is not displaced by an older purchase's lapsed event", { todo: true }, async () => {
+  test("a current purchase on account hold is not displaced by an older purchase's lapsed event", async () => {
     await persistVerifiedSubscription(uid, activeB(at(-30), at(-2)));
     const onHold = await persistVerifiedSubscription(
       uid,
@@ -318,5 +344,56 @@ describe("the guard around the purchase a slot holds", () => {
     const recovered = await persistVerifiedSubscription(uid, activeB(at(1), at(40)), notification("recover-B-1", "SUBSCRIPTION_RECOVERED", at(1)));
     assert.equal(recovered.stateApplied, true);
     assert.equal((await master(uid)).active, true);
+  });
+
+  test("two living purchases are counted once, an upgrade through the chain is not", async () => {
+    await persistVerifiedSubscription(uid, activeB(at(-5), at(30)));
+    const second = await persistVerifiedSubscription(
+      uid,
+      googleVerified("token-A2-second-account", { active: true, status: "active", expiresAt: at(20), eventAt: at(-1) }),
+      notification("purchase-A2-1", "SUBSCRIPTION_PURCHASED", at(-1))
+    );
+    assert.equal(second.stateApplied, true);
+    assert.equal(second.displacedLivingPurchase, true);
+
+    const upgrade = await persistVerifiedSubscription(
+      uid,
+      googleVerified("token-D-upgrade", {
+        active: true,
+        status: "active",
+        expiresAt: at(60),
+        eventAt: at(0),
+        linkedToken: "token-A2-second-account",
+      }),
+      notification("purchase-D-1", "SUBSCRIPTION_PURCHASED", at(0))
+    );
+    assert.equal(upgrade.stateApplied, true);
+    assert.equal(upgrade.displacedLivingPurchase, false);
+  });
+
+  test("an upgrade's delayed notice applies after the old token's later-dated expiry", async () => {
+    await persistVerifiedSubscription(uid, activeB(at(-10), at(30)));
+    // Play expires the old token at once on an upgrade; its notice lands first here.
+    const oldExpired = await persistVerifiedSubscription(
+      uid,
+      googleVerified(tokenB, { active: false, status: "expired", expiresAt: at(-1), eventAt: at(0) }),
+      notification("expire-B-upgrade", "SUBSCRIPTION_EXPIRED", at(0))
+    );
+    assert.equal(oldExpired.stateApplied, true);
+    const delayedUpgrade = await persistVerifiedSubscription(
+      uid,
+      googleVerified("token-D-upgrade", {
+        active: true,
+        status: "active",
+        expiresAt: at(60),
+        eventAt: at(-1),
+        linkedToken: tokenB,
+      }),
+      notification("purchase-D-2", "SUBSCRIPTION_PURCHASED", at(-1))
+    );
+    assert.equal(delayedUpgrade.stateApplied, true);
+    const after = await master(uid);
+    assert.equal(after.active, true);
+    assert.equal(after.purchaseReference, sha256Reference("token-D-upgrade"));
   });
 });

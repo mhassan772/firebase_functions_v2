@@ -239,6 +239,7 @@ export async function verifyAppleNotification(
       undefined,
       eventAt
     );
+    event.originalTransactionId = verified.subscription.originalTransactionId;
     return { decoded, verified, event };
   } catch (error) {
     throw mapAppleError(error);

@@ -412,6 +412,8 @@ export async function handleGoogleSubscriptionNotifications(
       environment: verified.subscription.environment,
       eventType: notificationType,
       eventAt,
+      purchaseReference: verified.subscription.purchaseReference,
+      ...(refundType !== undefined ? { refundType } : {}),
     };
     const ownerUid = await resolveVerifiedOwner(verified.ownership);
     if (!ownerUid) {
