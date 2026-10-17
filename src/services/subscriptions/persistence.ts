@@ -232,6 +232,7 @@ export async function persistVerifiedSubscription(
       }
       return {
         duplicate: true,
+        stateApplied: false,
         subscription: masterDataToResponse(state.masterSnapshot.data()!),
       };
     }
@@ -281,7 +282,14 @@ export async function persistVerifiedSubscription(
     );
 
     const states = slotStates(state.slotSnapshots, now.toDate());
-    if (!isStaleEvent) {
+    const stateApplied =
+      !isStaleEvent &&
+      mayReplaceSlotPurchase(
+        states[incomingStateIndex],
+        verified,
+        now.toDate()
+      );
+    if (stateApplied) {
       states[incomingStateIndex] = verified.subscription;
       transaction.set(
         state.slotRefs[incomingStateIndex],
@@ -308,6 +316,7 @@ export async function persistVerifiedSubscription(
 
     return {
       duplicate: false,
+      stateApplied,
       subscription: masterDataToResponse(masterData),
     };
   });
@@ -434,6 +443,69 @@ export function shouldApplyIncomingState(
     existingEventAt &&
     incomingEventAt.getTime() < existingEventAt.getTime()
   );
+}
+
+/**
+ * Whether a verified state may take the slot from the purchase stored in it.
+ *
+ * A slot holds one purchase per platform and environment, but a user can own
+ * several over time: Play issues a new token for every resubscription, and a
+ * second Apple ID brings its own original transaction. The stores keep
+ * reporting on an older purchase after a newer one starts (a re-delivered
+ * void, a late refund, an expiry), so a lapsed state for another purchase must
+ * not replace one that is still active. A lapsed state still replaces it when
+ * it is the same purchase, or a later link in its chain such as an upgrade,
+ * because then the stored purchase has really ended.
+ */
+export function mayReplaceSlotPurchase(
+  stored: NormalizedSubscription | undefined,
+  incoming: VerifiedSubscription,
+  now: Date
+): boolean {
+  if (
+    !stored ||
+    incoming.subscription.active ||
+    !stored.active ||
+    stored.expiresAt.getTime() <= now.getTime()
+  ) {
+    return true;
+  }
+  const storedPurchase = purchaseIdentity(stored);
+  return (
+    storedPurchase === undefined ||
+    verifiedPurchaseIdentities(incoming).has(storedPurchase)
+  );
+}
+
+/** The purchase a state describes, in the form the slot document stores it. */
+function purchaseIdentity(state: NormalizedSubscription): string | undefined {
+  if (state.platform === "apple") {
+    return state.originalTransactionId;
+  }
+  if (state.platform === "google") {
+    return state.purchaseReference;
+  }
+  return undefined;
+}
+
+/** Every purchase the verified state covers: its own and, on Play, each token it replaced. */
+function verifiedPurchaseIdentities(verified: VerifiedSubscription): Set<string> {
+  const identities = new Set<string>();
+  const own = purchaseIdentity(verified.subscription);
+  if (own) {
+    identities.add(own);
+  }
+  for (const identity of verified.ownership) {
+    if (identity.platform === "apple") {
+      identities.add(identity.originalTransactionId);
+    } else {
+      identities.add(sha256Reference(identity.purchaseToken));
+      if (identity.linkedPurchaseToken) {
+        identities.add(sha256Reference(identity.linkedPurchaseToken));
+      }
+    }
+  }
+  return identities;
 }
 
 export function stateDocumentId(

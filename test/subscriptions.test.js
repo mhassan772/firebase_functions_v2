@@ -7,6 +7,7 @@ const {
 const {
   accountBindingVersion,
   deriveAccountBinding,
+  sha256Reference,
 } = require("../lib/services/subscriptions/crypto");
 const {
   claimedAppleEnvironment,
@@ -29,6 +30,7 @@ const {
   masterAfterProjection,
   masterProjectionUpdate,
   MASTER_PROJECTION_OPTIONAL_FIELDS,
+  mayReplaceSlotPurchase,
   shouldApplyIncomingState,
   stateData,
   stateDataToNormalized,
@@ -368,6 +370,97 @@ test("ownership cannot transfer and older notifications cannot regress state", (
   assert.equal(shouldApplyIncomingState(FUTURE, PAST, true), false);
   assert.equal(shouldApplyIncomingState(FUTURE, PAST, false), true);
   assert.equal(shouldApplyIncomingState(PAST, FUTURE, true), true);
+});
+
+function googlePurchase(token, { state, expiryTime, linkedToken } = {}) {
+  return {
+    subscription: normalizeGoogleSubscription({
+      productId: "premium_access",
+      environment: "test",
+      purchaseReference: sha256Reference(token),
+      expiryTime: (expiryTime ?? FUTURE).toISOString(),
+      subscriptionState: state ?? "SUBSCRIPTION_STATE_ACTIVE",
+      autoRenewing: state === undefined,
+      eventAt: NOW,
+      now: NOW,
+    }),
+    ownership: [
+      {
+        platform: "google",
+        environment: "test",
+        purchaseToken: token,
+        currentPurchaseToken: token,
+        ...(linkedToken ? { linkedPurchaseToken: linkedToken } : {}),
+      },
+      ...(linkedToken
+        ? [{ platform: "google", environment: "test", purchaseToken: linkedToken, currentPurchaseToken: token }]
+        : []),
+    ],
+  };
+}
+
+function applePurchase(originalTransactionId, storeStatus) {
+  return {
+    subscription: normalizeAppleSubscription({
+      productId: "monthly_sub",
+      environment: "sandbox",
+      originalTransactionId,
+      expiresAtMs: (storeStatus === 1 ? FUTURE : PAST).getTime(),
+      signedAtMs: NOW.getTime(),
+      storeStatus,
+      autoRenewing: storeStatus === 1,
+      now: NOW,
+    }),
+    ownership: [{ platform: "apple", environment: "sandbox", originalTransactionId }],
+  };
+}
+
+test("a lapsed report about an older purchase never replaces the active one in its slot", () => {
+  // The release QA timeline: token B was voided, C was bought, then Play re-delivered B's void.
+  const current = googlePurchase("token-C-yearly").subscription;
+  const voidedOlder = googlePurchase("token-B-monthly", {
+    state: "SUBSCRIPTION_STATE_EXPIRED",
+    expiryTime: PAST,
+  });
+  voidedOlder.subscription.status = "revoked";
+  assert.equal(mayReplaceSlotPurchase(current, voidedOlder, NOW), false);
+
+  // The same purchase ending does replace it.
+  const currentVoided = googlePurchase("token-C-yearly", {
+    state: "SUBSCRIPTION_STATE_EXPIRED",
+    expiryTime: PAST,
+  });
+  assert.equal(mayReplaceSlotPurchase(current, currentVoided, NOW), true);
+
+  // So does a lapsed upgrade that replaced it through linkedPurchaseToken.
+  const lapsedUpgrade = googlePurchase("token-D-upgrade", {
+    state: "SUBSCRIPTION_STATE_EXPIRED",
+    expiryTime: PAST,
+    linkedToken: "token-C-yearly",
+  });
+  assert.equal(mayReplaceSlotPurchase(current, lapsedUpgrade, NOW), true);
+
+  // An active purchase always takes the slot, and nothing guards a slot that already lapsed.
+  assert.equal(mayReplaceSlotPurchase(current, googlePurchase("token-E-new"), NOW), true);
+  const lapsedStored = googlePurchase("token-C-yearly", { expiryTime: PAST }).subscription;
+  assert.equal(lapsedStored.active, false);
+  assert.equal(mayReplaceSlotPurchase(lapsedStored, voidedOlder, NOW), true);
+  const staleActiveFlag = { ...current, expiresAt: PAST };
+  assert.equal(mayReplaceSlotPurchase(staleActiveFlag, voidedOlder, NOW), true);
+  assert.equal(mayReplaceSlotPurchase(undefined, voidedOlder, NOW), true);
+  assert.equal(
+    mayReplaceSlotPurchase({ ...current, purchaseReference: undefined }, voidedOlder, NOW),
+    true
+  );
+});
+
+test("an expired purchase under another Apple ID never replaces the active one in its slot", () => {
+  const current = applePurchase("original-apple-id-2", 1).subscription;
+  assert.equal(current.active, true);
+  assert.equal(mayReplaceSlotPurchase(current, applePurchase("original-apple-id-1", 2), NOW), false);
+  assert.equal(mayReplaceSlotPurchase(current, applePurchase("original-apple-id-1", 5), NOW), false);
+  assert.equal(mayReplaceSlotPurchase(current, applePurchase("original-apple-id-2", 5), NOW), true);
+  assert.equal(mayReplaceSlotPurchase(current, applePurchase("original-apple-id-1", 1), NOW), true);
 });
 
 test("master projection and document keys never expose protected purchase data", () => {

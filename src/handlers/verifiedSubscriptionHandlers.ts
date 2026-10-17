@@ -300,6 +300,7 @@ export async function handleAppleSubscriptionNotifications(
       status: result.verified.subscription.status,
       active: result.verified.subscription.active,
       duplicate: persisted.duplicate,
+      stateApplied: persisted.stateApplied,
       claimed: true,
     });
     res.status(200).json({ received: true });
@@ -436,6 +437,7 @@ export async function handleGoogleSubscriptionNotifications(
       active: verified.subscription.active,
       ...googleStateLogFields(verified, refundType),
       duplicate: persisted.duplicate,
+      stateApplied: persisted.stateApplied,
       claimed: true,
     });
   } catch (error) {

@@ -182,5 +182,7 @@ export interface StoreEvent {
 
 export interface PersistedSubscriptionResult {
   duplicate: boolean;
+  /** False when the verified state was too old, or about a purchase the slot no longer holds. */
+  stateApplied: boolean;
   subscription: SubscriptionResponse;
 }
