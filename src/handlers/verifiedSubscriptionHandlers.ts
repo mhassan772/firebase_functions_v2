@@ -33,6 +33,7 @@ import {
   resolvePurchaseOwner,
   resolveVerifiedOwner,
 } from "../services/subscriptions/persistence";
+import { acknowledgeNow } from "../services/subscriptions/acknowledgements";
 import { requireRuntimeSecret } from "../services/subscriptions/runtimeSecrets";
 import {
   DeviceAction,
@@ -146,6 +147,9 @@ export async function handleVerifySubscription(
         );
     await assertCallerMayClaim(uid, verified, accountBindingSecret);
     const result = await persistVerifiedSubscription(uid, verified);
+    if (result.acknowledgementPending && verified.subscription.purchaseReference) {
+      await acknowledgeNow(verified.subscription.purchaseReference);
+    }
     logInfo("subscription_verification_success", operationId, {
       platform,
       productId: verified.subscription.productId,
@@ -474,7 +478,7 @@ export async function applyGoogleStoreEvent(
   };
   const ownerUid = await resolvePurchaseOwner(verified, accountBindingSecret);
   if (!ownerUid) {
-    const recorded = await recordUnclaimedStoreEvent(event);
+    const recorded = await recordUnclaimedStoreEvent(event, verified);
     logInfo(input.logEvent, input.operationId, {
       eventType: input.eventType,
       environment: event.environment,
@@ -486,6 +490,9 @@ export async function applyGoogleStoreEvent(
   }
 
   const persisted = await persistVerifiedSubscription(ownerUid, verified, event);
+  if (persisted.acknowledgementPending && verified.subscription.purchaseReference) {
+    await acknowledgeNow(verified.subscription.purchaseReference);
+  }
   logInfo(input.logEvent, input.operationId, {
     eventType: input.eventType,
     environment: event.environment,

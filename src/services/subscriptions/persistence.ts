@@ -33,11 +33,25 @@ import {
 } from "./crypto";
 import { DeviceLimits, devicesBlockFromMaster } from "./devices";
 import { SubscriptionError } from "./errors";
+import {
+  googleOwnershipDocumentId,
+  ownershipDocumentId,
+  SUBSCRIPTION_OWNERSHIP_COLLECTION,
+} from "./keys";
 import { selectMasterState } from "./normalization";
+import {
+  acknowledgementData,
+  acknowledgementNeeded,
+  claimedAcknowledgementUpdate,
+  SUBSCRIPTION_ACKNOWLEDGEMENT_COLLECTION,
+} from "./acknowledgements";
 
 export const SUBSCRIPTION_MASTER_COLLECTION = "subscription_master";
-export const SUBSCRIPTION_OWNERSHIP_COLLECTION =
-  "subscription_purchase_ownership";
+export {
+  googleOwnershipDocumentId,
+  ownershipDocumentId,
+  SUBSCRIPTION_OWNERSHIP_COLLECTION,
+} from "./keys";
 export const SUBSCRIPTION_STATE_COLLECTION = "subscription_store_state";
 export const SUBSCRIPTION_EVENT_COLLECTION = "subscription_store_events";
 /** Written by the old admin portal; now only mirrored to for app versions that still read it. */
@@ -215,6 +229,7 @@ export async function persistVerifiedSubscription(
       .collection(SUBSCRIPTION_EVENT_COLLECTION)
       .doc(eventDocumentId(event))
     : undefined;
+  const acknowledgementRef = acknowledgementRefFor(verified);
 
   // Set by the last transaction attempt and logged once it has committed, so a
   // retried attempt never counts twice.
@@ -222,7 +237,11 @@ export async function persistVerifiedSubscription(
   const result = await firestore.runTransaction(async (transaction) => {
     displaced = undefined;
     const state = await readProjectionState(transaction, uid, {
-      extraRefs: [...ownershipRefs, ...(eventRef ? [eventRef] : [])],
+      extraRefs: [
+        ...ownershipRefs,
+        ...(eventRef ? [eventRef] : []),
+        ...(acknowledgementRef ? [acknowledgementRef] : []),
+      ],
     });
     const ownershipSnapshots = state.extraSnapshots.slice(
       0,
@@ -230,6 +249,9 @@ export async function persistVerifiedSubscription(
     );
     const eventSnapshot = eventRef
       ? state.extraSnapshots[ownershipRefs.length]
+      : undefined;
+    const acknowledgementSnapshot = acknowledgementRef
+      ? state.extraSnapshots[ownershipRefs.length + (eventRef ? 1 : 0)]
       : undefined;
 
     if (eventSnapshot?.exists) {
@@ -244,6 +266,7 @@ export async function persistVerifiedSubscription(
         duplicate: true,
         stateApplied: false,
         displacedLivingPurchase: false,
+        acknowledgementPending: false,
         subscription: masterDataToResponse(state.masterSnapshot.data()!),
       };
     }
@@ -337,10 +360,33 @@ export async function persistVerifiedSubscription(
       );
     }
 
+    // The entitlement and the acknowledgement work commit together, so Play
+    // is never acknowledged for a purchase nobody was granted.
+    let acknowledgementPending = false;
+    if (acknowledgementRef && acknowledgementSnapshot) {
+      const status = acknowledgementSnapshot.get("status");
+      if (!acknowledgementSnapshot.exists) {
+        transaction.set(
+          acknowledgementRef,
+          acknowledgementData(verified, uid, now)
+        );
+        acknowledgementPending = true;
+      } else if (status === "awaiting-owner") {
+        transaction.update(
+          acknowledgementRef,
+          claimedAcknowledgementUpdate(uid, now)
+        );
+        acknowledgementPending = true;
+      } else if (status === "pending") {
+        acknowledgementPending = true;
+      }
+    }
+
     return {
       duplicate: false,
       stateApplied,
       displacedLivingPurchase: displaced !== undefined,
+      acknowledgementPending,
       subscription: masterDataToResponse(masterData),
     };
   });
@@ -386,24 +432,55 @@ function eventData(
   return data;
 }
 
+/**
+ * Records an event nobody owns yet. A Play purchase among them still has to be
+ * acknowledged once an account claims it, so its acknowledgement is queued as
+ * `awaiting-owner` in the same commit.
+ */
 export async function recordUnclaimedStoreEvent(
-  event: StoreEvent
+  event: StoreEvent,
+  verified?: VerifiedSubscription
 ): Promise<boolean> {
   const firestore = admin.firestore();
   const eventRef = firestore
     .collection(SUBSCRIPTION_EVENT_COLLECTION)
     .doc(eventDocumentId(event));
+  const acknowledgementRef = verified
+    ? acknowledgementRefFor(verified)
+    : undefined;
   return firestore.runTransaction(async (transaction) => {
-    const snapshot = await transaction.get(eventRef);
+    const [snapshot, acknowledgementSnapshot] = await transaction.getAll(
+      eventRef,
+      ...(acknowledgementRef ? [acknowledgementRef] : [])
+    );
     if (snapshot.exists) {
       return false;
     }
+    const now = Timestamp.now();
     transaction.create(
       eventRef,
-      eventData(event, Timestamp.now(), { claimed: false, stateApplied: false })
+      eventData(event, now, { claimed: false, stateApplied: false })
     );
+    if (acknowledgementRef && verified && !acknowledgementSnapshot?.exists) {
+      transaction.set(
+        acknowledgementRef,
+        acknowledgementData(verified, undefined, now)
+      );
+    }
     return true;
   });
+}
+
+function acknowledgementRefFor(
+  verified: VerifiedSubscription
+): DocumentReference | undefined {
+  if (!acknowledgementNeeded(verified) || !verified.subscription.purchaseReference) {
+    return undefined;
+  }
+  return admin
+    .firestore()
+    .collection(SUBSCRIPTION_ACKNOWLEDGEMENT_COLLECTION)
+    .doc(verified.subscription.purchaseReference);
 }
 
 export async function resolveVerifiedOwner(
@@ -549,19 +626,6 @@ export async function resolveGoogleCurrentToken(
   return typeof currentToken === "string" && currentToken
     ? currentToken
     : purchaseToken;
-}
-
-export function ownershipDocumentId(identity: OwnershipIdentity): string {
-  if (identity.platform === "apple") {
-    return `apple_${sha256Reference(
-      `${identity.environment}:${identity.originalTransactionId}`
-    )}`;
-  }
-  return googleOwnershipDocumentId(identity.purchaseToken);
-}
-
-export function googleOwnershipDocumentId(purchaseToken: string): string {
-  return `google_${sha256Reference(purchaseToken)}`;
 }
 
 export function assertOwnershipClaimAllowed(

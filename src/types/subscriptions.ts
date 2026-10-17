@@ -211,5 +211,7 @@ export interface PersistedSubscriptionResult {
    * one store, which is the one case the slot model cannot represent.
    */
   displacedLivingPurchase: boolean;
+  /** True when Play still waits for this purchase's acknowledgement after the commit. */
+  acknowledgementPending: boolean;
   subscription: SubscriptionResponse;
 }

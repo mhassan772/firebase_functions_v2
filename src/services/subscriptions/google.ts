@@ -26,7 +26,78 @@ interface GoogleTokenStatus {
   data: androidpublisher_v3.Schema$SubscriptionPurchaseV2;
 }
 
-let publisherClient: androidpublisher_v3.Androidpublisher | undefined;
+export interface VoidedPurchasesQuery {
+  startTimeMillis?: number;
+  endTimeMillis?: number;
+  pageToken?: string;
+}
+
+/**
+ * The three Play Developer API calls this backend makes. One seam, so the
+ * integration tests can stand in for Play while everything else runs for real.
+ */
+export interface PlayApi {
+  getSubscription(
+    token: string
+  ): Promise<androidpublisher_v3.Schema$SubscriptionPurchaseV2>;
+  acknowledgeSubscription(productId: string, token: string): Promise<void>;
+  listVoidedPurchases(
+    query: VoidedPurchasesQuery
+  ): Promise<androidpublisher_v3.Schema$VoidedPurchasesListResponse>;
+}
+
+let playApi: PlayApi | undefined;
+
+export function getPlayApi(): PlayApi {
+  if (!playApi) {
+    playApi = googleapisPlayApi();
+  }
+  return playApi;
+}
+
+/** Replaces the Play client. Only the tests call this. */
+export function setPlayApi(api: PlayApi | undefined): void {
+  playApi = api;
+}
+
+function googleapisPlayApi(): PlayApi {
+  const auth = new google.auth.GoogleAuth({
+    scopes: [ANDROID_PUBLISHER_SCOPE],
+  });
+  const client = google.androidpublisher({ version: "v3", auth });
+  return {
+    async getSubscription(token) {
+      const response = await client.purchases.subscriptionsv2.get({
+        packageName: GOOGLE_PACKAGE_NAME,
+        token,
+      });
+      return response.data;
+    },
+    async acknowledgeSubscription(productId, token) {
+      await client.purchases.subscriptions.acknowledge({
+        packageName: GOOGLE_PACKAGE_NAME,
+        subscriptionId: productId,
+        token,
+        requestBody: {},
+      });
+    },
+    async listVoidedPurchases(query) {
+      const response = await client.purchases.voidedpurchases.list({
+        packageName: GOOGLE_PACKAGE_NAME,
+        // Subscriptions too; renewals share a token, so entries are told apart by orderId.
+        type: 1,
+        ...(query.startTimeMillis !== undefined
+          ? { startTime: String(query.startTimeMillis) }
+          : {}),
+        ...(query.endTimeMillis !== undefined
+          ? { endTime: String(query.endTimeMillis) }
+          : {}),
+        ...(query.pageToken ? { token: query.pageToken } : {}),
+      });
+      return response.data;
+    },
+  };
+}
 
 export async function verifyGoogleSubscription(
   purchaseToken: string,
@@ -48,15 +119,10 @@ export async function verifyGoogleSubscription(
       seen.add(token);
 
       try {
-        const response: {
-          data: androidpublisher_v3.Schema$SubscriptionPurchaseV2;
-        } = await getPublisherClient().purchases.subscriptionsv2.get({
-          packageName: GOOGLE_PACKAGE_NAME,
-          token,
-        });
-        validateGooglePurchase(response.data, expectedAccountBinding);
-        statuses.push({ token, data: response.data });
-        token = response.data.linkedPurchaseToken ?? undefined;
+        const data = await getPlayApi().getSubscription(token);
+        validateGooglePurchase(data, expectedAccountBinding);
+        statuses.push({ token, data });
+        token = data.linkedPurchaseToken ?? undefined;
       } catch (error) {
         if (statuses.length > 0 && isGoneResponse(error)) {
           unqueriedLinkedToken = token;
@@ -151,16 +217,6 @@ function purchaseMetadata(
   return metadata;
 }
 
-function getPublisherClient(): androidpublisher_v3.Androidpublisher {
-  if (!publisherClient) {
-    const auth = new google.auth.GoogleAuth({
-      scopes: [ANDROID_PUBLISHER_SCOPE],
-    });
-    publisherClient = google.androidpublisher({ version: "v3", auth });
-  }
-  return publisherClient;
-}
-
 export function validateGooglePurchase(
   purchase: androidpublisher_v3.Schema$SubscriptionPurchaseV2,
   expectedAccountBinding?: string
@@ -247,14 +303,14 @@ function invalidStoreData(code: string): SubscriptionError {
 }
 
 function isGoneResponse(error: unknown): boolean {
-  return getHttpStatus(error) === 410;
+  return googleHttpStatus(error) === 410;
 }
 
-function mapGoogleError(error: unknown): SubscriptionError {
+export function mapGoogleError(error: unknown): SubscriptionError {
   if (error instanceof SubscriptionError) {
     return error;
   }
-  const status = getHttpStatus(error);
+  const status = googleHttpStatus(error);
   if (status === 429 || (status !== undefined && status >= 500)) {
     return new SubscriptionError(
       "store-unavailable",
@@ -273,7 +329,8 @@ function mapGoogleError(error: unknown): SubscriptionError {
   return invalidStoreData("google-api-rejected");
 }
 
-function getHttpStatus(error: unknown): number | undefined {
+/** The HTTP status behind a googleapis error, if it carries one. */
+export function googleHttpStatus(error: unknown): number | undefined {
   if (!error || typeof error !== "object") {
     return undefined;
   }

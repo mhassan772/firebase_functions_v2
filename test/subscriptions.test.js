@@ -14,8 +14,17 @@ const {
   validateAppleTransaction,
 } = require("../lib/services/subscriptions/apple");
 const {
+  setPlayApi,
   validateGooglePurchase,
 } = require("../lib/services/subscriptions/google");
+const {
+  ACKNOWLEDGEMENT_DEADLINE_MS,
+  acknowledgementData,
+  acknowledgementNeeded,
+  attemptUpdate,
+  classifyAcknowledgeFailure,
+  retryDelayMs,
+} = require("../lib/services/subscriptions/acknowledgements");
 const {
   normalizeAppleSubscription,
   normalizeGoogleSubscription,
@@ -507,6 +516,69 @@ test("an expired purchase's owner is accepted only when its binding, if any, is 
     () => expiredTokenOwnerAccepted("owner-uid", ownerBinding, undefined),
     (error) => error instanceof SubscriptionError && error.kind === "configuration"
   );
+});
+
+test("acknowledgement is queued only for an unacknowledged, non-pending Play purchase", () => {
+  const google = (state, acknowledgementState) => ({
+    ...googlePurchase("token-ack"),
+    google: { acknowledgementState, subscriptionState: state, startTime: NOW },
+  });
+  assert.equal(acknowledgementNeeded(google("SUBSCRIPTION_STATE_ACTIVE", "ACKNOWLEDGEMENT_STATE_PENDING")), true);
+  assert.equal(acknowledgementNeeded(google("SUBSCRIPTION_STATE_ACTIVE", "ACKNOWLEDGEMENT_STATE_ACKNOWLEDGED")), false);
+  assert.equal(acknowledgementNeeded(google("SUBSCRIPTION_STATE_PENDING", "ACKNOWLEDGEMENT_STATE_PENDING")), false);
+  assert.equal(acknowledgementNeeded(googlePurchase("token-no-metadata")), false);
+  assert.equal(acknowledgementNeeded(applePurchase("original-1", 1)), false);
+
+  const owned = acknowledgementData(google("SUBSCRIPTION_STATE_ACTIVE", "ACKNOWLEDGEMENT_STATE_PENDING"), "uid-1", Timestamp.fromDate(NOW));
+  assert.equal(owned.status, "pending");
+  assert.equal(owned.uid, "uid-1");
+  assert.equal(owned.purchaseToken, "token-ack");
+  assert.equal(owned.deadlineAt.toMillis() - owned.purchasedAt.toMillis(), ACKNOWLEDGEMENT_DEADLINE_MS);
+  const unowned = acknowledgementData(google("SUBSCRIPTION_STATE_ACTIVE", "ACKNOWLEDGEMENT_STATE_PENDING"), undefined, Timestamp.fromDate(NOW));
+  assert.equal(unowned.status, "awaiting-owner");
+  assert.ok(!Object.hasOwn(unowned, "uid"));
+});
+
+test("acknowledgement attempts move the document and keep nextAttemptAt only while work remains", () => {
+  const done = attemptUpdate(0, "done", NOW);
+  assert.equal(done.status, "done");
+  assert.equal(done.attempts, 1);
+  assert.ok(done.nextAttemptAt instanceof FieldValue);
+  const retry = attemptUpdate(2, "transient", NOW);
+  assert.equal(retry.status, "pending");
+  assert.equal(retry.attempts, 3);
+  assert.equal(retry.nextAttemptAt.toMillis(), NOW.getTime() + retryDelayMs(3));
+  const abandoned = attemptUpdate(4, "permanent", NOW, "http-400");
+  assert.equal(abandoned.status, "abandoned");
+  assert.equal(abandoned.abandonReason, "http-400");
+  assert.ok(abandoned.nextAttemptAt instanceof FieldValue);
+
+  assert.equal(retryDelayMs(1), 15 * 60 * 1000);
+  assert.equal(retryDelayMs(2), 30 * 60 * 1000);
+  assert.equal(retryDelayMs(10), 6 * 60 * 60 * 1000);
+});
+
+test("acknowledge failures: conflicts, limits, permissions and outages retry; a rejection is final unless Play shows it acknowledged", async () => {
+  const states = { "token-done": "ACKNOWLEDGEMENT_STATE_ACKNOWLEDGED", "token-open": "ACKNOWLEDGEMENT_STATE_PENDING" };
+  setPlayApi({
+    async getSubscription(token) {
+      if (!(token in states)) throw { code: 500 };
+      return { acknowledgementState: states[token] };
+    },
+    async acknowledgeSubscription() {},
+    async listVoidedPurchases() { return {}; },
+  });
+  try {
+    for (const code of [409, 429, 500, 503, 401, 403]) {
+      assert.equal((await classifyAcknowledgeFailure({ code }, "premium_access", "token-open")).outcome, "transient", String(code));
+    }
+    assert.equal((await classifyAcknowledgeFailure(new Error("socket hang up"), "premium_access", "token-open")).outcome, "transient");
+    assert.deepEqual(await classifyAcknowledgeFailure({ code: 400 }, "premium_access", "token-done"), { outcome: "done", code: "already-acknowledged" });
+    assert.equal((await classifyAcknowledgeFailure({ code: 400 }, "premium_access", "token-open")).outcome, "permanent");
+    assert.equal((await classifyAcknowledgeFailure({ code: 400 }, "premium_access", "token-unknown")).outcome, "transient");
+  } finally {
+    setPlayApi(undefined);
+  }
 });
 
 test("master projection and document keys never expose protected purchase data", () => {
