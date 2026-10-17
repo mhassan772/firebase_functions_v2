@@ -1,3 +1,4 @@
+import * as functions from "firebase-functions";
 import { androidpublisher_v3, google } from "googleapis";
 import {
   GOOGLE_PACKAGE_NAME,
@@ -82,7 +83,26 @@ function googleapisPlayApi(): PlayApi {
       });
     },
     async listVoidedPurchases(query) {
-      const response = await client.purchases.voidedpurchases.list({
+      try {
+        return await listVoidedPurchasesPage(client, query);
+      } catch (error) {
+        // The mapped error carries no detail, and the pass only sees that.
+        functions.logger.warn("google_voided_purchases_api_error", {
+          httpStatus: googleHttpStatus(error),
+          errorMessage:
+            error instanceof Error ? error.message.slice(0, 300) : undefined,
+        });
+        throw error;
+      }
+    },
+  };
+}
+
+async function listVoidedPurchasesPage(
+  client: androidpublisher_v3.Androidpublisher,
+  query: VoidedPurchasesQuery
+): Promise<androidpublisher_v3.Schema$VoidedPurchasesListResponse> {
+  const response = await client.purchases.voidedpurchases.list({
         packageName: GOOGLE_PACKAGE_NAME,
         // Subscriptions too; renewals share a token, so entries are told apart by orderId.
         type: 1,
@@ -92,11 +112,9 @@ function googleapisPlayApi(): PlayApi {
         ...(query.endTimeMillis !== undefined
           ? { endTime: String(query.endTimeMillis) }
           : {}),
-        ...(query.pageToken ? { token: query.pageToken } : {}),
-      });
-      return response.data;
-    },
-  };
+    ...(query.pageToken ? { token: query.pageToken } : {}),
+  });
+  return response.data;
 }
 
 export async function verifyGoogleSubscription(

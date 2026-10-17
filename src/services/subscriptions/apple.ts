@@ -1,5 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
+import * as functions from "firebase-functions";
 import {
   APIException,
   AppStoreServerAPIClient,
@@ -49,6 +50,10 @@ export interface VerifiedAppleNotification {
 
 export type AppleStoreEnvironment = "production" | "sandbox";
 
+/** Apple's error for a history start date before what the environment still serves. */
+const APPLE_START_DATE_TOO_EARLY = 4000012;
+export const APPLE_HISTORY_START_TOO_EARLY_CODE = "apple-history-start-too-early";
+
 /** Apple's Get Notification History behind one seam, so the recovery pass can be tested without Apple. */
 export interface AppleHistoryApi {
   getNotificationHistory(
@@ -71,6 +76,25 @@ export function getAppleHistoryApi(): AppleHistoryApi {
               : Environment.SANDBOX
           ).getNotificationHistory(paginationToken ?? null, range);
         } catch (error) {
+          // The mapped error carries no detail, and the pass only sees that.
+          functions.logger.warn("apple_notification_history_api_error", {
+            environment,
+            httpStatusCode:
+              error instanceof APIException ? error.httpStatusCode : undefined,
+            apiError: error instanceof APIException ? error.apiError : undefined,
+            errorMessage:
+              error instanceof APIException ? error.errorMessage : undefined,
+          });
+          if (
+            error instanceof APIException &&
+            error.apiError === APPLE_START_DATE_TOO_EARLY
+          ) {
+            throw new SubscriptionError(
+              "invalid-store-data",
+              APPLE_HISTORY_START_TOO_EARLY_CODE,
+              "Apple serves no notification history that far back."
+            );
+          }
           throw mapAppleError(error);
         }
       },

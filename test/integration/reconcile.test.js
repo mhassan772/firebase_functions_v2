@@ -107,7 +107,7 @@ describe("replaying Play's voided purchases", () => {
     assert.equal(state.retained[0].key, "voided:GPA.3");
     assert.equal(state.retained[0].code, "google-api-unavailable");
     assert.deepEqual(fake.calls.voided.map((call) => call.pageToken), [undefined, "page-2"]);
-    assert.equal(fake.calls.voided[0].startTimeMillis, now.getTime() - 30 * DAY);
+    assert.equal(fake.calls.voided[0].startTimeMillis, now.getTime() - 29 * DAY);
     assert.equal(fake.calls.voided[0].endTimeMillis, now.getTime());
 
     // Next run: the retained item is retried first, and the window starts at the checkpoint.
@@ -175,7 +175,7 @@ describe("replaying Play's voided purchases", () => {
     });
     const summary = await runFeedPhase(googleVoidedPhase("op-6"), now, soon());
     assert.equal(summary.completed, true);
-    assert.equal(fake.calls.voided[0].startTimeMillis, now.getTime() - 30 * DAY);
+    assert.equal(fake.calls.voided[0].startTimeMillis, now.getTime() - 29 * DAY);
   });
 });
 
@@ -216,13 +216,36 @@ describe("replaying Apple's notification history", () => {
     assert.deepEqual(summary, { pages: 2, processed: 4, applied: 1, skipped: 2, dropped: 0, retained: 1, completed: true });
     assert.deepEqual(applied, [item("uuid-new").signedPayload, item("uuid-failing").signedPayload]);
     assert.deepEqual(calls.map((call) => call.paginationToken), [undefined, "apple-page-2"]);
-    assert.equal(calls[0].range.startDate, now.getTime() - 180 * DAY);
+    assert.equal(calls[0].range.startDate, now.getTime() - 179 * DAY);
     assert.equal(calls[0].environment, "sandbox");
 
     const state = await reconcileState("apple-history-sandbox");
     assert.equal(state.checkpointAt.toMillis(), now.getTime());
     assert.equal(state.retained[0].key, "uuid-failing");
     assert.equal(state.retained[0].item.signedPayload, item("uuid-failing").signedPayload);
+  });
+
+  test("when Apple refuses the start date the window moves forward until accepted, and the checkpoint still lands", async () => {
+    const { APPLE_HISTORY_START_TOO_EARLY_CODE } = require("../../lib/services/subscriptions/apple");
+    const calls = [];
+    const now = new Date();
+    setAppleHistoryApi({
+      async getNotificationHistory(environment, paginationToken, range) {
+        calls.push(range.startDate);
+        if (range.startDate < now.getTime() - 30 * DAY - 1000) {
+          throw new SubscriptionError("invalid-store-data", APPLE_HISTORY_START_TOO_EARLY_CODE, "too early");
+        }
+        return { notificationHistory: [item("uuid-recent")], hasMore: false };
+      },
+    });
+    const applied = [];
+    const summary = await runFeedPhase(appleHistoryPhase("sandbox", "op-9", async (payload) => { applied.push(payload); return { stateApplied: true }; }), now, soon());
+    assert.equal(summary.completed, true);
+    assert.equal(summary.applied, 1);
+    assert.deepEqual(calls, [now.getTime() - 179 * DAY, now.getTime() - 90 * DAY, now.getTime() - 30 * DAY]);
+    const state = await reconcileState("apple-history-sandbox");
+    assert.equal(state.checkpointAt.toMillis(), now.getTime());
+    assert.equal(state.window, undefined);
   });
 
   test("a payload Apple rejects is dropped, not retained", async () => {

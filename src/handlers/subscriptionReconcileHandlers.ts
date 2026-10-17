@@ -12,13 +12,18 @@ import {
   runAcknowledgementPhase,
 } from "../services/subscriptions/acknowledgements";
 import {
+  APPLE_HISTORY_START_TOO_EARLY_CODE,
   AppleStoreEnvironment,
   decodeAppleNotificationIdentity,
   getAppleHistoryApi,
 } from "../services/subscriptions/apple";
 import { sha256Reference } from "../services/subscriptions/crypto";
 import { safeErrorCode, SubscriptionError } from "../services/subscriptions/errors";
-import { getPlayApi } from "../services/subscriptions/google";
+import {
+  getPlayApi,
+  googleHttpStatus,
+  mapGoogleError,
+} from "../services/subscriptions/google";
 import { storeEventExists } from "../services/subscriptions/persistence";
 import {
   applyAppleNotification,
@@ -26,10 +31,14 @@ import {
 } from "./verifiedSubscriptionHandlers";
 
 export const SUBSCRIPTION_RECONCILE_COLLECTION = "subscription_reconcile_state";
-/** The Voided Purchases API refuses a start time older than this. */
-export const GOOGLE_VOIDED_LOOKBACK_MS = 30 * 24 * 60 * 60 * 1000;
-/** Get Notification History covers this much of the past. */
-export const APPLE_HISTORY_LOOKBACK_MS = 180 * 24 * 60 * 60 * 1000;
+/** The Voided Purchases API refuses a start time older than 30 days, measured when the request lands; one day of margin. */
+export const GOOGLE_VOIDED_LOOKBACK_MS = 29 * 24 * 60 * 60 * 1000;
+/** Get Notification History covers 180 days; one day of margin, and the window shrinks further when Apple refuses the start. */
+export const APPLE_HISTORY_LOOKBACK_MS = 179 * 24 * 60 * 60 * 1000;
+/** Shorter windows tried, in order, when Apple says the start date is too early. */
+export const APPLE_HISTORY_FALLBACK_LOOKBACKS_MS = [90, 30, 7].map(
+  (days) => days * 24 * 60 * 60 * 1000
+);
 /** Failed items kept for the next run; past this the checkpoint stops instead. */
 export const MAX_RETAINED_FAILURES = 100;
 /** Apple payloads are a few kilobytes each, so fewer fit one state document. */
@@ -322,6 +331,8 @@ export async function runFeedPhase<T>(
       functions.logger.error("subscription_reconcile_page_failure", {
         source: phase.source,
         code: safeErrorCode(error),
+        httpStatus: googleHttpStatus(error),
+        detail: error instanceof Error ? error.message.slice(0, 200) : undefined,
       });
       break;
     }
@@ -371,11 +382,16 @@ export function googleVoidedPhase(operationId: string): FeedPhase<VoidedEntry> {
     lookbackMs: GOOGLE_VOIDED_LOOKBACK_MS,
     maxRetained: MAX_RETAINED_FAILURES,
     async fetchPage(window) {
-      const response = await getPlayApi().listVoidedPurchases({
-        startTimeMillis: window.startAt.getTime(),
-        endTimeMillis: window.endAt.getTime(),
-        pageToken: window.pageToken,
-      });
+      let response;
+      try {
+        response = await getPlayApi().listVoidedPurchases({
+          startTimeMillis: window.startAt.getTime(),
+          endTimeMillis: window.endAt.getTime(),
+          pageToken: window.pageToken,
+        });
+      } catch (error) {
+        throw mapGoogleError(error);
+      }
       const items: VoidedEntry[] = (response.voidedPurchases ?? [])
         .filter((row) => typeof row.purchaseToken === "string" && row.purchaseToken)
         .map((row) => ({
@@ -430,11 +446,38 @@ export function appleHistoryPhase(
     lookbackMs: APPLE_HISTORY_LOOKBACK_MS,
     maxRetained: MAX_RETAINED_APPLE_FAILURES,
     async fetchPage(window) {
-      const response = await getAppleHistoryApi().getNotificationHistory(
-        environment,
-        window.pageToken,
-        { startDate: window.startAt.getTime(), endDate: window.endAt.getTime() }
-      );
+      let response;
+      for (;;) {
+        try {
+          response = await getAppleHistoryApi().getNotificationHistory(
+            environment,
+            window.pageToken,
+            { startDate: window.startAt.getTime(), endDate: window.endAt.getTime() }
+          );
+          break;
+        } catch (error) {
+          // Apple keeps less history in some environments than the documented
+          // 180 days. Move the start forward until it is accepted; what is
+          // skipped is a gap the feed cannot fill anyway.
+          const later = APPLE_HISTORY_FALLBACK_LOOKBACKS_MS.map(
+            (lookback) => window.endAt.getTime() - lookback
+          ).find((start) => start > window.startAt.getTime());
+          if (
+            !(error instanceof SubscriptionError) ||
+            error.safeCode !== APPLE_HISTORY_START_TOO_EARLY_CODE ||
+            later === undefined ||
+            window.pageToken
+          ) {
+            throw error;
+          }
+          functions.logger.warn("subscription_reconcile_gap", {
+            source: `apple-history-${environment}`,
+            gapMs: later - window.startAt.getTime(),
+            reason: APPLE_HISTORY_START_TOO_EARLY_CODE,
+          });
+          window.startAt = new Date(later);
+        }
+      }
       return {
         items: (response.notificationHistory ?? [])
           .filter((row) => typeof row.signedPayload === "string" && row.signedPayload)
