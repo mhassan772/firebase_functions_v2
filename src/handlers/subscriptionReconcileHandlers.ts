@@ -219,8 +219,9 @@ async function writeState(
  * Replays one store feed from its checkpoint. Retained failures go first;
  * then pages, each completed in full before its token is stored, so a run cut
  * short re-reads the same page and the event keys make that harmless. The
- * checkpoint moves to the window's end only when the last page is done. A
- * failure that cannot be retained stops the run instead of being forgotten.
+ * checkpoint moves to the window's end only when the last page is done, and a
+ * window outlives the run only together with a page token. A failure that
+ * cannot be retained stops the run instead of being forgotten.
  */
 export async function runFeedPhase<T>(
   phase: FeedPhase<T>,
@@ -363,6 +364,12 @@ export async function runFeedPhase<T>(
     break;
   }
 
+  // A window is worth keeping only mid-feed, where its page token continues
+  // it. One whose first page never came back is recomputed from the
+  // checkpoint next time, or a start the feed refused would be retried forever.
+  if (state.window && !state.window.pageToken) {
+    state.window = undefined;
+  }
   await writeState(ref, state, now);
   return summary;
 }

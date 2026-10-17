@@ -163,8 +163,22 @@ describe("replaying Play's voided purchases", () => {
     assert.equal(summary.retained, 1);
     const state = await reconcileState("google-voided");
     assert.equal(state.checkpointAt, undefined);
-    assert.equal(state.window.pageToken, undefined);
+    // No page token, so no window is kept: the next run recomputes it from the checkpoint.
+    assert.equal(state.window, undefined);
     assert.equal(state.retained.length, 1);
+  });
+
+  test("a first page the feed refuses leaves no window behind, so the next run starts afresh", async () => {
+    const fake = installFakePlay({ voided: [400, { voidedPurchases: [] }] });
+    const now = new Date();
+    const first = await runFeedPhase(googleVoidedPhase("op-10"), now, soon());
+    assert.equal(first.completed, false);
+    assert.equal((await reconcileState("google-voided")).window, undefined);
+    const later = new Date(now.getTime() + 6 * 60 * MINUTE);
+    const second = await runFeedPhase(googleVoidedPhase("op-11"), later, new Date(later.getTime() + MINUTE));
+    assert.equal(second.completed, true);
+    assert.equal(fake.calls.voided[1].startTimeMillis, later.getTime() - 29 * DAY);
+    assert.equal(fake.calls.voided[1].pageToken, undefined);
   });
 
   test("a checkpoint older than the feed keeps is clamped and the gap is a run-level fact", async () => {
