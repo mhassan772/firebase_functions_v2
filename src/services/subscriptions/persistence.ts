@@ -21,6 +21,7 @@ import {
   SourceSummaryResponse,
   StoreEnvironment,
   StoreEvent,
+  StorePlatform,
   SubscriptionResponse,
   SubscriptionSource,
   VerifiedSubscription,
@@ -429,6 +430,12 @@ function eventData(
   if (event.refundType !== undefined) {
     data.refundType = event.refundType;
   }
+  if (event.voidedReason !== undefined) {
+    data.voidedReason = event.voidedReason;
+  }
+  if (event.voidedSource !== undefined) {
+    data.voidedSource = event.voidedSource;
+  }
   return data;
 }
 
@@ -746,9 +753,29 @@ export function legacyManualDocumentId(uid: string): string {
 }
 
 function eventDocumentId(event: StoreEvent): string {
-  return `${event.platform}_${sha256Reference(
-    `${event.environment}:${event.key}`
-  )}`;
+  return storeEventDocumentId(event.platform, event.environment, event.key);
+}
+
+export function storeEventDocumentId(
+  platform: StorePlatform,
+  environment: StoreEnvironment,
+  key: string
+): string {
+  return `${platform}_${sha256Reference(`${environment}:${key}`)}`;
+}
+
+/** Whether a store event with this key was already handled, claimed or not. */
+export async function storeEventExists(
+  platform: StorePlatform,
+  environment: StoreEnvironment,
+  key: string
+): Promise<boolean> {
+  const snapshot = await admin
+    .firestore()
+    .collection(SUBSCRIPTION_EVENT_COLLECTION)
+    .doc(storeEventDocumentId(platform, environment, key))
+    .get();
+  return snapshot.exists;
 }
 
 function ownershipData(

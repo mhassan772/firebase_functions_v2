@@ -272,44 +272,11 @@ export async function handleAppleSubscriptionNotifications(
       (req.body as Record<string, unknown>).signedPayload,
       "signedPayload"
     );
-    const result = await verifyAppleNotification(signedPayload);
-    if (!("verified" in result)) {
-      await recordUnclaimedStoreEvent(result.event);
-      logInfo("apple_subscription_notification_success", operationId, {
-        eventType: result.event.eventType,
-        environment: result.event.environment,
-        claimed: false,
-      });
-      res.status(200).json({ received: true });
-      return;
-    }
-
-    const ownerUid = await resolveVerifiedOwner(result.verified.ownership);
-    if (!ownerUid) {
-      await recordUnclaimedStoreEvent(result.event);
-      logInfo("apple_subscription_notification_success", operationId, {
-        eventType: result.event.eventType,
-        environment: result.event.environment,
-        claimed: false,
-      });
-      res.status(200).json({ received: true });
-      return;
-    }
-
-    const persisted = await persistVerifiedSubscription(
-      ownerUid,
-      result.verified,
-      result.event
+    await applyAppleNotification(
+      signedPayload,
+      operationId,
+      "apple_subscription_notification_success"
     );
-    logInfo("apple_subscription_notification_success", operationId, {
-      eventType: result.event.eventType,
-      environment: result.event.environment,
-      status: result.verified.subscription.status,
-      active: result.verified.subscription.active,
-      duplicate: persisted.duplicate,
-      stateApplied: persisted.stateApplied,
-      claimed: true,
-    });
     res.status(200).json({ received: true });
   } catch (error) {
     if (
@@ -424,6 +391,60 @@ export async function handleGoogleSubscriptionNotifications(
   }
 }
 
+export interface AppleNotificationOutcome {
+  claimed: boolean;
+  duplicate: boolean;
+  stateApplied: boolean;
+}
+
+/**
+ * Applies one App Store Server notification: the HTTP endpoint and the
+ * recovery pass both go through here. The signed payload is verified and the
+ * current status re-read from Apple, so a replayed notification carries no
+ * old state.
+ */
+export async function applyAppleNotification(
+  signedPayload: string,
+  operationId: string,
+  logEvent: string
+): Promise<AppleNotificationOutcome> {
+  const result = await verifyAppleNotification(signedPayload);
+  const ownerUid =
+    "verified" in result
+      ? await resolveVerifiedOwner(result.verified.ownership)
+      : undefined;
+  if (!("verified" in result) || !ownerUid) {
+    const recorded = await recordUnclaimedStoreEvent(result.event);
+    logInfo(logEvent, operationId, {
+      eventType: result.event.eventType,
+      environment: result.event.environment,
+      duplicate: !recorded,
+      claimed: false,
+    });
+    return { claimed: false, duplicate: !recorded, stateApplied: false };
+  }
+
+  const persisted = await persistVerifiedSubscription(
+    ownerUid,
+    result.verified,
+    result.event
+  );
+  logInfo(logEvent, operationId, {
+    eventType: result.event.eventType,
+    environment: result.event.environment,
+    status: result.verified.subscription.status,
+    active: result.verified.subscription.active,
+    duplicate: persisted.duplicate,
+    stateApplied: persisted.stateApplied,
+    claimed: true,
+  });
+  return {
+    claimed: true,
+    duplicate: persisted.duplicate,
+    stateApplied: persisted.stateApplied,
+  };
+}
+
 export interface GoogleStoreEventInput {
   purchaseToken: string;
   /** The RTDN type name, or `VOIDED_PURCHASE` for a voided-purchases entry. */
@@ -432,6 +453,8 @@ export interface GoogleStoreEventInput {
   eventKey: string;
   eventAt: Date;
   refundType?: number;
+  voidedReason?: number;
+  voidedSource?: number;
   operationId: string;
   /** The success log's event name, so each caller's logs stay distinguishable. */
   logEvent: string;
@@ -475,6 +498,12 @@ export async function applyGoogleStoreEvent(
     eventAt: input.eventAt,
     purchaseReference: verified.subscription.purchaseReference,
     ...(input.refundType !== undefined ? { refundType: input.refundType } : {}),
+    ...(input.voidedReason !== undefined
+      ? { voidedReason: input.voidedReason }
+      : {}),
+    ...(input.voidedSource !== undefined
+      ? { voidedSource: input.voidedSource }
+      : {}),
   };
   const ownerUid = await resolvePurchaseOwner(verified, accountBindingSecret);
   if (!ownerUid) {

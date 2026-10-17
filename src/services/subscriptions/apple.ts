@@ -7,6 +7,7 @@ import {
   Environment,
   JWSRenewalInfoDecodedPayload,
   JWSTransactionDecodedPayload,
+  NotificationHistoryResponse,
   ResponseBodyV2DecodedPayload,
   SignedDataVerifier,
   Status,
@@ -44,6 +45,67 @@ export interface VerifiedAppleNotification {
   decoded: ResponseBodyV2DecodedPayload;
   verified: VerifiedSubscription;
   event: StoreEvent;
+}
+
+export type AppleStoreEnvironment = "production" | "sandbox";
+
+/** Apple's Get Notification History behind one seam, so the recovery pass can be tested without Apple. */
+export interface AppleHistoryApi {
+  getNotificationHistory(
+    environment: AppleStoreEnvironment,
+    paginationToken: string | undefined,
+    range: { startDate: number; endDate: number }
+  ): Promise<NotificationHistoryResponse>;
+}
+
+let appleHistoryApi: AppleHistoryApi | undefined;
+
+export function getAppleHistoryApi(): AppleHistoryApi {
+  return (
+    appleHistoryApi ?? {
+      async getNotificationHistory(environment, paginationToken, range) {
+        try {
+          return await createApiClient(
+            environment === "production"
+              ? Environment.PRODUCTION
+              : Environment.SANDBOX
+          ).getNotificationHistory(paginationToken ?? null, range);
+        } catch (error) {
+          throw mapAppleError(error);
+        }
+      },
+    }
+  );
+}
+
+/** Replaces the Apple history client. Only the tests call this. */
+export function setAppleHistoryApi(api: AppleHistoryApi | undefined): void {
+  appleHistoryApi = api;
+}
+
+/**
+ * The id and environment a notification claims, read without verifying it.
+ * Enough to ask whether the event was already handled; anything acted on goes
+ * through the verified path.
+ */
+export function decodeAppleNotificationIdentity(signedPayload: string): {
+  notificationUUID: string;
+  environment: AppleStoreEnvironment;
+} {
+  const environment = toStoreEnvironment(claimedAppleEnvironment(signedPayload));
+  let notificationUUID: unknown;
+  try {
+    const payload = JSON.parse(
+      Buffer.from(signedPayload.split(".")[1], "base64url").toString("utf8")
+    ) as { notificationUUID?: unknown };
+    notificationUUID = payload.notificationUUID;
+  } catch {
+    throw invalidStoreData("apple-jws-malformed");
+  }
+  if (typeof notificationUUID !== "string" || !notificationUUID) {
+    throw invalidStoreData("apple-notification-id-missing");
+  }
+  return { notificationUUID, environment };
 }
 
 export async function verifyAppleSubscription(

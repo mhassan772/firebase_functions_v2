@@ -199,6 +199,9 @@ export interface StoreEvent {
   originalTransactionId?: string;
   /** Play's refund type on a voided purchase. */
   refundType?: number;
+  /** Play's reason and source on an entry from the Voided Purchases API. */
+  voidedReason?: number;
+  voidedSource?: number;
 }
 
 export interface PersistedSubscriptionResult {

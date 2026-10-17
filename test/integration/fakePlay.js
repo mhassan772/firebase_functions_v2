@@ -55,6 +55,8 @@ function installFakePlay({ subscriptions = {}, acknowledge = [], voided = [] } =
     async getSubscription(token) {
       calls.get.push(token);
       const purchase = subscriptions[token];
+      // A number stands for an HTTP failure Play answers with for that token.
+      if (typeof purchase === "number") throw { code: purchase };
       if (!purchase) throw { code: 410 };
       return purchase;
     },

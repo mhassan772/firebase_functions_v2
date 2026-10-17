@@ -11,8 +11,14 @@ const {
 } = require("../lib/services/subscriptions/crypto");
 const {
   claimedAppleEnvironment,
+  decodeAppleNotificationIdentity,
   validateAppleTransaction,
 } = require("../lib/services/subscriptions/apple");
+const {
+  isRetainableFailure,
+  reconcileWindow,
+  voidedEventKey,
+} = require("../lib/handlers/subscriptionReconcileHandlers");
 const {
   setPlayApi,
   validateGooglePurchase,
@@ -579,6 +585,56 @@ test("acknowledge failures: conflicts, limits, permissions and outages retry; a 
   } finally {
     setPlayApi(undefined);
   }
+});
+
+test("the recovery window resumes a stored page, else runs checkpoint to now within what the feed serves", () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  const fresh = reconcileWindow({ retained: [] }, NOW, 30 * DAY);
+  assert.equal(fresh.window.startAt.getTime(), NOW.getTime() - 30 * DAY);
+  assert.equal(fresh.window.endAt.getTime(), NOW.getTime());
+  assert.equal(fresh.gapMs, 0);
+
+  const recent = reconcileWindow({ checkpointAt: new Date(NOW.getTime() - 6 * 60 * 60 * 1000), retained: [] }, NOW, 30 * DAY);
+  assert.equal(recent.window.startAt.getTime(), NOW.getTime() - 6 * 60 * 60 * 1000);
+  assert.equal(recent.gapMs, 0);
+
+  const stale = reconcileWindow({ checkpointAt: new Date(NOW.getTime() - 40 * DAY), retained: [] }, NOW, 30 * DAY);
+  assert.equal(stale.window.startAt.getTime(), NOW.getTime() - 30 * DAY);
+  assert.equal(stale.gapMs, 10 * DAY);
+
+  const stored = { startAt: PAST, endAt: new Date(NOW.getTime() - DAY), pageToken: "page-3" };
+  const resumed = reconcileWindow({ checkpointAt: PAST, window: stored, retained: [] }, NOW, 30 * DAY);
+  assert.deepEqual(resumed, { window: stored, gapMs: 0 });
+
+  assert.equal(voidedEventKey({ orderId: "GPA.1234", purchaseToken: "token-a" }), "voided:GPA.1234");
+  const fallback = voidedEventKey({ purchaseToken: "token-promo", voidedTimeMillis: "1700000000000" });
+  assert.equal(fallback, `voided:${sha256Reference("token-promo")}:1700000000000`);
+  assert.ok(!fallback.includes("token-promo"));
+
+  assert.equal(isRetainableFailure(new SubscriptionError("store-unavailable", "x", "x", true)), true);
+  assert.equal(isRetainableFailure(new SubscriptionError("configuration", "x", "x")), true);
+  assert.equal(isRetainableFailure(new SubscriptionError("internal", "x", "x")), true);
+  assert.equal(isRetainableFailure(new Error("socket hang up")), true);
+  assert.equal(isRetainableFailure(new SubscriptionError("invalid-store-data", "x", "x")), false);
+  assert.equal(isRetainableFailure(new SubscriptionError("ownership-conflict", "x", "x")), false);
+});
+
+test("a notification's id and environment can be read for the dedupe lookup without verifying it", () => {
+  const encode = (payload) =>
+    `${Buffer.from("{}").toString("base64url")}.${Buffer.from(JSON.stringify(payload)).toString("base64url")}.sig`;
+  assert.deepEqual(
+    decodeAppleNotificationIdentity(encode({ notificationUUID: "uuid-1", data: { environment: "Sandbox" } })),
+    { notificationUUID: "uuid-1", environment: "sandbox" }
+  );
+  assert.deepEqual(
+    decodeAppleNotificationIdentity(encode({ notificationUUID: "uuid-2", environment: "Production" })),
+    { notificationUUID: "uuid-2", environment: "production" }
+  );
+  assert.throws(
+    () => decodeAppleNotificationIdentity(encode({ data: { environment: "Sandbox" } })),
+    (error) => error instanceof SubscriptionError && error.safeCode === "apple-notification-id-missing"
+  );
+  assert.throws(() => decodeAppleNotificationIdentity("not-a-jws"), (error) => error instanceof SubscriptionError);
 });
 
 test("master projection and document keys never expose protected purchase data", () => {

@@ -125,6 +125,16 @@ describe("data owned by one user", () => {
     await assertSucceeds(getDocs(collection(asUser("admin-1"), "subscriptions_manual")));
   });
 
+  test("subscription_acknowledgements and subscription_reconcile_state: no client at all", async () => {
+    for (const path of ["subscription_acknowledgements/ref-1", "subscription_reconcile_state/google-voided"]) {
+      for (const db of [asUser("user-1"), asUser("admin-1"), asGuest()]) {
+        await assertFails(getDoc(doc(db, path)));
+        await assertFails(setDoc(doc(db, path), { status: "done" }));
+        await assertFails(getDocs(collection(db, path.split("/")[0])));
+      }
+    }
+  });
+
   test("subscription_master: the owner can get, but not list or write", async () => {
     await assertSucceeds(getDoc(doc(asUser("user-1"), "subscription_master/user-1")));
     await assertFails(getDoc(doc(asUser("user-2"), "subscription_master/user-1")));

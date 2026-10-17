@@ -12,6 +12,7 @@ export { manageSubscriptionDevice } from "./functions/subscriptions/manageSubscr
 export { adminManageSubscription } from "./functions/subscriptions/adminManageSubscription";
 export { appleSubscriptionNotifications } from "./functions/subscriptions/appleSubscriptionNotifications";
 export { googleSubscriptionNotifications } from "./functions/subscriptions/googleSubscriptionNotifications";
+export { reconcileSubscriptions } from "./functions/subscriptions/reconcileSubscriptions";
 export { admin_upload_to_S3 } from "./functions/admin/uploadToS3";
 export { adminBlurCover } from "./functions/admin/adminBlurCover";
 export { review } from "./functions/reviews/review";
