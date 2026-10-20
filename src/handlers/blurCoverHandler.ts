@@ -1,7 +1,7 @@
 import * as crypto from "crypto";
 import * as functions from "firebase-functions";
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
-import { requireAdminPortalUser } from "../utils/adminRole";
+import { requirePortalRole } from "../utils/adminRole";
 import { getSecret } from "../utils/secrets";
 
 export type BlurCoverKind = "podcast" | "episode" | "book";
@@ -248,7 +248,10 @@ async function putBlurredCover(object: BlurredCoverObject): Promise<void> {
 }
 
 export const handleAdminBlurCover = createBlurCoverHandler({
-  requireAdmin: requireAdminPortalUser,
+  // Content managers blur covers; admins pass too, which covers ContentReports.
+  requireAdmin: async (uid: string) => {
+    await requirePortalRole(uid, "content-manager");
+  },
   fetchImage: fetchImageWithLimits,
   putObject: putBlurredCover,
 });

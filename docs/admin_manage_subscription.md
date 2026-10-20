@@ -45,9 +45,18 @@ adds, `legacy_${docId}` for the baseline.
 
 ## Callable
 
-Region `europe-west2`, 540 s timeout. Caller must be signed in and have
-`users_adminv2/{uid}.role == "admin"`. Every request is `{ action, ...fields }`
-with exactly the fields listed; extra fields are rejected.
+Region `europe-west2`, 540 s timeout. Caller must be signed in and hold the
+`admin` portal role. Roles are read from `users_adminv2/{uid}`: a `roles` list
+alone decides, otherwise the legacy `role` string (`src/utils/adminRole.ts`,
+mirrored by the helpers at the top of `firestore.rules`). Every request is `{ action, ...fields }` with exactly the fields listed;
+extra fields are rejected.
+
+A caller whose roles include `egypt-subscription-approval` but not `admin` may
+use only `get`, `grant` with a `queue`, `adjust` and `reverseRequest`, and the
+last two only on a grant that came from a queue request (`grant.queue` set);
+any other grant is refused with `grant-not-from-request`. Every other action is
+refused with `not-subscription-admin`. The start log records `access: "admin"`
+or `"queue"`.
 
 `user` is `{ uid }` or `{ email }`, optionally with `hashedId` (the 64-hex id
 the user pasted to support). The hash never finds an account; it only confirms
@@ -168,7 +177,7 @@ MigrationReport {
 approval that predates the ledger; offer `setBaseline` or `revokeAccess`
 instead), `grant-not-active`, `duration-unchanged`,
 `hashed-id-mismatch`, `email-not-found`, `uid-not-found`, `manual-slot-disabled`,
-`not-subscription-admin`, `migration-run-exists` (a live run id was reused; pick a new one),
+`not-subscription-admin`, `grant-not-from-request`, `migration-run-exists` (a live run id was reused; pick a new one),
 `queue-id-invalid`, `subscription-not-found` (device actions on an account with
 no master), `seats-invalid`, `device-id-invalid`.
 
