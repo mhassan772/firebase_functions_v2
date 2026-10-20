@@ -503,7 +503,7 @@ service cloud.firestore {
     }
     
     // Portal sign-ups waiting for an admin. Each user creates and reads only their own request;
-    // admins read them all. adminManagePortalUsers moves a request into users_adminv2.
+    // admins read them all. Activating one on the Portal users page moves it into users_adminv2.
     match /users_not_activated_adminv2/{userId} {
       allow read: if request.auth != null && request.auth.uid == userId;
       allow read: if isPortalAdmin();
