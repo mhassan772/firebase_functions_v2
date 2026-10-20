@@ -1,25 +1,50 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+    // Admin portal access. A portal user's document in users_adminv2 holds either a `roles` list,
+    // which alone decides access, or the older single `role`. `admin` grants every role. The
+    // document is checked with exists() first so that a caller who is not a portal user reads as
+    // false, not as an error, next to the owner checks these rules sit beside.
+    function portalUserPath() {
+      return /databases/$(database)/documents/users_adminv2/$(request.auth.uid);
+    }
+
+    function isPortalUser() {
+      return request.auth != null && exists(portalUserPath());
+    }
+
+    function portalRoles() {
+      let data = get(portalUserPath()).data;
+      return data.get('roles', null) is list ? data.roles : [data.get('role', null)];
+    }
+
+    function hasPortalRole(role) {
+      return isPortalUser() && ('admin' in portalRoles() || role in portalRoles());
+    }
+
+    function isPortalAdmin() {
+      return hasPortalRole('admin');
+    }
+
     match /book_recordings/{book_recordings} {
-      allow read, write: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+      allow read, write: if hasPortalRole('content-manager');
 
     }
     match /books_series/{books_series_id} {
-      allow read, write: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+      allow read, write: if hasPortalRole('content-manager');
 
     }
     match /server_podcasts/{id} {
-      allow read, write: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+      allow read, write: if hasPortalRole('content-manager');
 
     }
     match /books_metadata/{key} {
-      allow read, write: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+      allow read, write: if hasPortalRole('content-manager');
 
     }
     
     match /books_pre_add/{key} {
-      allow read, write: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+      allow read, write: if hasPortalRole('content-manager');
 
     }
  
@@ -73,14 +98,18 @@ service cloud.firestore {
       allow read, update: if request.auth != null && get(/databases/$(database)/documents/admin/$(request.auth.uid)).data.isAdmin == true;
     }
     match /settings/{settings} {
-      allow read, write, update, create, delete: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+      allow read, write, update, create, delete: if isPortalAdmin();
+      // Content managers keep the content settings only; mantooqAppSettings and the rest stay admin.
+      allow read, write, update, create, delete: if hasPortalRole('content-manager')
+        && settings in ['webAdminV2UploadBooks', 'youtube', 'podcasts', 'adminWebV2GeneralSettings'];
 
     }
 	match /settings_app/{docId}/{subpath=**} {
   allow read: if true;
 
-  allow create, update, delete: if request.auth != null
-    && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+  allow create, update, delete: if isPortalAdmin();
+  // settings_app/subscription holds the device limits, which stay with admins.
+  allow create, update, delete: if hasPortalRole('content-manager') && docId != 'subscription';
 }
 
     
@@ -92,173 +121,172 @@ service cloud.firestore {
       allow read, update, delete: if request.auth != null && request.auth.uid == userId;
       allow read, update, delete: if request.auth != null && request.auth.uid == resource.data.id;
       allow create: if true;
-			allow read, write: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+			allow read, write: if isPortalAdmin();
 }
     match /favourites/{userId} {
       allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
-      allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+      allow create, read, write, update: if isPortalAdmin();
 
     }
     match /auto_reported_issues/{issueId} {
   allow create: if request.auth != null
     && request.resource.data.userId == request.auth.uid;
-  allow read, update, delete: if request.auth != null
-    && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role in ['admin', 'developer'];
+  allow read, update, delete: if hasPortalRole('developer');
 }
     match /favorites_v2/{userId} {
  		  allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
-      allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+      allow create, read, write, update: if isPortalAdmin();
 
 		}
     
     match /playback_progress/{userId} {
       allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
-      allow read: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
-      allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+      allow read: if isPortalAdmin();
+      allow create, read, write, update: if isPortalAdmin();
 
     }
     
     match /playback_progress_v2/{userId} {
 
       allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
-      allow read: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
-      allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+      allow read: if isPortalAdmin();
+      allow create, read, write, update: if isPortalAdmin();
 
 
       match /chunks/{docId} {
          allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
-         allow read: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
-         allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+         allow read: if isPortalAdmin();
+         allow create, read, write, update: if isPortalAdmin();
 
       }
     }
     
     match /episode_progress/{userId} {                                                                                                                                                    
     	allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;                                                                                          
-   	 	allow read: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';  
-      allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+   	 	allow read: if isPortalAdmin();  
+      allow create, read, write, update: if isPortalAdmin();
 
   	}
 
    match /converted_podcasts/{userId} {                                                                                                                                                    
     	allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;                                                                                          
-   	 	allow read: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin'; 
-      allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+   	 	allow read: if isPortalAdmin(); 
+      allow create, read, write, update: if isPortalAdmin();
 
   	}      
 
     match /podcast_subscriptions/{userId} {
       allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
-      allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+      allow create, read, write, update: if isPortalAdmin();
 
     }
     
     match /episodes_lists/{userId} {
     allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
-    allow read: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
-    allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+    allow read: if isPortalAdmin();
+    allow create, read, write, update: if isPortalAdmin();
 
 
     match /lists/{listId} {
       allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
-      allow read: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
-      allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+      allow read: if isPortalAdmin();
+      allow create, read, write, update: if isPortalAdmin();
 
     }
   	}
     
     match /pdf_progress/{userId} {
       allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
-      allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+      allow create, read, write, update: if isPortalAdmin();
 
     }
      match /completed_book/{userId} {
       allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
-      allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+      allow create, read, write, update: if isPortalAdmin();
 
     }
      match /completed_books_v2/{userId} {
  		  allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
-      allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+      allow create, read, write, update: if isPortalAdmin();
 
 		}
      match /archived_episodes/{userId} {
  		  allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
-      allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+      allow create, read, write, update: if isPortalAdmin();
 
 		}
      // Podcasts and books the user blocked, one document per user. It stays its own document so older
      // app versions, which rewrite the followed-podcasts and archive documents whole, cannot erase it.
      match /blocked_content/{userId} {
  		  allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
-      allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+      allow create, read, write, update: if isPortalAdmin();
 
 		}
      match /playlists/{userId} {
       allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
-      allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+      allow create, read, write, update: if isPortalAdmin();
 
     }
      match /playlists/{userId}/book_playlists/{id} {
       allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
-      allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+      allow create, read, write, update: if isPortalAdmin();
 
     }
      match /playlists_v2/{userId} {
       allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
-      allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
-      allow read: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+      allow create, read, write, update: if isPortalAdmin();
+      allow read: if isPortalAdmin();
     }
      
      match /routines/{userId} {
       allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
-            allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+            allow create, read, write, update: if isPortalAdmin();
 
-      allow read: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+      allow read: if isPortalAdmin();
     }
      match /routine_activity/{userId} {
       allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
-            allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+            allow create, read, write, update: if isPortalAdmin();
 
-      allow read: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+      allow read: if isPortalAdmin();
 
     }
      match /listen_times/{userId} {
       allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
-            allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+            allow create, read, write, update: if isPortalAdmin();
 
     }
      match /device_sessions/{userId} {
       allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
-      allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
-      allow read: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+      allow create, read, write, update: if isPortalAdmin();
+      allow read: if isPortalAdmin();
     }
      match /device_sessions_v2/{userId} {
       allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
-      allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
-      allow read: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+      allow create, read, write, update: if isPortalAdmin();
+      allow read: if isPortalAdmin();
     }
  		match /bookmarks/{userId}/bookmarks_chunk/{book_mark_chunck} {
       allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
-            allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+            allow create, read, write, update: if isPortalAdmin();
 
     }   
   	match /bookmarks/{userId} {
       allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
-            allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+            allow create, read, write, update: if isPortalAdmin();
 
-      allow read: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+      allow read: if isPortalAdmin();
     }
     
      match /bookmarks/{userId}/tags/{id} {
       allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
-            allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+            allow create, read, write, update: if isPortalAdmin();
 
     }
     
       match /bookmarks/{userId}/book_bookmarks/{id} {
       allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
-            allow create, read, write, update: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+            allow create, read, write, update: if isPortalAdmin();
 
     }
     // Books the user built from their own audio files: the main document lists
@@ -321,20 +349,19 @@ service cloud.firestore {
     match /subscriptions_manual/{docId} {
       allow get: if request.auth != null
                  && hashing.sha256(request.auth.uid).toHexString().lower() == docId;
-      allow read: if request.auth != null
-                  && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+      allow read: if isPortalAdmin();
       allow write: if false;
     }
     match /subscriptions_to_be_approved/{subscriptionId} {
-      allow read: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
-      allow write: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+      allow read: if hasPortalRole('egypt-subscription-approval');
+      allow write: if hasPortalRole('egypt-subscription-approval');
       allow read: if request.auth != null && request.auth.uid == resource.data.user_guid;
 
     }
     
    match /subscription_migration_restoration/{subscriptionId} {
-  allow read: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
-  allow write: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+  allow read: if hasPortalRole('egypt-subscription-approval');
+  allow write: if hasPortalRole('egypt-subscription-approval');
   allow read: if request.auth != null && request.auth.uid == resource.data.user_guid;
 
 } 
@@ -347,24 +374,26 @@ service cloud.firestore {
     
     match /donation_web/main {
       allow read: if request.auth != null ;
-      allow write: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+      allow write: if isPortalAdmin();
     }
     
     match /publishers/{publisher_id} {
-      allow read, write, create: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+      allow read, write, create: if hasPortalRole('content-manager');
 
     }
     
+    // Every portal user records what they did; only admins read or change the history.
     match /logs_adminv2/{log_id} {
-      allow read, write, create: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+      allow create: if isPortalUser();
+      allow read, update, delete: if isPortalAdmin();
 
     }
     match /podcasts_filtering/{setting} {
-      allow read, write, create: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+      allow read, write, create: if isPortalAdmin();
 
     }
     match /reporting_issues/{setting} {
-      allow read, write, create, delete: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role in ['admin', 'developer'];
+      allow read, write, create, delete: if hasPortalRole('developer');
 
     }
     // A user's report of a podcast or a book, one per user and item: the id is the reporter's uid
@@ -421,23 +450,51 @@ service cloud.firestore {
           && d.createdAt == request.time;
       }
 
-      function isAdmin() {
-        return request.auth != null
-          && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
-      }
-
       allow create: if isOwnReport(request.resource.data);
       // Matched on the id as well, so a missing report reads as missing only to its would-be owner.
       allow get: if request.auth != null
         && reportId.matches(request.auth.uid + '_.+')
         && (resource == null || resource.data.uid == request.auth.uid);
-      allow read, write: if isAdmin();
+      allow read, write: if isPortalAdmin();
     }
     
     // Users collection - authenticated users can read their own document
+    // Portal access, edited by admins on the portal's Portal users page. Roles come from a
+    // fixed list, and the legacy `role` field is never written from the client.
+    function validPortalAccess(data) {
+      return data.active is bool
+        && data.roles is list
+        && data.roles.hasOnly(['admin', 'content-manager', 'egypt-subscription-approval', 'developer'])
+        && data.roles.toSet().size() == data.roles.size()
+        && (data.active == false || data.roles.size() > 0)
+        && data.updatedBy == request.auth.uid
+        && data.updatedAt == request.time;
+    }
+
+    // An admin can't take away their own admin access or sign-in.
+    function keepsOwnAdmin(userId, data) {
+      return userId != request.auth.uid || (data.active == true && 'admin' in data.roles);
+    }
+
+    function pendingPortalUserPath(userId) {
+      return /databases/$(database)/documents/users_not_activated_adminv2/$(userId);
+    }
+
     match /users_adminv2/{userId} {
       allow read: if request.auth != null && request.auth.uid == userId;
-      allow write: if false; // Only admins should write via admin SDK
+      allow read: if isPortalAdmin();
+      allow update: if isPortalAdmin()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['roles', 'active', 'updatedAt', 'updatedBy'])
+        && validPortalAccess(request.resource.data)
+        && keepsOwnAdmin(userId, request.resource.data);
+      // Activating a sign-in: created from its waiting-list entry, which the same batch deletes.
+      allow create: if isPortalAdmin()
+        && exists(pendingPortalUserPath(userId))
+        && !existsAfter(pendingPortalUserPath(userId))
+        && request.resource.data.keys().hasOnly(['email', 'roles', 'active', 'updatedAt', 'updatedBy'])
+        && request.resource.data.get('email', null) == get(pendingPortalUserPath(userId)).data.get('email', null)
+        && validPortalAccess(request.resource.data);
+      allow delete: if false;
     }
     // users_my_mantooq collection - authenticated users can read their own document
     match /users_my_mantooq/{userId} {
@@ -445,11 +502,17 @@ service cloud.firestore {
       allow write: if false; // Only admins should write via admin SDK
     }
     
-    // Users not activated collection - authenticated users can read/write their own document
+    // Portal sign-ups waiting for an admin. Each user creates and reads only their own request;
+    // admins read them all. adminManagePortalUsers moves a request into users_adminv2.
     match /users_not_activated_adminv2/{userId} {
-      allow read: if true;
-      allow create: if true;
-      allow update, delete: if false;
+      allow read: if request.auth != null && request.auth.uid == userId;
+      allow read: if isPortalAdmin();
+      allow create: if request.auth != null && request.auth.uid == userId;
+      allow update: if false;
+      // Only as part of activating the sign-in, in the batch that creates its users_adminv2 document.
+      allow delete: if isPortalAdmin()
+        && !exists(/databases/$(database)/documents/users_adminv2/$(userId))
+        && existsAfter(/databases/$(database)/documents/users_adminv2/$(userId));
     }
     match /re_user_liked_comments/{userId}/{book_guid}/{commenter_guid} {
       allow read: if request.auth != null && request.auth.uid == userId;
@@ -467,23 +530,23 @@ service cloud.firestore {
     }
     match /authors/{author} {
       allow read: if true;
-      allow write, delete: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+      allow write, delete: if hasPortalRole('content-manager');
     }
 
     
     match /books/{book} {
       allow read: if true;
-      allow write: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+      allow write: if hasPortalRole('content-manager');
 
     }
     match /books_copy_rights/{book} {
-      allow read, write: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+      allow read, write: if hasPortalRole('content-manager');
 
     }
     
     match /categories/{category} {
       allow read: if true;
-      allow write: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+      allow write: if hasPortalRole('content-manager');
     }
     
     match /narrators/{narrator} {
@@ -535,6 +598,17 @@ service cloud.firestore {
 
     match /subscription_reconcile_state/{document=**} {
       allow read, write: if false;
+    }
+
+    // Admin dashboard stats, rebuilt daily by refreshSubscriptionStats.
+    match /subscription_stats/{id} {
+      allow read: if isPortalAdmin();
+      allow write: if false;
+    }
+
+    match /subscription_stats_daily/{id} {
+      allow read: if isPortalAdmin();
+      allow write: if false;
     }
 
 		

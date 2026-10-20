@@ -22,6 +22,7 @@ const {
   Timestamp,
   serverTimestamp,
   setLogLevel,
+  writeBatch,
 } = require("firebase/firestore");
 
 // The SDK logs every denial these tests expect; only real errors are worth seeing.
@@ -159,9 +160,302 @@ describe("admin-only data", () => {
     await assertFails(getDocs(collection(asUser("user-1"), "reporting_issues")));
   });
 
+  test("subscription stats: admins read them, nobody writes them", async () => {
+    await env.withSecurityRulesDisabled(async (context) => {
+      const db = context.firestore();
+      await setDoc(doc(db, "subscription_stats/current"), { schemaVersion: 1 });
+      await setDoc(doc(db, "subscription_stats_daily/2026-10-20"), { date: "2026-10-20" });
+    });
+    for (const path of ["subscription_stats/current", "subscription_stats_daily/2026-10-20"]) {
+      const name = path.split("/")[0];
+      await assertSucceeds(getDoc(doc(asUser("admin-1"), path)));
+      await assertSucceeds(getDocs(collection(asUser("admin-1"), name)));
+      for (const db of [asUser("dev-1"), asUser("user-1"), asGuest()]) {
+        await assertFails(getDoc(doc(db, path)));
+        await assertFails(getDocs(collection(db, name)));
+      }
+      for (const db of [asUser("admin-1"), asUser("dev-1"), asUser("user-1"), asGuest()]) {
+        await assertFails(setDoc(doc(db, path), { schemaVersion: 2 }));
+        await assertFails(updateDoc(doc(db, path), { schemaVersion: 2 }));
+        await assertFails(deleteDoc(doc(db, path)));
+      }
+      await assertFails(setDoc(doc(asUser("admin-1"), `${name}/new-doc`), { value: 1 }));
+    }
+  });
+
   test("users_adminv2: nobody writes a role from the client", async () => {
     await assertFails(setDoc(doc(asUser("user-1"), "users_adminv2/user-1"), { role: "admin" }));
     await assertFails(setDoc(doc(asUser("admin-1"), "users_adminv2/user-1"), { role: "admin" }));
+  });
+});
+
+describe("admin portal roles", () => {
+  // A `roles` list alone decides access; without one the single `role` does. `admin` grants all.
+  const portalUsers = {
+    "admin-roles": { roles: ["admin"] },
+    "cm-1": { roles: ["content-manager"] },
+    "egypt-1": { roles: ["egypt-subscription-approval"] },
+    "manager-1": { role: "manager" },
+    "multi-1": { roles: ["content-manager", "egypt-subscription-approval"] },
+    "dev-roles": { roles: ["developer"] },
+    // The list wins over the old field, so this user is not an admin.
+    "roles-wins": { role: "admin", roles: ["content-manager"] },
+    "no-roles": { roles: [] },
+  };
+
+  beforeEach(async () => {
+    await env.withSecurityRulesDisabled(async (context) => {
+      const db = context.firestore();
+      for (const [uid, data] of Object.entries(portalUsers)) {
+        await setDoc(doc(db, `users_adminv2/${uid}`), { active: true, ...data });
+      }
+      await setDoc(doc(db, "settings/youtube"), { key: "x" });
+      await setDoc(doc(db, "settings_app/subscription"), { maxDevices: 2 });
+      await setDoc(doc(db, "settings_app/featured_active_books_1"), { books: [] });
+      await setDoc(doc(db, "subscriptions_to_be_approved/req-1"), { user_guid: "user-1", status: "pending" });
+      await setDoc(doc(db, "subscription_migration_restoration/req-2"), { user_guid: "user-1" });
+      await setDoc(doc(db, "subscription_stats/current"), { schemaVersion: 1 });
+      await setDoc(doc(db, "logs_adminv2/log-1"), { action: "x" });
+      await setDoc(doc(db, "users_not_activated_adminv2/pending-1"), { email: "p@example.com", uid: "pending-1" });
+      await setDoc(doc(db, "reporting_issues/issue-1"), { text: "x" });
+    });
+  });
+
+  const admins = ["admin-1", "admin-roles"];
+  const contentManagers = ["cm-1", "multi-1", "roles-wins"];
+  const approvers = ["egypt-1", "multi-1"];
+  const everyone = [
+    "admin-1", "admin-roles", "cm-1", "egypt-1", "manager-1", "multi-1", "dev-roles", "roles-wins", "no-roles",
+    "user-1",
+  ];
+  const others = (allowed) => everyone.filter((uid) => !allowed.includes(uid));
+
+  test("books: admins and content managers write, nobody else", async () => {
+    for (const uid of [...admins, ...contentManagers]) {
+      await assertSucceeds(setDoc(doc(asUser(uid), "books/book-1"), { name: uid }));
+      await assertSucceeds(setDoc(doc(asUser(uid), "book_recordings/rec-1"), { name: uid }));
+      await assertSucceeds(getDoc(doc(asUser(uid), "book_recordings/rec-1")));
+      await assertSucceeds(setDoc(doc(asUser(uid), "authors/author-1"), { name: uid }));
+      await assertSucceeds(deleteDoc(doc(asUser(uid), "authors/author-1")));
+    }
+    for (const uid of others([...admins, ...contentManagers])) {
+      await assertFails(setDoc(doc(asUser(uid), "books/book-1"), { name: uid }));
+      await assertFails(getDoc(doc(asUser(uid), "book_recordings/rec-1")));
+      await assertFails(setDoc(doc(asUser(uid), "categories/cat-1"), { name: uid }));
+    }
+  });
+
+  test("settings: content managers reach the content settings only", async () => {
+    for (const uid of admins) {
+      await assertSucceeds(getDoc(doc(asUser(uid), "settings/mantooqAppSettings")));
+      await assertSucceeds(setDoc(doc(asUser(uid), "settings/mantooqAppSettings"), { isNoAuthAllowed: false }));
+      await assertSucceeds(setDoc(doc(asUser(uid), "settings/youtube"), { key: uid }));
+    }
+    for (const uid of contentManagers) {
+      await assertSucceeds(getDoc(doc(asUser(uid), "settings/youtube")));
+      await assertSucceeds(setDoc(doc(asUser(uid), "settings/youtube"), { key: uid }));
+      await assertSucceeds(setDoc(doc(asUser(uid), "settings/webAdminV2UploadBooks"), { key: uid }));
+      await assertFails(getDoc(doc(asUser(uid), "settings/mantooqAppSettings")));
+      await assertFails(setDoc(doc(asUser(uid), "settings/mantooqAppSettings"), { isNoAuthAllowed: true }));
+    }
+    for (const uid of others([...admins, ...contentManagers])) {
+      await assertFails(getDoc(doc(asUser(uid), "settings/youtube")));
+      await assertFails(setDoc(doc(asUser(uid), "settings/youtube"), { key: uid }));
+    }
+  });
+
+  test("settings_app: content managers write everything but the subscription device limits", async () => {
+    for (const uid of admins) {
+      await assertSucceeds(setDoc(doc(asUser(uid), "settings_app/subscription"), { maxDevices: 2 }));
+      await assertSucceeds(setDoc(doc(asUser(uid), "settings_app/featured_active_books_1"), { books: [uid] }));
+    }
+    for (const uid of contentManagers) {
+      await assertSucceeds(setDoc(doc(asUser(uid), "settings_app/featured_active_books_1"), { books: [uid] }));
+      await assertSucceeds(setDoc(doc(asUser(uid), "settings_app/featured_active_books_1/items/a"), { v: 1 }));
+      await assertFails(setDoc(doc(asUser(uid), "settings_app/subscription"), { maxDevices: 9 }));
+      await assertFails(setDoc(doc(asUser(uid), "settings_app/subscription/items/a"), { v: 1 }));
+    }
+    for (const uid of others([...admins, ...contentManagers])) {
+      await assertFails(setDoc(doc(asUser(uid), "settings_app/featured_active_books_1"), { books: [uid] }));
+      await assertFails(setDoc(doc(asUser(uid), "settings_app/subscription"), { maxDevices: 9 }));
+    }
+    // Reads stay public.
+    await assertSucceeds(getDoc(doc(asGuest(), "settings_app/subscription")));
+  });
+
+  test("the Egypt request queue: admins and approvers, plus the requester reading their own", async () => {
+    for (const uid of [...admins, ...approvers]) {
+      await assertSucceeds(getDocs(collection(asUser(uid), "subscriptions_to_be_approved")));
+      await assertSucceeds(updateDoc(doc(asUser(uid), "subscriptions_to_be_approved/req-1"), { status: "approved" }));
+      await assertSucceeds(getDoc(doc(asUser(uid), "subscription_migration_restoration/req-2")));
+      await assertSucceeds(updateDoc(doc(asUser(uid), "subscription_migration_restoration/req-2"), { note: uid }));
+    }
+    for (const uid of others([...admins, ...approvers])) {
+      if (uid !== "user-1") {
+        await assertFails(getDoc(doc(asUser(uid), "subscriptions_to_be_approved/req-1")));
+      }
+      await assertFails(getDocs(collection(asUser(uid), "subscriptions_to_be_approved")));
+      await assertFails(updateDoc(doc(asUser(uid), "subscriptions_to_be_approved/req-1"), { status: "approved" }));
+      await assertFails(updateDoc(doc(asUser(uid), "subscription_migration_restoration/req-2"), { note: uid }));
+    }
+    await assertSucceeds(getDoc(doc(asUser("user-1"), "subscriptions_to_be_approved/req-1")));
+    await assertSucceeds(getDoc(doc(asUser("user-1"), "subscription_migration_restoration/req-2")));
+  });
+
+  test("subscription stats and the legacy manual grants stay with admins, approvers included", async () => {
+    for (const uid of admins) {
+      await assertSucceeds(getDoc(doc(asUser(uid), "subscription_stats/current")));
+      await assertSucceeds(getDocs(collection(asUser(uid), "subscriptions_manual")));
+    }
+    for (const uid of others(admins)) {
+      await assertFails(getDoc(doc(asUser(uid), "subscription_stats/current")));
+      await assertFails(getDocs(collection(asUser(uid), "subscriptions_manual")));
+    }
+  });
+
+  test("logs_adminv2: every portal user writes a log, only admins read or change them", async () => {
+    for (const uid of everyone.filter((uid) => uid !== "user-1")) {
+      await assertSucceeds(setDoc(doc(asUser(uid), `logs_adminv2/new-${uid}`), { action: "x" }));
+    }
+    await assertFails(setDoc(doc(asUser("user-1"), "logs_adminv2/new-user-1"), { action: "x" }));
+    await assertFails(setDoc(doc(asGuest(), "logs_adminv2/new-guest"), { action: "x" }));
+    for (const uid of admins) {
+      await assertSucceeds(getDocs(collection(asUser(uid), "logs_adminv2")));
+      await assertSucceeds(updateDoc(doc(asUser(uid), "logs_adminv2/log-1"), { action: "y" }));
+    }
+    for (const uid of others(admins)) {
+      await assertFails(getDocs(collection(asUser(uid), "logs_adminv2")));
+      await assertFails(getDoc(doc(asUser(uid), "logs_adminv2/log-1")));
+      await assertFails(updateDoc(doc(asUser(uid), "logs_adminv2/log-1"), { action: "y" }));
+      await assertFails(deleteDoc(doc(asUser(uid), "logs_adminv2/log-1")));
+    }
+  });
+
+  test("users_adminv2: everyone reads their own, admins list them all", async () => {
+    for (const uid of admins) {
+      await assertSucceeds(getDocs(collection(asUser(uid), "users_adminv2")));
+      await assertSucceeds(getDoc(doc(asUser(uid), "users_adminv2/cm-1")));
+    }
+    for (const uid of others(admins)) {
+      await assertFails(getDocs(collection(asUser(uid), "users_adminv2")));
+      await assertFails(getDoc(doc(asUser(uid), "users_adminv2/admin-1")));
+    }
+    await assertSucceeds(getDoc(doc(asUser("cm-1"), "users_adminv2/cm-1")));
+    // A user with no portal document reads it as missing, not as denied.
+    await assertSucceeds(getDoc(doc(asUser("user-1"), "users_adminv2/user-1")));
+  });
+
+  // What the Portal users page writes: roles, active and the stamp, nothing else.
+  const access = (by, roles, active = true) => ({ roles, active, updatedBy: by, updatedAt: serverTimestamp() });
+
+  test("users_adminv2: admins change other people's roles and sign-in", async () => {
+    for (const uid of admins) {
+      await assertSucceeds(updateDoc(doc(asUser(uid), "users_adminv2/cm-1"), access(uid, ["content-manager", "egypt-subscription-approval"])));
+      await assertSucceeds(updateDoc(doc(asUser(uid), "users_adminv2/egypt-1"), access(uid, [], false)));
+      await assertSucceeds(updateDoc(doc(asUser(uid), "users_adminv2/manager-1"), access(uid, ["developer"])));
+    }
+    for (const uid of others(admins)) {
+      await assertFails(updateDoc(doc(asUser(uid), "users_adminv2/cm-1"), access(uid, ["admin"])));
+      await assertFails(updateDoc(doc(asUser(uid), `users_adminv2/${uid}`), access(uid, ["admin"])));
+    }
+  });
+
+  test("users_adminv2: an admin's write must be well formed", async () => {
+    const ref = doc(asUser("admin-roles"), "users_adminv2/cm-1");
+    // Unknown, legacy or repeated roles; an active user with no role.
+    await assertFails(updateDoc(ref, access("admin-roles", ["owner"])));
+    await assertFails(updateDoc(ref, access("admin-roles", ["manager"])));
+    await assertFails(updateDoc(ref, access("admin-roles", ["admin", "admin"])));
+    await assertFails(updateDoc(ref, access("admin-roles", [])));
+    await assertFails(updateDoc(ref, { ...access("admin-roles", ["admin"]), active: "yes" }));
+    // The stamp must name the writer and the server time.
+    await assertFails(updateDoc(ref, { ...access("admin-roles", ["admin"]), updatedBy: "someone-else" }));
+    await assertFails(updateDoc(ref, { ...access("admin-roles", ["admin"]), updatedAt: Timestamp.fromMillis(0) }));
+    // Only access fields change: not the legacy role, not the email.
+    await assertFails(updateDoc(ref, { ...access("admin-roles", ["admin"]), role: "admin" }));
+    await assertFails(updateDoc(ref, { ...access("admin-roles", ["admin"]), email: "x@example.com" }));
+    // A whole-document write that drops fields is refused, and so is deleting.
+    await assertFails(setDoc(ref, { roles: ["admin"] }));
+    await assertFails(deleteDoc(ref));
+  });
+
+  test("users_adminv2: an admin can't remove their own admin access or sign-in", async () => {
+    for (const uid of admins) {
+      const own = doc(asUser(uid), `users_adminv2/${uid}`);
+      await assertFails(updateDoc(own, access(uid, ["content-manager"])));
+      await assertFails(updateDoc(own, access(uid, ["admin"], false)));
+      await assertSucceeds(updateDoc(own, access(uid, ["admin", "developer"])));
+    }
+  });
+
+  test("activating a sign-in: one batch creates the access and removes the waiting entry", async () => {
+    const activate = (by, data = access(by, ["content-manager"])) => {
+      const db = asUser(by);
+      const batch = writeBatch(db);
+      batch.set(doc(db, "users_adminv2/pending-1"), { email: "p@example.com", ...data });
+      batch.delete(doc(db, "users_not_activated_adminv2/pending-1"));
+      return batch.commit();
+    };
+    for (const uid of others(admins)) {
+      await assertFails(activate(uid));
+    }
+    // Either half on its own is refused.
+    await assertFails(setDoc(doc(asUser("admin-1"), "users_adminv2/pending-1"), { email: "p@example.com", ...access("admin-1", ["content-manager"]) }));
+    await assertFails(deleteDoc(doc(asUser("admin-1"), "users_not_activated_adminv2/pending-1")));
+    // The email must be the one the sign-in recorded, and the roles valid.
+    const db = asUser("admin-1");
+    const wrongEmail = writeBatch(db);
+    wrongEmail.set(doc(db, "users_adminv2/pending-1"), { email: "other@example.com", ...access("admin-1", ["content-manager"]) });
+    wrongEmail.delete(doc(db, "users_not_activated_adminv2/pending-1"));
+    await assertFails(wrongEmail.commit());
+    await assertFails(activate("admin-1", access("admin-1", ["manager"])));
+    // Nobody can be created out of thin air.
+    await assertFails(setDoc(doc(asUser("admin-1"), "users_adminv2/user-1"), access("admin-1", ["admin"])));
+
+    await assertSucceeds(activate("admin-1"));
+    await assertSucceeds(getDoc(doc(asUser("pending-1"), "users_adminv2/pending-1")));
+  });
+
+  test("users_not_activated_adminv2: a sign-up writes and reads only its own request", async () => {
+    await assertSucceeds(getDoc(doc(asUser("pending-1"), "users_not_activated_adminv2/pending-1")));
+    await assertSucceeds(
+      setDoc(doc(asUser("user-1"), "users_not_activated_adminv2/user-1"), { email: "u@example.com", uid: "user-1" })
+    );
+    await assertFails(
+      setDoc(doc(asUser("user-1"), "users_not_activated_adminv2/user-2"), { email: "u@example.com", uid: "user-2" })
+    );
+    await assertFails(setDoc(doc(asGuest(), "users_not_activated_adminv2/guest"), { email: "g@example.com" }));
+    await assertFails(getDoc(doc(asGuest(), "users_not_activated_adminv2/pending-1")));
+    await assertFails(getDocs(collection(asGuest(), "users_not_activated_adminv2")));
+    await assertFails(updateDoc(doc(asUser("pending-1"), "users_not_activated_adminv2/pending-1"), { email: "x" }));
+    await assertFails(deleteDoc(doc(asUser("pending-1"), "users_not_activated_adminv2/pending-1")));
+    for (const uid of admins) {
+      await assertSucceeds(getDocs(collection(asUser(uid), "users_not_activated_adminv2")));
+      // Removed only by the activation batch (tested above), never on its own.
+      await assertFails(deleteDoc(doc(asUser(uid), "users_not_activated_adminv2/pending-1")));
+    }
+    for (const uid of others(admins)) {
+      await assertFails(getDocs(collection(asUser(uid), "users_not_activated_adminv2")));
+      await assertFails(getDoc(doc(asUser(uid), "users_not_activated_adminv2/pending-1")));
+    }
+  });
+
+  test("reporting_issues: developers by either field, and admins", async () => {
+    for (const uid of [...admins, "dev-1", "dev-roles"]) {
+      await assertSucceeds(getDocs(collection(asUser(uid), "reporting_issues")));
+      await assertSucceeds(setDoc(doc(asUser(uid), "reporting_issues/issue-1"), { text: uid }));
+    }
+    for (const uid of others([...admins, "dev-roles"])) {
+      await assertFails(getDocs(collection(asUser(uid), "reporting_issues")));
+      await assertFails(setDoc(doc(asUser(uid), "reporting_issues/issue-1"), { text: uid }));
+    }
+  });
+
+  test("an owner check next to an admin check still passes for a user with no portal document", async () => {
+    await assertSucceeds(setDoc(doc(asUser("user-1"), "favorites_v2/user-1"), { value: 1 }));
+    await assertSucceeds(getDoc(doc(asUser("user-1"), "favorites_v2/user-1")));
+    await assertFails(getDoc(doc(asUser("cm-1"), "favorites_v2/user-1")));
+    await assertSucceeds(getDoc(doc(asUser("admin-roles"), "favorites_v2/user-1")));
   });
 });
 

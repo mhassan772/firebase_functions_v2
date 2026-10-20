@@ -1649,3 +1649,354 @@ test("malformed Play store notifications are rejected with their own codes", () 
     "google-notification-type-invalid"
   );
 });
+
+// ---------------------------------------------------------------------------
+// Dashboard stats
+// ---------------------------------------------------------------------------
+
+const {
+  computeStats,
+  STATS_DAILY_DAYS,
+  STATS_MONTHLY_MONTHS,
+} = require("../lib/services/subscriptions/stats");
+
+const STATS_NOW = new Date("2026-10-20T10:00:00.000Z"); // 13:00 in Cairo
+const STATS_DAY = 24 * 60 * 60 * 1000;
+const at = (iso) => Timestamp.fromDate(new Date(iso));
+const daysAgo = (days) => Timestamp.fromDate(new Date(STATS_NOW.getTime() - days * STATS_DAY));
+const statsInput = (parts = {}) => ({
+  masters: [],
+  slots: [],
+  events: [],
+  egyptRequests: [],
+  migrationRequests: [],
+  archive: [],
+  ...parts,
+});
+const masterRow = (uid, data) => ({
+  id: uid,
+  data: { active: true, status: "active", environment: "production", expiresAt: daysAgo(-60), ...data },
+});
+const storeSlot = (uid, platform, environment, createdAt, expiresAt = daysAgo(-30)) => ({
+  id: `${uid}_${platform}_${environment}`,
+  data: { uid, platform, environment, createdAt, expiresAt, active: true, status: "active" },
+});
+const manualSlotRow = (uid, grants, createdAt = at("2026-10-11T09:00:00.000Z")) => ({
+  id: `${uid}_manual_production`,
+  data: { uid, platform: "manual", environment: "production", createdAt, expiresAt: daysAgo(-30), grants },
+});
+const grantRow = (grantId, grantedAt, extra = {}) => ({
+  grantId,
+  kind: "months",
+  months: 3,
+  base: "extend",
+  grantedAt,
+  grantedBy: "admin-1",
+  status: "active",
+  metadata: { grantSource: "admin_manual_add" },
+  ...extra,
+});
+const eventRow = (id, platform, environment, eventType, eventAt) => ({
+  id,
+  data: { platform, environment, eventType, eventAt, createdAt: eventAt },
+});
+const requestRow = (id, data, updateTime) => ({
+  id,
+  data: { amount_paid: 200, payment_method: "Instapay", duration: "3_months", ...data },
+  updateTime,
+});
+const dayOf = (document, date) => document.daily.find((point) => point.date === date);
+const monthOf = (document, month) => document.monthly.find((point) => point.month === month);
+
+test("stats: an empty database gives a full, zeroed document", () => {
+  const { document, archiveRows } = computeStats(statsInput(), STATS_NOW);
+  assert.equal(document.schemaVersion, 1);
+  assert.equal(document.generatedAt, STATS_NOW.toISOString());
+  assert.equal(document.timeZone, "Africa/Cairo");
+  assert.equal(document.today, "2026-10-20");
+  assert.equal(document.daily.length, STATS_DAILY_DAYS);
+  assert.equal(document.daily[0].date, "2026-07-23");
+  assert.equal(document.daily.at(-1).date, "2026-10-20");
+  assert.equal(document.daily.at(-1).estimated, false);
+  assert.ok(document.daily.slice(0, -1).every((point) => point.estimated));
+  assert.equal(document.monthly.length, STATS_MONTHLY_MONTHS);
+  assert.equal(document.monthly[0].month, "2024-11");
+  assert.equal(document.monthly.at(-1).month, "2026-10");
+  assert.deepEqual(document.summary.active, {
+    total: 0, apple: 0, google: 0, manual: 0,
+    manualBySource: { egypt_request: 0, migration_restoration: 0, admin_manual_add: 0, legacy_import: 0, unknown: 0 },
+  });
+  assert.equal(document.summary.activeChange30d, null);
+  assert.equal(document.summary.medianHoursToApproval30d, null);
+  assert.deepEqual(document.summary.pendingRequests, { egypt: 0, migration: 0 });
+  assert.deepEqual(document.summary.revenueByMethodThisMonth, {});
+  // The first run backfills the whole window.
+  assert.equal(archiveRows.length, STATS_DAILY_DAYS);
+  // Firestore rejects undefined anywhere in a document.
+  assert.ok(!JSON.stringify(document, (key, value) => (value === undefined ? "UNDEFINED" : value)).includes("UNDEFINED"));
+});
+
+test("stats: active counts production masters that have not expired, whatever the stored flag says", () => {
+  const { document } = computeStats(
+    statsInput({
+      masters: [
+        masterRow("apple-1", { platform: "apple", autoRenewing: true }),
+        masterRow("google-1", { platform: "google", autoRenewing: false, expiresAt: daysAgo(-3) }),
+        masterRow("manual-1", { platform: "manual", manual: { grantSource: "egypt_request" }, expiresAt: daysAgo(-20) }),
+        masterRow("manual-2", { platform: "manual" }),
+        // Stale: still flagged active, but the expiry has passed.
+        masterRow("stale-1", { platform: "apple", expiresAt: daysAgo(1) }),
+        // Sandbox only.
+        masterRow("sandbox-1", { platform: "apple", environment: "sandbox" }),
+        masterRow("off-1", { platform: "google", active: false }),
+      ],
+      slots: [storeSlot("sandbox-1", "apple", "sandbox", daysAgo(2))],
+    }),
+    STATS_NOW
+  );
+  const { active } = document.summary;
+  assert.deepEqual(
+    { total: active.total, apple: active.apple, google: active.google, manual: active.manual },
+    { total: 4, apple: 1, google: 1, manual: 2 }
+  );
+  assert.equal(active.manualBySource.egypt_request, 1);
+  assert.equal(active.manualBySource.unknown, 1);
+  assert.deepEqual(document.daily.at(-1).active, { total: 4, apple: 1, google: 1, manual: 2 });
+  assert.equal(document.summary.expiring7d, 1);
+  assert.equal(document.summary.expiring7dNotRenewing, 1);
+  assert.equal(document.summary.expiring30d, 2);
+  // The sandbox slot never makes its user new.
+  assert.equal(document.summary.newThisMonth, 0);
+});
+
+test("stats: a user with a store and a manual source is one subscriber, new once, at the earliest start", () => {
+  const { document } = computeStats(
+    statsInput({
+      masters: [
+        masterRow("both-1", {
+          platform: "apple",
+          sources: [
+            { platform: "apple", environment: "production", status: "active", expiresAt: daysAgo(-30) },
+            { platform: "manual", environment: "production", status: "active", expiresAt: daysAgo(-10) },
+            { platform: "google", environment: "test", status: "active", expiresAt: daysAgo(-10) },
+          ],
+        }),
+      ],
+      slots: [
+        storeSlot("both-1", "apple", "production", at("2026-10-05T08:00:00.000Z")),
+        manualSlotRow("both-1", [grantRow("op-both-1", at("2026-10-02T08:00:00.000Z"), { months: 1 })], at("2026-10-02T08:00:00.000Z")),
+      ],
+    }),
+    STATS_NOW
+  );
+  assert.equal(document.summary.active.total, 1);
+  assert.equal(document.summary.activeMultiSource, 1);
+  assert.equal(document.summary.newThisMonth, 1);
+  assert.equal(dayOf(document, "2026-10-02").new, 1);
+  assert.equal(dayOf(document, "2026-10-05").new, 0);
+  // Estimated: manual only on the 3rd, the store slot is the longer source from the 5th.
+  assert.deepEqual(dayOf(document, "2026-10-03").active, { total: 1, apple: 0, google: 0, manual: 1 });
+  assert.deepEqual(dayOf(document, "2026-10-06").active, { total: 1, apple: 1, google: 0, manual: 0 });
+});
+
+test("stats: a reversed grant is neither a start nor a grant, and an undated legacy baseline is never new", () => {
+  const importedAt = at("2026-10-11T09:00:00.000Z");
+  const { document } = computeStats(
+    statsInput({
+      slots: [
+        manualSlotRow("reversed-1", [
+          grantRow("op-reversed", at("2026-10-12T09:00:00.000Z"), { status: "reversed", statusChangedAt: at("2026-10-12T10:00:00.000Z") }),
+        ]),
+        // The old document had no date, so the import dated the baseline at the import.
+        manualSlotRow("undated-1", [
+          grantRow("legacy_doc-undated", importedAt, { kind: "absolute", expiresAt: daysAgo(-40), metadata: { grantSource: "legacy_import", amountPaid: 700 } }),
+        ], importedAt),
+        // The old document carried its paid date, months before the import.
+        manualSlotRow("dated-1", [
+          grantRow("legacy_doc-dated", at("2026-05-12T18:27:39.000Z"), { kind: "absolute", expiresAt: daysAgo(-40), metadata: { grantSource: "legacy_import" } }),
+        ], importedAt),
+      ],
+    }),
+    STATS_NOW
+  );
+  assert.equal(dayOf(document, "2026-10-11").new, 0);
+  assert.equal(dayOf(document, "2026-10-11").manualGrants, 0);
+  assert.equal(dayOf(document, "2026-10-12").new, 0);
+  assert.equal(dayOf(document, "2026-10-12").manualGrants, 0);
+  assert.equal(monthOf(document, "2026-05").new, 1);
+  assert.equal(monthOf(document, "2026-05").manualGrants, 1);
+  assert.equal(document.summary.newThisMonth, 0);
+  // An undated amount is left out rather than dated at the import.
+  assert.equal(document.summary.revenueThisMonthEgp, 0);
+  // Both baselines still count as active before the import in the estimate.
+  assert.equal(document.daily[0].active.manual, 2);
+});
+
+test("stats: store events count by type in production only, and the Google TEST ping is ignored", () => {
+  const { document } = computeStats(
+    statsInput({
+      events: [
+        eventRow("e1", "apple", "production", "DID_RENEW", at("2026-10-19T08:00:00.000Z")),
+        eventRow("e2", "google", "production", "SUBSCRIPTION_RENEWED", at("2026-10-19T09:00:00.000Z")),
+        eventRow("e3", "apple", "production", "EXPIRED", at("2026-10-19T09:00:00.000Z")),
+        eventRow("e4", "google", "production", "SUBSCRIPTION_EXPIRED", at("2026-10-19T09:00:00.000Z")),
+        eventRow("e5", "apple", "production", "REFUND", at("2026-10-19T09:00:00.000Z")),
+        eventRow("e6", "google", "production", "SUBSCRIPTION_REVOKED", at("2026-10-19T09:00:00.000Z")),
+        eventRow("e7", "google", "production", "VOIDED_PURCHASE", at("2026-10-19T09:00:00.000Z")),
+        eventRow("e8", "google", "test", "TEST", at("2026-10-19T09:00:00.000Z")),
+        eventRow("e9", "google", "test", "SUBSCRIPTION_RENEWED", at("2026-10-19T09:00:00.000Z")),
+        eventRow("e10", "apple", "sandbox", "REFUND", at("2026-10-19T09:00:00.000Z")),
+        eventRow("e11", "apple", "production", "DID_CHANGE_RENEWAL_STATUS", at("2026-10-19T09:00:00.000Z")),
+      ],
+    }),
+    STATS_NOW
+  );
+  const day = dayOf(document, "2026-10-19");
+  assert.deepEqual(
+    { renewals: day.renewals, expirations: day.expirations, refunds: day.refunds },
+    { renewals: 2, expirations: 2, refunds: 3 }
+  );
+});
+
+test("stats: a request approved after it was created is received, approved and paid on its own days", () => {
+  const createdAt = at("2026-10-14T06:00:00.000Z");
+  const approvedAt = at("2026-10-15T08:00:00.000Z");
+  const { document } = computeStats(
+    statsInput({
+      egyptRequests: [
+        requestRow("req-1", { user_guid: "egypt-1", status: "approved", amount_paid: 700, created_at: createdAt }, new Date("2026-10-18T00:00:00.000Z")),
+        // Rejected while pending: no grant, so the last write dates it.
+        requestRow("req-2", { user_guid: "egypt-2", status: "rejected", created_at: createdAt }, new Date("2026-10-16T09:00:00.000Z")),
+        requestRow("req-3", { user_guid: "egypt-3", status: "pending", created_at: createdAt }),
+      ],
+      migrationRequests: [
+        { id: "mig-1", data: { user_guid: "mig-1", status: "pending", created_at: createdAt } },
+      ],
+      slots: [
+        manualSlotRow("egypt-1", [
+          grantRow("subscriptions_to_be_approved_req-1_r1", approvedAt, {
+            queue: { collection: "subscriptions_to_be_approved", id: "req-1" },
+            metadata: { grantSource: "egypt_request", amountPaid: 700 },
+          }),
+        ], approvedAt),
+      ],
+    }),
+    STATS_NOW
+  );
+  assert.equal(dayOf(document, "2026-10-14").requestsReceived, 4);
+  assert.equal(dayOf(document, "2026-10-15").requestsApproved, 1);
+  assert.equal(dayOf(document, "2026-10-18").requestsApproved, 0);
+  assert.equal(dayOf(document, "2026-10-16").requestsRejected, 1);
+  assert.deepEqual(document.summary.pendingRequests, { egypt: 1, migration: 1 });
+  assert.equal(document.summary.medianHoursToApproval30d, 26);
+  // Paid on the request's date, once, although the grant carries the amount too.
+  assert.equal(dayOf(document, "2026-10-14").revenueEgp, 700);
+  assert.equal(dayOf(document, "2026-10-15").revenueEgp, 0);
+  assert.deepEqual(document.summary.revenueByMethodThisMonth, { Instapay: 700 });
+  assert.equal(dayOf(document, "2026-10-15").new, 1);
+});
+
+test("stats: an old-portal approval is dated by the legacy baseline, whose amount is the same payment", () => {
+  const { document } = computeStats(
+    statsInput({
+      egyptRequests: [
+        requestRow("old-1", { user_guid: "old-1", status: "approved", amount_paid: 700, payment_method: "VodafoneCash", created_at: at("2026-10-07T06:52:58.000Z") }, new Date("2026-10-19T00:00:00.000Z")),
+      ],
+      slots: [
+        manualSlotRow("old-1", [
+          grantRow("legacy_old-1", at("2026-10-08T17:54:07.000Z"), {
+            kind: "absolute",
+            expiresAt: daysAgo(-300),
+            metadata: { grantSource: "legacy_import", amountPaid: 700, paymentMethod: "VodafoneCash" },
+          }),
+        ]),
+        manualSlotRow("add-1", [
+          grantRow("op-add-1", at("2026-10-09T10:00:00.000Z"), { metadata: { grantSource: "admin_manual_add", amountPaid: 200, paymentMethod: "Instapay" } }),
+          grantRow("op-add-2", at("2026-10-09T11:00:00.000Z"), { status: "reversed", metadata: { grantSource: "admin_manual_add", amountPaid: 200 } }),
+        ]),
+      ],
+    }),
+    STATS_NOW
+  );
+  assert.equal(dayOf(document, "2026-10-08").requestsApproved, 1);
+  assert.equal(document.summary.revenueThisMonthEgp, 900);
+  assert.deepEqual(document.summary.revenueByMethodThisMonth, { VodafoneCash: 700, Instapay: 200 });
+  assert.equal(document.summary.medianHoursToApproval30d, 35);
+});
+
+test("stats: days and months follow Cairo, not UTC", () => {
+  // 21:30 UTC on 30 September is 00:30 on 1 October in Cairo.
+  const lateSeptemberUtc = at("2026-09-30T21:30:00.000Z");
+  const { document } = computeStats(
+    statsInput({
+      slots: [manualSlotRow("cairo-1", [grantRow("op-cairo", lateSeptemberUtc)], lateSeptemberUtc)],
+      events: [eventRow("e1", "apple", "production", "DID_RENEW", at("2026-09-30T20:59:00.000Z"))],
+    }),
+    STATS_NOW
+  );
+  assert.equal(dayOf(document, "2026-10-01").new, 1);
+  assert.equal(dayOf(document, "2026-09-30").new, 0);
+  assert.equal(monthOf(document, "2026-10").new, 1);
+  assert.equal(monthOf(document, "2026-09").new, 0);
+  assert.equal(monthOf(document, "2026-09").renewals, 1);
+  assert.equal(document.summary.newThisMonth, 1);
+  assert.equal(document.summary.newLastMonth, 0);
+});
+
+test("stats: manual access that ran out is an expiration unless a later grant or a store subscription continued it", () => {
+  const { document } = computeStats(
+    statsInput({
+      slots: [
+        // One month from 1 Sep ends 1 Oct; the next grant comes on 5 Oct.
+        manualSlotRow("gap-1", [
+          grantRow("op-gap-1", at("2026-09-01T10:00:00.000Z"), { months: 1 }),
+          grantRow("op-gap-2", at("2026-10-05T10:00:00.000Z"), { months: 1 }),
+        ]),
+        // Ends 1 Oct as well, but an Apple subscription covers that moment.
+        manualSlotRow("covered-1", [grantRow("op-covered", at("2026-09-01T10:00:00.000Z"), { months: 1 })]),
+        storeSlot("covered-1", "apple", "production", at("2026-09-20T10:00:00.000Z")),
+        // Revoked: not an expiration.
+        manualSlotRow("revoked-1", [
+          grantRow("op-revoked", at("2026-09-01T10:00:00.000Z"), { months: 1, status: "revoked", statusChangedAt: at("2026-09-10T10:00:00.000Z") }),
+        ]),
+      ],
+    }),
+    STATS_NOW
+  );
+  assert.equal(dayOf(document, "2026-10-01").expirations, 1);
+  assert.equal(monthOf(document, "2026-10").expirations, 1);
+  assert.equal(monthOf(document, "2026-09").expirations, 0);
+  // The revoked account is active in the estimate only until it was revoked.
+  assert.equal(dayOf(document, "2026-09-05").active.manual, 3);
+  assert.equal(dayOf(document, "2026-09-15").active.manual, 2);
+});
+
+test("stats: recorded days replace estimates, and only today, yesterday and missing days are written", () => {
+  const recorded = (date, total) => ({
+    id: date,
+    data: { date, estimated: false, active: { total, apple: total, google: 0, manual: 0 } },
+  });
+  const archive = [];
+  for (let offset = 1; offset < STATS_DAILY_DAYS; offset++) {
+    const date = new Date(Date.UTC(2026, 9, 20 - offset)).toISOString().slice(0, 10);
+    if (date !== "2026-10-10" && date !== "2026-09-25") {
+      archive.push(recorded(date, 5));
+    }
+  }
+  archive.push({ id: "2026-09-25", data: { date: "2026-09-25", estimated: true, active: { total: 1, apple: 1, google: 0, manual: 0 } } });
+  const { document, archiveRows } = computeStats(
+    statsInput({ archive, masters: [masterRow("apple-1", { platform: "apple" })] }),
+    STATS_NOW
+  );
+  assert.deepEqual(dayOf(document, "2026-10-19").active, { total: 5, apple: 5, google: 0, manual: 0 });
+  assert.equal(dayOf(document, "2026-10-19").estimated, false);
+  assert.equal(dayOf(document, "2026-10-10").estimated, true);
+  // An estimated archive row is estimated again, not trusted as recorded.
+  assert.equal(dayOf(document, "2026-09-25").estimated, true);
+  assert.equal(document.summary.activeChange30d, 1 - 5);
+  assert.deepEqual(
+    archiveRows.map((row) => row.date).sort(),
+    ["2026-10-10", "2026-10-19", "2026-10-20"]
+  );
+  assert.equal(archiveRows.find((row) => row.date === "2026-10-20").estimated, false);
+});

@@ -4,7 +4,7 @@ import { REGION } from "../../config/constants";
 import { validateRequestAuthentication } from "../../utils/authentication";
 import { setCorsHeaders, handleOptionsRequest } from "../../utils/cors";
 import { handleS3Upload } from "../../handlers/s3Handlers";
-import { requireAdminPortalUser } from "../../utils/adminRole";
+import { requirePortalRole } from "../../utils/adminRole";
 
 export const admin_upload_to_S3 = functions.region(REGION).https.onRequest(
   async (req: Request, res: Response) => {
@@ -25,7 +25,7 @@ export const admin_upload_to_S3 = functions.region(REGION).https.onRequest(
       }
 
       try {
-        await requireAdminPortalUser(user_guid);
+        await requirePortalRole(user_guid, "content-manager");
       } catch {
         res.status(403).json({
           code: 403,

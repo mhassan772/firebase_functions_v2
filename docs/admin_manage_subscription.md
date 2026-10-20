@@ -45,9 +45,18 @@ adds, `legacy_${docId}` for the baseline.
 
 ## Callable
 
-Region `europe-west2`, 540 s timeout. Caller must be signed in and have
-`users_adminv2/{uid}.role == "admin"`. Every request is `{ action, ...fields }`
-with exactly the fields listed; extra fields are rejected.
+Region `europe-west2`, 540 s timeout. Caller must be signed in and hold the
+`admin` portal role. Roles are read from `users_adminv2/{uid}`: a `roles` list
+alone decides, otherwise the legacy `role` string (`src/utils/adminRole.ts`,
+mirrored by the helpers at the top of `firestore.rules`). Every request is `{ action, ...fields }` with exactly the fields listed;
+extra fields are rejected.
+
+A caller whose roles include `egypt-subscription-approval` but not `admin` may
+use only `get`, `grant` with a `queue`, `adjust` and `reverseRequest`, and the
+last two only on a grant that came from a queue request (`grant.queue` set);
+any other grant is refused with `grant-not-from-request`. Every other action is
+refused with `not-subscription-admin`. The start log records `access: "admin"`
+or `"queue"`.
 
 `user` is `{ uid }` or `{ email }`, optionally with `hashedId` (the 64-hex id
 the user pasted to support). The hash never finds an account; it only confirms
@@ -66,6 +75,7 @@ Errors are `HttpsError` with `details.code` set to the safe code below.
 | `revokeAccess` | `user, opId, reason, expectedLedgerRevision` | `MutationResult` |
 | `setBaseline` | `user, opId, expiresAt (ISO), reason, expectedLedgerRevision` | `MutationResult` |
 | `listManual` | `limit?, startAfterUpdatedAt?` (the previous page's `nextStartAfterUpdatedAt`, an opaque `"<iso>|<docId>"` cursor) | `{ rows: ManualSlotListRow[], nextStartAfterUpdatedAt? }` |
+| `refreshStats` | none | `{ generatedAt: ISO }` (rebuilds `subscription_stats/current` now; see Dashboard stats) |
 | `migrateLegacy` | `runId, dryRun: true` | `MigrationReport` (the plan; this action never writes) |
 | `importLegacyRows` | `runId, rows: [{ docId, uid }]` (1 to 200, the plan's `imported` rows) | `MigrationReport` |
 | `getMigrationRun` | `runId` | `MigrationReport` |
@@ -109,6 +119,18 @@ is not listed is a no-op.
 needs no `listDevices` after loading an account. The limit comes from
 `settings_app/subscription.max_number_of_devices` (default 2; the app reads the same document)
 plus the account's `extra_device_seats`.
+
+### Dashboard stats
+
+`refreshStats` runs the same rebuild as the `refreshSubscriptionStats` job,
+which runs daily at 23:55 Cairo (`src/services/subscriptions/stats.ts`). It scans the subscription
+collections and both request queues, then writes `subscription_stats/current`,
+the one document the dashboard reads, and the day's exact totals to
+`subscription_stats_daily/{YYYY-MM-DD}` (Cairo days). Admins read both from the
+client; nobody writes them except the backend. The document's shape is the
+portal's `src/lib/subscriptionStatsTypes.ts`, and the field definitions are the
+doc comment on `computeStats`. Past days without an archive row are estimated
+and carry `estimated: true`.
 
 ### Shapes
 
@@ -155,7 +177,7 @@ MigrationReport {
 approval that predates the ledger; offer `setBaseline` or `revokeAccess`
 instead), `grant-not-active`, `duration-unchanged`,
 `hashed-id-mismatch`, `email-not-found`, `uid-not-found`, `manual-slot-disabled`,
-`not-subscription-admin`, `migration-run-exists` (a live run id was reused; pick a new one),
+`not-subscription-admin`, `grant-not-from-request`, `migration-run-exists` (a live run id was reused; pick a new one),
 `queue-id-invalid`, `subscription-not-found` (device actions on an account with
 no master), `seats-invalid`, `device-id-invalid`.
 

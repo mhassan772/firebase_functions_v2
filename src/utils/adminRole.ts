@@ -3,44 +3,60 @@ import { SubscriptionError } from "../services/subscriptions/errors";
 
 export const ADMIN_USERS_COLLECTION = "users_adminv2";
 
-/** The portal roles that may change subscriptions. Managers and viewers may not. */
-const SUBSCRIPTION_ADMIN_ROLES = new Set(["admin"]);
+/** The role that grants every other role. */
+export const PORTAL_ADMIN_ROLE = "admin";
 
-export async function adminRoleOf(uid: string): Promise<string | undefined> {
-  const snapshot = await admin
-    .firestore()
-    .collection(ADMIN_USERS_COLLECTION)
-    .doc(uid)
-    .get();
-  const role = snapshot.get("role");
-  return typeof role === "string" ? role : undefined;
+/**
+ * The effective roles of a users_adminv2 document's data, by the same rule as firestore.rules:
+ * a `roles` list alone decides; otherwise the single `role` string; otherwise none.
+ */
+export function portalRolesFromData(data: Record<string, unknown> | undefined): string[] {
+  if (!data) {
+    return [];
+  }
+  if (Array.isArray(data.roles)) {
+    return data.roles.filter((role): role is string => typeof role === "string");
+  }
+  return typeof data.role === "string" ? [data.role] : [];
 }
 
-/** Any active portal user. Matches the check the upload endpoint has always made. */
-export async function requireAdminPortalUser(uid: string): Promise<void> {
+/** True when `roles` holds `role`, or holds admin, which implies every role. */
+export function hasPortalRole(roles: readonly string[], role: string): boolean {
+  return roles.includes(PORTAL_ADMIN_ROLE) || roles.includes(role);
+}
+
+/** The effective roles of a portal user; empty for a uid with no users_adminv2 document. */
+export async function portalRolesOf(uid: string): Promise<string[]> {
   const snapshot = await admin
     .firestore()
     .collection(ADMIN_USERS_COLLECTION)
     .doc(uid)
     .get();
-  if (!snapshot.exists) {
+  return snapshot.exists ? portalRolesFromData(snapshot.data()) : [];
+}
+
+/** A portal user who holds `role` or admin. Returns the caller's effective roles. */
+export async function requirePortalRole(uid: string, role: string): Promise<string[]> {
+  const roles = await portalRolesOf(uid);
+  if (!hasPortalRole(roles, role)) {
     throw new SubscriptionError(
       "forbidden",
-      "not-admin-portal-user",
-      "This account is not an admin portal user."
+      "missing-portal-role",
+      "This account does not have the portal role this action needs."
     );
   }
+  return roles;
 }
 
-/** A portal user whose role may grant or revoke subscriptions. */
-export async function requireSubscriptionAdmin(uid: string): Promise<string> {
-  const role = await adminRoleOf(uid);
-  if (!role || !SUBSCRIPTION_ADMIN_ROLES.has(role)) {
+/** A portal user who may grant or revoke subscriptions: admins only. */
+export async function requireSubscriptionAdmin(uid: string): Promise<string[]> {
+  const roles = await portalRolesOf(uid);
+  if (!hasPortalRole(roles, PORTAL_ADMIN_ROLE)) {
     throw new SubscriptionError(
       "forbidden",
       "not-subscription-admin",
       "Only an admin may change subscriptions."
     );
   }
-  return role;
+  return roles;
 }

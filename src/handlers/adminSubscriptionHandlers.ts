@@ -29,6 +29,7 @@ import {
   SUBSCRIPTION_STATE_COLLECTION,
   timestampDate,
 } from "../services/subscriptions/persistence";
+import { refreshSubscriptionStats } from "../services/subscriptions/stats";
 import {
   ResolvedUser,
   isHexHash,
@@ -44,7 +45,11 @@ import {
   adminManageDevices,
   assertExtraSeats,
 } from "../services/subscriptions/adminDevices";
-import { requireSubscriptionAdmin } from "../utils/adminRole";
+import {
+  PORTAL_ADMIN_ROLE,
+  hasPortalRole,
+  portalRolesOf,
+} from "../utils/adminRole";
 import {
   assertExactKeys,
   isPlainRecord,
@@ -65,7 +70,13 @@ const MAX_LIST_LIMIT = 500;
 const MAX_TEXT = 500;
 const MAX_IMPORT_ROWS = 200;
 
-type AdminAction =
+/** The role limited to the Egypt and migration request queues. */
+export const QUEUE_APPROVER_ROLE = "egypt-subscription-approval";
+
+/** What a caller may do here: everything, or only work the request queues. */
+export type SubscriptionAccess = "admin" | "queue";
+
+export type AdminAction =
   | "get"
   | "grant"
   | "adjust"
@@ -73,6 +84,7 @@ type AdminAction =
   | "revokeAccess"
   | "setBaseline"
   | "listManual"
+  | "refreshStats"
   | "migrateLegacy"
   | "importLegacyRows"
   | "getMigrationRun"
@@ -110,10 +122,11 @@ export async function handleAdminManageSubscription(
     const request = requireRecord(data);
     action = readAction(request.action);
     const adminUid = requireAuthenticatedUid(context);
-    await requireSubscriptionAdmin(adminUid);
-    functions.logger.info("admin_subscription_start", { operationId, action, adminUid });
+    const access = subscriptionAccessFor(await portalRolesOf(adminUid));
+    assertActionAllowed(access, action, request);
+    functions.logger.info("admin_subscription_start", { operationId, action, adminUid, access });
 
-    const result = await dispatch(action, request, adminUid);
+    const result = await dispatch(action, request, adminUid, access === "queue");
 
     functions.logger.info("admin_subscription_success", { operationId, action, adminUid });
     return result;
@@ -134,10 +147,63 @@ export async function handleAdminManageSubscription(
   }
 }
 
+/** Admins get every action; a queue approver only the queue's; anyone else nothing. */
+export function subscriptionAccessFor(roles: readonly string[]): SubscriptionAccess | undefined {
+  if (hasPortalRole(roles, PORTAL_ADMIN_ROLE)) {
+    return "admin";
+  }
+  return roles.includes(QUEUE_APPROVER_ROLE) ? "queue" : undefined;
+}
+
+/**
+ * A queue approver may look an account up, grant from a request, and adjust or
+ * reverse a grant; applyManualMutation checks that the grant came from a request.
+ */
+export function assertActionAllowed(
+  access: SubscriptionAccess | undefined,
+  action: AdminAction,
+  request: Record<string, unknown>
+): void {
+  if (access === "admin") {
+    return;
+  }
+  const allowed =
+    access === "queue" &&
+    (action === "get" ||
+      action === "adjust" ||
+      action === "reverseRequest" ||
+      (action === "grant" && isRequestApproval(request)));
+  if (!allowed) {
+    throw new SubscriptionError(
+      "forbidden",
+      "not-subscription-admin",
+      "Only an admin may change subscriptions."
+    );
+  }
+}
+
+/** The grant source each request queue approves under, so an approval can't be recorded as an admin add. */
+const QUEUE_GRANT_SOURCES: Record<string, ManualGrantSource> = {
+  subscriptions_to_be_approved: "egypt_request",
+  subscription_migration_restoration: "migration_restoration",
+};
+
+/** A grant that approves a queued request, under that queue's own grant source. */
+function isRequestApproval(request: Record<string, unknown>): boolean {
+  const queue = request.queue;
+  const metadata = request.metadata;
+  if (!isPlainRecord(queue) || !isPlainRecord(metadata) || typeof queue.collection !== "string") {
+    return false;
+  }
+  const source = QUEUE_GRANT_SOURCES[queue.collection];
+  return source !== undefined && metadata.grantSource === source;
+}
+
 async function dispatch(
   action: AdminAction,
   request: Record<string, unknown>,
-  adminUid: string
+  adminUid: string,
+  queueOnly: boolean
 ): Promise<unknown> {
   switch (action) {
     case "get": {
@@ -185,7 +251,7 @@ async function dispatch(
         metadata: readMetadata(request.metadata),
         queue: request.queue === undefined ? undefined : readQueue(request.queue),
       };
-      return mutate(request, adminUid, mutation);
+      return mutate(request, adminUid, mutation, queueOnly);
     }
     case "adjust": {
       assertExactKeys(request, [
@@ -196,12 +262,17 @@ async function dispatch(
         "targetMonths",
         "expectedLedgerRevision",
       ]);
-      return mutate(request, adminUid, {
-        action: "adjust",
-        grantId: readText(request.grantId, "grantId"),
-        targetMonths: assertMonths(request.targetMonths),
-        expectedLedgerRevision: readRevision(request.expectedLedgerRevision),
-      });
+      return mutate(
+        request,
+        adminUid,
+        {
+          action: "adjust",
+          grantId: readText(request.grantId, "grantId"),
+          targetMonths: assertMonths(request.targetMonths),
+          expectedLedgerRevision: readRevision(request.expectedLedgerRevision),
+        },
+        queueOnly
+      );
     }
     case "reverseRequest": {
       assertExactKeys(request, [
@@ -212,12 +283,17 @@ async function dispatch(
         "reason",
         "expectedLedgerRevision",
       ]);
-      return mutate(request, adminUid, {
-        action: "reverseRequest",
-        grantId: readText(request.grantId, "grantId"),
-        reason: readText(request.reason, "reason"),
-        expectedLedgerRevision: readRevision(request.expectedLedgerRevision),
-      });
+      return mutate(
+        request,
+        adminUid,
+        {
+          action: "reverseRequest",
+          grantId: readText(request.grantId, "grantId"),
+          reason: readText(request.reason, "reason"),
+          expectedLedgerRevision: readRevision(request.expectedLedgerRevision),
+        },
+        queueOnly
+      );
     }
     case "revokeAccess": {
       assertExactKeys(request, ["action", "user", "opId", "reason", "expectedLedgerRevision"]);
@@ -255,6 +331,12 @@ async function dispatch(
           ? undefined
           : readText(request.startAfterUpdatedAt, "startAfterUpdatedAt")
       );
+    }
+    case "refreshStats": {
+      // The portal's "Refresh now"; the same run the daily job makes.
+      assertExactKeys(request, ["action"]);
+      const { generatedAt } = await refreshSubscriptionStats();
+      return { generatedAt };
     }
     case "migrateLegacy": {
       // The planner. It only ever runs dry; a live import takes the reviewed rows.
@@ -312,11 +394,12 @@ async function deviceLimits(): Promise<DeviceLimits> {
 async function mutate(
   request: Record<string, unknown>,
   adminUid: string,
-  mutation: ManualMutation
+  mutation: ManualMutation,
+  queueOnly = false
 ): Promise<MutationResponse> {
   const user = await resolveUser(readUserReference(request.user));
   const result = await applyManualMutation(
-    { uid: user.uid, opId: readOpId(request.opId), actor: adminUid },
+    { uid: user.uid, opId: readOpId(request.opId), actor: adminUid, queueOnly },
     mutation
   );
   return { user, ...result };
@@ -412,6 +495,7 @@ function readAction(value: unknown): AdminAction {
     case "revokeAccess":
     case "setBaseline":
     case "listManual":
+    case "refreshStats":
     case "migrateLegacy":
     case "importLegacyRows":
     case "getMigrationRun":

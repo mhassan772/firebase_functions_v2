@@ -54,13 +54,14 @@ export const LEGACY_GRANT_PREFIX = "legacy_";
 // Time, in the zone the legacy data was written in
 // ---------------------------------------------------------------------------
 
-interface WallDate {
+export interface WallDate {
   year: number;
   month: number;
   day: number;
 }
 
-function wallDateIn(date: Date, timeZone: string): WallDate {
+/** The calendar date `date` falls on in the zone. */
+export function wallDateIn(date: Date, timeZone: string): WallDate {
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone,
     year: "numeric",
@@ -454,6 +455,11 @@ export interface MutationContext {
   /** Admin uid, or a system label for the migration. */
   actor: string;
   now?: Date;
+  /**
+   * Set for a caller limited to the request queue: adjust and reverseRequest
+   * then accept only a grant that came from a queue request.
+   */
+  queueOnly?: boolean;
 }
 
 export interface ManualGrantResponse {
@@ -532,6 +538,18 @@ export async function applyManualMutation(
       "invalid-input",
       "op-id-missing",
       "An operation id is required."
+    );
+  }
+  // The handler already refuses these; kept here so no other caller can widen a queue-only role.
+  const queueOnlyAllowed =
+    (mutation.action === "grant" && mutation.queue !== undefined) ||
+    mutation.action === "adjust" ||
+    mutation.action === "reverseRequest";
+  if (context.queueOnly && !queueOnlyAllowed) {
+    throw new SubscriptionError(
+      "forbidden",
+      "not-subscription-admin",
+      "Only an admin may change subscriptions."
     );
   }
 
@@ -648,7 +666,7 @@ export async function applyManualMutation(
         break;
       }
       case "adjust": {
-        const grant = requireAdjustableGrant(grants, mutation.grantId);
+        const grant = requireAdjustableGrant(grants, mutation.grantId, context.queueOnly === true);
         if (mutation.targetMonths === grant.months) {
           throw new SubscriptionError(
             "precondition",
@@ -665,7 +683,7 @@ export async function applyManualMutation(
         break;
       }
       case "reverseRequest": {
-        const grant = requireAdjustableGrant(grants, mutation.grantId);
+        const grant = requireAdjustableGrant(grants, mutation.grantId, context.queueOnly === true);
         grant.status = "reversed";
         grant.statusChangedAt = now;
         grant.statusReason = mutation.reason;
@@ -1071,13 +1089,24 @@ export function assertMonths(value: unknown): number {
   return value;
 }
 
-function requireAdjustableGrant(grants: ManualGrant[], grantId: string): ManualGrant {
+function requireAdjustableGrant(
+  grants: ManualGrant[],
+  grantId: string,
+  queueOnly: boolean
+): ManualGrant {
   const grant = grants.find((candidate) => candidate.grantId === grantId);
   if (!grant) {
     throw new SubscriptionError(
       "not-found",
       "grant-not-found",
       "No grant with that id exists on this account."
+    );
+  }
+  if (queueOnly && !grant.queue) {
+    throw new SubscriptionError(
+      "forbidden",
+      "grant-not-from-request",
+      "Only a grant made from a request in the queue can be changed with this role."
     );
   }
   if (isLegacyGrant(grant)) {
