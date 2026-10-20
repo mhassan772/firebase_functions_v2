@@ -159,6 +159,29 @@ describe("admin-only data", () => {
     await assertFails(getDocs(collection(asUser("user-1"), "reporting_issues")));
   });
 
+  test("subscription stats: admins read them, nobody writes them", async () => {
+    await env.withSecurityRulesDisabled(async (context) => {
+      const db = context.firestore();
+      await setDoc(doc(db, "subscription_stats/current"), { schemaVersion: 1 });
+      await setDoc(doc(db, "subscription_stats_daily/2026-10-20"), { date: "2026-10-20" });
+    });
+    for (const path of ["subscription_stats/current", "subscription_stats_daily/2026-10-20"]) {
+      const name = path.split("/")[0];
+      await assertSucceeds(getDoc(doc(asUser("admin-1"), path)));
+      await assertSucceeds(getDocs(collection(asUser("admin-1"), name)));
+      for (const db of [asUser("dev-1"), asUser("user-1"), asGuest()]) {
+        await assertFails(getDoc(doc(db, path)));
+        await assertFails(getDocs(collection(db, name)));
+      }
+      for (const db of [asUser("admin-1"), asUser("dev-1"), asUser("user-1"), asGuest()]) {
+        await assertFails(setDoc(doc(db, path), { schemaVersion: 2 }));
+        await assertFails(updateDoc(doc(db, path), { schemaVersion: 2 }));
+        await assertFails(deleteDoc(doc(db, path)));
+      }
+      await assertFails(setDoc(doc(asUser("admin-1"), `${name}/new-doc`), { value: 1 }));
+    }
+  });
+
   test("users_adminv2: nobody writes a role from the client", async () => {
     await assertFails(setDoc(doc(asUser("user-1"), "users_adminv2/user-1"), { role: "admin" }));
     await assertFails(setDoc(doc(asUser("admin-1"), "users_adminv2/user-1"), { role: "admin" }));

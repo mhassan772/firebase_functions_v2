@@ -537,6 +537,17 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    // Admin dashboard stats, rebuilt daily by refreshSubscriptionStats.
+    match /subscription_stats/{id} {
+      allow read: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+      allow write: if false;
+    }
+
+    match /subscription_stats_daily/{id} {
+      allow read: if request.auth != null && get(/databases/$(database)/documents/users_adminv2/$(request.auth.uid)).data.role == 'admin';
+      allow write: if false;
+    }
+
 		
     // DONATION PAGE
     // Storefront catalog: public read, server-only writes.

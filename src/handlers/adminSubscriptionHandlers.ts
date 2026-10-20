@@ -29,6 +29,7 @@ import {
   SUBSCRIPTION_STATE_COLLECTION,
   timestampDate,
 } from "../services/subscriptions/persistence";
+import { refreshSubscriptionStats } from "../services/subscriptions/stats";
 import {
   ResolvedUser,
   isHexHash,
@@ -73,6 +74,7 @@ type AdminAction =
   | "revokeAccess"
   | "setBaseline"
   | "listManual"
+  | "refreshStats"
   | "migrateLegacy"
   | "importLegacyRows"
   | "getMigrationRun"
@@ -256,6 +258,12 @@ async function dispatch(
           : readText(request.startAfterUpdatedAt, "startAfterUpdatedAt")
       );
     }
+    case "refreshStats": {
+      // The portal's "Refresh now"; the same run the daily job makes.
+      assertExactKeys(request, ["action"]);
+      const { generatedAt } = await refreshSubscriptionStats();
+      return { generatedAt };
+    }
     case "migrateLegacy": {
       // The planner. It only ever runs dry; a live import takes the reviewed rows.
       assertExactKeys(request, ["action", "runId", "dryRun"]);
@@ -412,6 +420,7 @@ function readAction(value: unknown): AdminAction {
     case "revokeAccess":
     case "setBaseline":
     case "listManual":
+    case "refreshStats":
     case "migrateLegacy":
     case "importLegacyRows":
     case "getMigrationRun":

@@ -54,13 +54,14 @@ export const LEGACY_GRANT_PREFIX = "legacy_";
 // Time, in the zone the legacy data was written in
 // ---------------------------------------------------------------------------
 
-interface WallDate {
+export interface WallDate {
   year: number;
   month: number;
   day: number;
 }
 
-function wallDateIn(date: Date, timeZone: string): WallDate {
+/** The calendar date `date` falls on in the zone. */
+export function wallDateIn(date: Date, timeZone: string): WallDate {
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone,
     year: "numeric",

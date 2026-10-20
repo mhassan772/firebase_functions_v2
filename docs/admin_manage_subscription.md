@@ -66,6 +66,7 @@ Errors are `HttpsError` with `details.code` set to the safe code below.
 | `revokeAccess` | `user, opId, reason, expectedLedgerRevision` | `MutationResult` |
 | `setBaseline` | `user, opId, expiresAt (ISO), reason, expectedLedgerRevision` | `MutationResult` |
 | `listManual` | `limit?, startAfterUpdatedAt?` (the previous page's `nextStartAfterUpdatedAt`, an opaque `"<iso>|<docId>"` cursor) | `{ rows: ManualSlotListRow[], nextStartAfterUpdatedAt? }` |
+| `refreshStats` | none | `{ generatedAt: ISO }` (rebuilds `subscription_stats/current` now; see Dashboard stats) |
 | `migrateLegacy` | `runId, dryRun: true` | `MigrationReport` (the plan; this action never writes) |
 | `importLegacyRows` | `runId, rows: [{ docId, uid }]` (1 to 200, the plan's `imported` rows) | `MigrationReport` |
 | `getMigrationRun` | `runId` | `MigrationReport` |
@@ -109,6 +110,18 @@ is not listed is a no-op.
 needs no `listDevices` after loading an account. The limit comes from
 `settings_app/subscription.max_number_of_devices` (default 2; the app reads the same document)
 plus the account's `extra_device_seats`.
+
+### Dashboard stats
+
+`refreshStats` runs the same rebuild as the `refreshSubscriptionStats` job,
+which runs daily at 23:55 Cairo (`src/services/subscriptions/stats.ts`). It scans the subscription
+collections and both request queues, then writes `subscription_stats/current`,
+the one document the dashboard reads, and the day's exact totals to
+`subscription_stats_daily/{YYYY-MM-DD}` (Cairo days). Admins read both from the
+client; nobody writes them except the backend. The document's shape is the
+portal's `src/lib/subscriptionStatsTypes.ts`, and the field definitions are the
+doc comment on `computeStats`. Past days without an archive row are estimated
+and carry `estimated: true`.
 
 ### Shapes
 
