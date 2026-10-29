@@ -6,6 +6,7 @@ import {
   emailNotVerifiedError,
   GetUrlsError,
   notFoundUserError,
+  PUBLIC_DOMAIN,
   validateGetUrlsRequest,
 } from "../../../src/shared/getUrlsCore";
 import { GetUrlsRequest, Recording } from "../../../src/types";
@@ -97,7 +98,10 @@ export async function handleGetUrls(request: Request, env: Env): Promise<Respons
       bookExists: bookDocs.get(guid) != null,
       recordings: recordingsByGuid.get(guid) ?? null,
     }));
-    const data = buildGroupedResponse(getUrlsRequest, sources);
+    // Country comes from Cloudflare's IP geolocation, not the request body.
+    // Unknown locations use the same domain as other non-Egypt requests.
+    const publicDomain = request.cf?.country === "EG" ? PUBLIC_DOMAIN : "https://books.good-storage.click";
+    const data = buildGroupedResponse(getUrlsRequest, sources, publicDomain);
 
     return json(200, buildSuccessResponse(data));
   } catch (error) {

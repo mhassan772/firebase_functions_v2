@@ -3,6 +3,7 @@ import { clearGoogleKeyCacheForTests } from "../src/auth/googleKeys";
 import { Env } from "../src/env";
 import { clearAccessTokenCacheForTests } from "../src/google/accessToken";
 import { handleGetUrls } from "../src/handler";
+import { buildGroupedResponse } from "../../../src/shared/getUrlsCore";
 import {
   createEnv,
   createSigningKey,
@@ -68,18 +69,20 @@ describe("handleGetUrls", () => {
     vi.unstubAllGlobals();
   });
 
-  async function call(body: unknown, init: { method?: string; auth?: string | null } = {}) {
+  async function call(body: unknown, init: { method?: string; auth?: string | null; country?: string } = {}) {
     const headers: Record<string, string> = { "content-type": "application/json" };
     const auth = init.auth === undefined ? `Bearer ${token}` : init.auth;
     if (auth !== null) headers.authorization = auth;
-    const response = await handleGetUrls(
-      new Request("https://example.test/getUrls", {
+    const request = new Request("https://example.test/getUrls", {
         method: init.method ?? "POST",
         headers,
         body: init.method === "GET" ? undefined : typeof body === "string" ? body : JSON.stringify(body),
-      }),
-      env
-    );
+      });
+    // Node's Request does not populate Cloudflare metadata from RequestInit.
+    if (init.country !== undefined) {
+      Object.defineProperty(request, "cf", { value: { country: init.country } });
+    }
+    const response = await handleGetUrls(request, env);
     return { status: response.status, body: (await response.json()) as any };
   }
 
@@ -106,6 +109,37 @@ describe("handleGetUrls", () => {
     });
 
     expect(body.data.bookB.recordings[0]).toMatchObject({ ext: "m4a", url: `${DOMAIN}/b/128/1.m4a` });
+  });
+
+  it.each([
+    ["EG", "https://good-storage.b-cdn.net"],
+    ["US", DOMAIN],
+    ["SA", DOMAIN],
+    ["XX", DOMAIN],
+    [undefined, DOMAIN],
+  ])("selects the audio domain for country %s", async (country, domain) => {
+    const { status, body } = await call({
+      books: [{ bookGuid: "bookA", quality: 64, reason: "stream" }],
+      platform: "ios",
+    }, { country });
+
+    expect(status).toBe(200);
+    expect(body.data.bookA.recordings.map((recording: { url: string }) => recording.url)).toEqual([
+      `${domain}/643/64/64_1.m4a`,
+      `${domain}/643/64/64_2.m4a`,
+    ]);
+  });
+
+  it("defaults to Bunny CDN for Firebase callers that do not override the domain", () => {
+    const data = buildGroupedResponse({
+      books: [{ bookGuid: "bookA", quality: 64, reason: "stream" }],
+      platform: "android",
+    }, [{
+      bookExists: true,
+      recordings: { "1": { name: "Part 1", duration: 10, url_list: { "64kb_url": "/a.opus" } } },
+    }]);
+
+    expect(data.bookA.recordings[0].url).toBe("https://good-storage.b-cdn.net/a.opus");
   });
 
   it("writes nothing to Firestore", async () => {

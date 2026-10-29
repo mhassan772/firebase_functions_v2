@@ -2,7 +2,7 @@
  * Runtime-independent logic of the getUrls endpoints.
  *
  * Shared by the Firebase functions and the Cloudflare Worker in `workers/get-urls`, so both
- * return identical responses. Must not import firebase-admin or any Node-only module.
+ * share response construction. Must not import firebase-admin or any Node-only module.
  */
 import {
   BookItem,
@@ -14,7 +14,8 @@ import {
   RecordingUrl,
 } from "../types";
 
-export const PUBLIC_DOMAIN = "https://books.good-storage.click";
+// export const PUBLIC_DOMAIN = "https://books.good-storage.click";
+export const PUBLIC_DOMAIN = "https://good-storage.b-cdn.net";
 
 const VALID_REASONS = ["download", "stream", "sample"];
 
@@ -87,7 +88,8 @@ export interface BookSource {
  */
 export function buildGroupedResponse(
   request: GetUrlsRequest,
-  sources: BookSource[]
+  sources: BookSource[],
+  publicDomain: string = PUBLIC_DOMAIN
 ): Record<string, BookUrlData> {
   const result: Record<string, BookUrlData> = {};
   const expiresAt = getExpiryTimestamp();
@@ -110,7 +112,7 @@ export function buildGroupedResponse(
 
     const recordings = Object.values(source.recordings);
     result[bookItem.bookGuid] = {
-      recordings: buildPublicUrls(recordings, bookItem.quality, request.platform),
+      recordings: buildPublicUrls(recordings, bookItem.quality, request.platform, publicDomain),
       expiresAt,
     };
   }
@@ -121,7 +123,8 @@ export function buildGroupedResponse(
 function buildPublicUrls(
   recordings: Recording[],
   quality: Quality,
-  platform: string
+  platform: string,
+  publicDomain: string
 ): RecordingUrl[] {
   const normalizedPlatform = platform?.toLowerCase() || "android";
 
@@ -138,8 +141,8 @@ function buildPublicUrls(
     // Only the first "opus" is replaced; released apps rely on these exact URLs.
     const url =
       normalizedPlatform === "ios"
-        ? `${PUBLIC_DOMAIN}/${path.replace("opus", "m4a")}`
-        : `${PUBLIC_DOMAIN}/${path}`;
+        ? `${publicDomain}/${path.replace("opus", "m4a")}`
+        : `${publicDomain}/${path}`;
 
     return {
       name: recording.name,

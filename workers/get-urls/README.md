@@ -4,6 +4,7 @@ A Cloudflare Worker that serves `getUrls` for users who cannot reach Google. Its
 
 ## Differences from the Firebase function
 
+- **Audio domain.** Egyptian IPs (`request.cf.country === "EG"`) receive `https://good-storage.b-cdn.net`; all other or unknown locations receive `https://books.good-storage.click`. Firebase always uses Bunny CDN.
 - **Expired ID tokens.** A token is accepted after it expires, for as long as its account is not deleted, disabled or revoked, because users who cannot reach Google cannot refresh it. Google's signing keys are kept in KV with no expiry so old tokens can still be verified.
 - **Disabled and revoked accounts.** Every request looks up the account, and a disabled account or revoked sessions get a 401.
 - **Requests.** POST only. A body that is not JSON gets a 400.
