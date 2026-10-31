@@ -6,7 +6,7 @@ import {
   emailNotVerifiedError,
   GetUrlsError,
   notFoundUserError,
-  PUBLIC_DOMAIN,
+  audioDomainForCountry,
   validateGetUrlsRequest,
 } from "../../../src/shared/getUrlsCore";
 import { GetUrlsRequest, Recording } from "../../../src/types";
@@ -99,8 +99,8 @@ export async function handleGetUrls(request: Request, env: Env): Promise<Respons
       recordings: recordingsByGuid.get(guid) ?? null,
     }));
     // Country comes from Cloudflare's IP geolocation, not the request body.
-    // Unknown locations use the same domain as other non-Egypt requests.
-    const publicDomain = request.cf?.country === "EG" ? PUBLIC_DOMAIN : "https://books.good-storage.click";
+    // Unknown locations use the original domain.
+    const publicDomain = audioDomainForCountry(request.cf?.country);
     const data = buildGroupedResponse(getUrlsRequest, sources, publicDomain);
 
     return json(200, buildSuccessResponse(data));

@@ -5,6 +5,7 @@ import { validateRequestAuthentication } from "../../utils/authentication";
 import { handleGetUrls } from "../../handlers/downloadHandlers";
 import { GetUrlsRequest } from "../../types";
 import { validateGetUrlsRequest } from "../../shared/getUrlsCore";
+import { audioDomainForRequest } from "../../utils/audioCountry";
 
 export const getUrls = functions.region(REGION).https.onRequest(
   async (req: Request, res: Response) => {
@@ -20,7 +21,7 @@ export const getUrls = functions.region(REGION).https.onRequest(
         return;
       }
 
-      const response = await handleGetUrls({ books, platform, deviceId }, userId);
+      const response = await handleGetUrls({ books, platform, deviceId }, userId, audioDomainForRequest(req));
       res.status(200).json(response);
     } catch (error: any) {
       functions.logger.error(error);

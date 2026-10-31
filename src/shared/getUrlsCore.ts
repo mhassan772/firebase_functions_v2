@@ -16,6 +16,13 @@ import {
 
 // export const PUBLIC_DOMAIN = "https://books.good-storage.click";
 export const PUBLIC_DOMAIN = "https://good-storage.b-cdn.net";
+export const ORIGINAL_PUBLIC_DOMAIN = "https://books.good-storage.click";
+
+export function audioDomainForCountry(country: unknown): string {
+  return country === "EG" || country === "DZ" || country === "LB"
+    ? PUBLIC_DOMAIN
+    : ORIGINAL_PUBLIC_DOMAIN;
+}
 
 const VALID_REASONS = ["download", "stream", "sample"];
 

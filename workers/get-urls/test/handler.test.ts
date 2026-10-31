@@ -113,6 +113,8 @@ describe("handleGetUrls", () => {
 
   it.each([
     ["EG", "https://good-storage.b-cdn.net"],
+    ["DZ", "https://good-storage.b-cdn.net"],
+    ["LB", "https://good-storage.b-cdn.net"],
     ["US", DOMAIN],
     ["SA", DOMAIN],
     ["XX", DOMAIN],

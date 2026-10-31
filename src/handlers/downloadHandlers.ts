@@ -10,7 +10,8 @@ import {
 
 export async function handleGetUrls(
   request: GetUrlsRequest,
-  authId: string
+  authId: string,
+  publicDomain?: string
 ): Promise<GetUrlsResponse> {
   await verifyUserEmail(authId);
 
@@ -30,7 +31,7 @@ export async function handleGetUrls(
         : null,
     };
   });
-  return buildSuccessResponse(buildGroupedResponse(request, sources));
+  return buildSuccessResponse(buildGroupedResponse(request, sources, publicDomain));
 }
 
 async function verifyUserEmail(authId: string): Promise<void> {
