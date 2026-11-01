@@ -16,9 +16,16 @@ export const BLUR_JPEG_QUALITY = 70;
 /** Areas leave most of the picture sharp, so they need a larger, cleaner copy than an all-over blur. */
 export const AREAS_MAX_DIMENSION = 1200;
 export const AREAS_JPEG_QUALITY = 82;
-/** Blur strength and pixel block size as fractions of the copy's longer side, so they look the same at any size. */
+/**
+ * Blur strength and pixel block size at the default strength, as fractions of the copy's longer side, so
+ * they look the same at any size. Other strengths scale both in proportion.
+ */
 export const AREAS_BLUR_SIGMA_RATIO = 0.05;
 export const PIXELATE_BLOCK_RATIO = 1 / 24;
+/** How strongly the picture is hidden, 1 to 10; the default is the look an all-over blur always had. */
+export const MIN_STRENGTH = 1;
+export const MAX_STRENGTH = 10;
+export const DEFAULT_STRENGTH = 5;
 /** A blurred area's edge fades out over this fraction of the longer side, outside the drawn shape. */
 export const BLUR_FEATHER_RATIO = 0.01;
 export const MAX_REGIONS = 20;
@@ -38,13 +45,19 @@ const EDGE_TOLERANCE = 1e-6;
 export type BlurEffect = "blur" | "pixelate";
 export type BlurRegionShape = "rect" | "ellipse";
 
-/** An area to hide, in fractions of the picture's width and height, so it fits the picture at any size. */
+/**
+ * An area to hide, in fractions of the picture's width and height, so it fits the picture at any size.
+ *
+ * The box is the shape before it is tilted; the tilt turns it clockwise about its centre.
+ */
 export interface BlurRegion {
   shape: BlurRegionShape;
   x: number;
   y: number;
   w: number;
   h: number;
+  /** Whole degrees clockwise, -89 to 90; 0 is upright. */
+  rotation: number;
 }
 
 export interface BlurCoverRequest {
@@ -52,6 +65,8 @@ export interface BlurCoverRequest {
   id: string;
   imageUrl: string;
   effect: BlurEffect;
+  /** MIN_STRENGTH to MAX_STRENGTH. */
+  strength: number;
   /** Empty for the whole picture. */
   regions: BlurRegion[];
   /** Returns the result instead of storing it. */
@@ -65,6 +80,8 @@ export interface BlurCoverResult {
   preview?: string;
   /** Identifies the source picture's bytes, so the portal can tell when an original changed under its areas. */
   sourceHash: string;
+  /** The strength the copy was made at, so the portal can tell this callable applied strength and tilt. */
+  strength: number;
 }
 
 export interface BlurredCoverObject {
@@ -97,7 +114,7 @@ export function parseBlurCoverRequest(data: unknown): BlurCoverRequest {
   if (typeof data !== "object" || data === null || Array.isArray(data)) {
     throw invalid("The request must be an object.");
   }
-  const { kind, id, imageUrl, effect, regions, preview } = data as Record<string, unknown>;
+  const { kind, id, imageUrl, effect, strength, regions, preview } = data as Record<string, unknown>;
 
   if (typeof kind !== "string" || !KINDS.has(kind as BlurCoverKind)) {
     throw invalid("kind must be podcast, episode or book.");
@@ -126,6 +143,12 @@ export function parseBlurCoverRequest(data: unknown): BlurCoverRequest {
   if (effect !== undefined && effect !== "blur" && effect !== "pixelate") {
     throw invalid("effect must be blur or pixelate.");
   }
+  if (
+    strength !== undefined &&
+    (typeof strength !== "number" || !Number.isInteger(strength) || strength < MIN_STRENGTH || strength > MAX_STRENGTH)
+  ) {
+    throw invalid(`strength must be a whole number from ${MIN_STRENGTH} to ${MAX_STRENGTH}.`);
+  }
   if (preview !== undefined && typeof preview !== "boolean") {
     throw invalid("preview must be true or false.");
   }
@@ -135,6 +158,7 @@ export function parseBlurCoverRequest(data: unknown): BlurCoverRequest {
     id,
     imageUrl,
     effect: effect ?? "blur",
+    strength: (strength as number | undefined) ?? DEFAULT_STRENGTH,
     regions: parseRegions(regions),
     preview: preview ?? false,
   };
@@ -143,6 +167,12 @@ export function parseBlurCoverRequest(data: unknown): BlurCoverRequest {
 // Four decimals is a tenth of a pixel on a 1200-pixel copy, and keeps the key stable for the same areas.
 const round4 = (value: number) => Math.round(value * 10_000) / 10_000;
 
+/** Both shapes look the same turned half a turn, so every tilt folds into -89 to 90 whole degrees. */
+function normalizeRotation(degrees: number): number {
+  const folded = ((Math.round(degrees) % 180) + 180) % 180;
+  return folded > 90 ? folded - 180 : folded;
+}
+
 function parseRegions(value: unknown): BlurRegion[] {
   if (value === undefined || value === null) return [];
   if (!Array.isArray(value)) throw invalid("regions must be a list.");
@@ -150,8 +180,11 @@ function parseRegions(value: unknown): BlurRegion[] {
   return value.map((raw, index) => {
     const where = `Area ${index + 1}`;
     if (typeof raw !== "object" || raw === null || Array.isArray(raw)) throw invalid(`${where} must be an object.`);
-    const { shape, x, y, w, h } = raw as Record<string, unknown>;
+    const { shape, x, y, w, h, rotation } = raw as Record<string, unknown>;
     if (shape !== "rect" && shape !== "ellipse") throw invalid(`${where}: shape must be rect or ellipse.`);
+    if (rotation !== undefined && (typeof rotation !== "number" || !Number.isFinite(rotation) || Math.abs(rotation) > 360)) {
+      throw invalid(`${where}: rotation must be a number of degrees.`);
+    }
     const numbers = [x, y, w, h];
     if (!numbers.every((n) => typeof n === "number" && Number.isFinite(n))) {
       throw invalid(`${where}: x, y, w and h must be numbers.`);
@@ -163,13 +196,22 @@ function parseRegions(value: unknown): BlurRegion[] {
     if (nx + nw > 1 + EDGE_TOLERANCE || ny + nh > 1 + EDGE_TOLERANCE) {
       throw invalid(`${where} must end inside the picture.`);
     }
-    return { shape, x: round4(nx), y: round4(ny), w: round4(Math.min(nw, 1 - nx)), h: round4(Math.min(nh, 1 - ny)) };
+    return {
+      shape,
+      x: round4(nx),
+      y: round4(ny),
+      w: round4(Math.min(nw, 1 - nx)),
+      h: round4(Math.min(nh, 1 - ny)),
+      rotation: normalizeRotation((rotation as number | undefined) ?? 0),
+    };
   });
 }
 
-/** Whether the request is today's all-over blur, which keeps its original size, format and key. */
-export function isWholePictureBlur(request: Pick<BlurCoverRequest, "effect" | "regions">): boolean {
-  return request.effect === "blur" && request.regions.length === 0;
+export type BlurOptions = Pick<BlurCoverRequest, "effect" | "strength" | "regions">;
+
+/** Whether the request is the original all-over blur, which keeps its original size, format and key. */
+export function isWholePictureBlur(request: BlurOptions): boolean {
+  return request.effect === "blur" && request.strength === DEFAULT_STRENGTH && request.regions.length === 0;
 }
 
 export function sourceHash(source: Buffer): string {
@@ -188,13 +230,18 @@ export function blurredCoverKey(
   kind: BlurCoverKind,
   id: string,
   source: Buffer,
-  options: Pick<BlurCoverRequest, "effect" | "regions"> = { effect: "blur", regions: [] },
+  options: BlurOptions = { effect: "blur", strength: DEFAULT_STRENGTH, regions: [] },
   extension: "jpg" | "png" = "jpg"
 ): string {
   if (isWholePictureBlur(options)) {
     return `images/blurred/${kind}/${id}/${sourceHash(source)}.${extension}`;
   }
-  const spec = JSON.stringify({ effect: options.effect, regions: options.regions.map(({ shape, x, y, w, h }) => [shape, x, y, w, h]) });
+  // Defaults are left out, so a copy keeps the key it had before strength and tilt existed.
+  const spec = JSON.stringify({
+    effect: options.effect,
+    ...(options.strength !== DEFAULT_STRENGTH && { strength: options.strength }),
+    regions: options.regions.map(({ shape, x, y, w, h, rotation }) => (rotation ? [shape, x, y, w, h, rotation] : [shape, x, y, w, h])),
+  });
   const version = crypto.createHash("sha1").update(source).update("\n").update(spec).digest("hex").slice(0, 12);
   return `images/blurred/${kind}/${id}/${version}.${extension}`;
 }
@@ -227,14 +274,18 @@ export interface RenderedCover {
 
 /** The SVG mask of the areas: white where the effect shows, black where the original does. */
 function regionsMask(regions: BlurRegion[], width: number, height: number, grow: number): string {
-  const shapes = regions.map(({ shape, x, y, w, h }) => {
+  const shapes = regions.map(({ shape, x, y, w, h, rotation }) => {
     const left = x * width - grow;
     const top = y * height - grow;
     const rw = w * width + 2 * grow;
     const rh = h * height + 2 * grow;
+    const cx = left + rw / 2;
+    const cy = top + rh / 2;
+    // Turned in pixels about the centre, so a tilt keeps its angle on a picture of any proportions.
+    const tilt = rotation ? ` transform="rotate(${rotation} ${cx} ${cy})"` : "";
     return shape === "ellipse"
-      ? `<ellipse cx="${left + rw / 2}" cy="${top + rh / 2}" rx="${rw / 2}" ry="${rh / 2}" fill="#fff"/>`
-      : `<rect x="${left}" y="${top}" width="${rw}" height="${rh}" fill="#fff"/>`;
+      ? `<ellipse cx="${cx}" cy="${cy}" rx="${rw / 2}" ry="${rh / 2}"${tilt} fill="#fff"/>`
+      : `<rect x="${left}" y="${top}" width="${rw}" height="${rh}"${tilt} fill="#fff"/>`;
   });
   return (
     `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}">` +
@@ -250,10 +301,7 @@ function regionsMask(regions: BlurRegion[], width: number, height: number, grow:
  * area fades out just outside its outline, so the area itself stays fully hidden. A picture with
  * transparency stays PNG: as JPEG its transparent parts would turn black.
  */
-export async function renderCover(
-  input: Buffer,
-  options: Pick<BlurCoverRequest, "effect" | "regions">
-): Promise<RenderedCover> {
+export async function renderCover(input: Buffer, options: BlurOptions): Promise<RenderedCover> {
   if (isWholePictureBlur(options)) {
     return { body: await blurImage(input), contentType: "image/jpeg", extension: "jpg" };
   }
@@ -267,10 +315,11 @@ export async function renderCover(
   const { width, height } = info;
   const raw = { raw: { width, height, channels: 4 as const } };
   const longer = Math.max(width, height);
+  const scale = options.strength / DEFAULT_STRENGTH;
 
   let effected: Buffer;
   if (options.effect === "pixelate") {
-    const block = Math.max(4, Math.round(longer * PIXELATE_BLOCK_RATIO));
+    const block = Math.max(4, Math.round(longer * PIXELATE_BLOCK_RATIO * scale));
     const smallWidth = Math.max(1, Math.ceil(width / block));
     const smallHeight = Math.max(1, Math.ceil(height / block));
     const small = await sharp(original, raw).resize(smallWidth, smallHeight, { fit: "fill" }).raw().toBuffer();
@@ -279,7 +328,7 @@ export async function renderCover(
       .raw()
       .toBuffer();
   } else {
-    effected = await sharp(original, raw).blur(Math.max(1, longer * AREAS_BLUR_SIGMA_RATIO)).raw().toBuffer();
+    effected = await sharp(original, raw).blur(Math.max(1, longer * AREAS_BLUR_SIGMA_RATIO * scale)).raw().toBuffer();
   }
 
   let pixels = effected;
@@ -332,6 +381,7 @@ export function createBlurCoverHandler(deps: BlurCoverDeps) {
       kind: request.kind,
       id: request.id,
       effect: request.effect,
+      strength: request.strength,
       regions: request.regions.length,
       preview: request.preview,
     });
@@ -358,6 +408,7 @@ export function createBlurCoverHandler(deps: BlurCoverDeps) {
         return {
           preview: `data:${rendered.contentType};base64,${rendered.body.toString("base64")}`,
           sourceHash: sourceHash(source),
+          strength: request.strength,
         };
       }
 
@@ -371,7 +422,7 @@ export function createBlurCoverHandler(deps: BlurCoverDeps) {
       });
       const url = blurredCoverUrl(key);
       functions.logger.info("admin_blur_cover_success", { uid, key, bytes: rendered.body.length });
-      return { url, sourceHash: sourceHash(source) };
+      return { url, sourceHash: sourceHash(source), strength: request.strength };
     } catch (error) {
       const detail = { uid, key, error: error instanceof Error ? error.message : String(error) };
       // A bad source picture is the admin's to fix; only storage failures are ours.
