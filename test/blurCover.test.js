@@ -112,6 +112,9 @@ test("blur cover accepts each kind with its own id format", () => {
     kind: "podcast",
     id: "920666",
     imageUrl: IMAGE_URL,
+    effect: "blur",
+    regions: [],
+    preview: false,
   });
   assert.equal(parseBlurCoverRequest({ kind: "episode", id: "41928399210", imageUrl: "http://a.b/c" }).kind, "episode");
   const guid = "6f1c2a0e-1b2d-4c3e-9f00-0a1b2c3d4e5f";
@@ -130,8 +133,10 @@ test("blur cover uploads a resized, blurred JPEG and returns its public url", as
   const { handler, calls } = harness();
   const result = await handler({ kind: "book", id: "abc-123", imageUrl: IMAGE_URL }, ADMIN);
 
-  const key = blurredCoverKey("book", "abc-123", await checkerboard(1200, 800));
-  assert.deepEqual(result, { url: `https://images.mantooq.com/${key}` });
+  const source = await checkerboard(1200, 800);
+  const key = blurredCoverKey("book", "abc-123", source);
+  const sourceHash = crypto.createHash("sha1").update(source).digest("hex").slice(0, 12);
+  assert.deepEqual(result, { url: `https://images.mantooq.com/${key}`, sourceHash });
   assert.deepEqual(calls.admin, ["admin-uid"]);
   assert.deepEqual(calls.fetch, [IMAGE_URL]);
   assert.equal(calls.put.length, 1);
@@ -154,6 +159,159 @@ test("blur cover uploads a resized, blurred JPEG and returns its public url", as
   for (const channel of stats.channels) {
     assert.ok(channel.stdev < 20, `expected a blurred image, stdev was ${channel.stdev}`);
   }
+});
+
+test("blur cover rejects a bad effect, area list or preview flag", async () => {
+  const { handler, calls } = harness();
+  const base = { kind: "podcast", id: "1", imageUrl: IMAGE_URL };
+  const area = { shape: "rect", x: 0.1, y: 0.1, w: 0.2, h: 0.2 };
+  const bad = [
+    { ...base, effect: "sepia" },
+    { ...base, preview: "yes" },
+    { ...base, regions: "all" },
+    { ...base, regions: [null] },
+    { ...base, regions: [{ ...area, shape: "star" }] },
+    { ...base, regions: [{ ...area, x: "0.1" }] },
+    { ...base, regions: [{ ...area, w: Number.NaN }] },
+    { ...base, regions: [{ ...area, x: -0.01 }] },
+    { ...base, regions: [{ ...area, w: 0 }] },
+    { ...base, regions: [{ ...area, x: 0.9, w: 0.2 }] },
+    { ...base, regions: [{ ...area, y: 0.95, h: 0.1 }] },
+    { ...base, regions: Array.from({ length: 21 }, () => area) },
+  ];
+  for (const data of bad) {
+    await rejectsWith(handler(data, ADMIN), "invalid-argument");
+  }
+  assert.equal(calls.fetch.length, 0);
+});
+
+test("blur cover areas are rounded and clamped to the picture's edge", () => {
+  const request = parseBlurCoverRequest({
+    kind: "podcast",
+    id: "1",
+    imageUrl: IMAGE_URL,
+    effect: "pixelate",
+    regions: [{ shape: "ellipse", x: 0.123456, y: 0.5, w: 0.876544 + 1e-7, h: 0.25 }],
+    preview: true,
+  });
+  assert.equal(request.effect, "pixelate");
+  assert.equal(request.preview, true);
+  assert.deepEqual(request.regions, [{ shape: "ellipse", x: 0.1235, y: 0.5, w: 0.8765, h: 0.25 }]);
+});
+
+test("blur cover keys change with the effect and the areas, and the whole-picture blur keeps its key", () => {
+  const picture = Buffer.from("picture-1");
+  const whole = blurredCoverKey("book", "b", picture);
+  const area = { shape: "rect", x: 0.1, y: 0.1, w: 0.2, h: 0.2 };
+  assert.equal(blurredCoverKey("book", "b", picture, { effect: "blur", regions: [] }), whole);
+
+  const keys = [
+    whole,
+    blurredCoverKey("book", "b", picture, { effect: "pixelate", regions: [] }),
+    blurredCoverKey("book", "b", picture, { effect: "blur", regions: [area] }),
+    blurredCoverKey("book", "b", picture, { effect: "pixelate", regions: [area] }),
+    blurredCoverKey("book", "b", picture, { effect: "blur", regions: [{ ...area, shape: "ellipse" }] }),
+    blurredCoverKey("book", "b", picture, { effect: "blur", regions: [{ ...area, x: 0.2 }] }),
+    blurredCoverKey("book", "b", Buffer.from("picture-2"), { effect: "blur", regions: [area] }),
+  ];
+  assert.equal(new Set(keys).size, keys.length);
+  assert.equal(
+    blurredCoverKey("book", "b", picture, { effect: "blur", regions: [area] }),
+    blurredCoverKey("book", "b", picture, { effect: "blur", regions: [{ ...area }] })
+  );
+  assert.match(blurredCoverKey("book", "b", picture, { effect: "blur", regions: [area] }, "png"), /^images\/blurred\/book\/b\/[0-9a-f]{12}\.png$/);
+});
+
+// The standard deviation of the pixels in a box, given in fractions of the picture.
+async function boxStdev(image, box) {
+  const { width, height } = await sharp(image).metadata();
+  const region = {
+    left: Math.round(box.x * width),
+    top: Math.round(box.y * height),
+    width: Math.round(box.w * width),
+    height: Math.round(box.h * height),
+  };
+  // stats() reads the input, not the pipeline, so the crop is made first.
+  const stats = await sharp(await sharp(image).extract(region).toBuffer()).stats();
+  return Math.max(...stats.channels.slice(0, 3).map((channel) => channel.stdev));
+}
+
+test("blur cover hides only the chosen areas and keeps the rest sharp at the larger size", async () => {
+  const { handler, calls } = harness({ fetchImage: async () => checkerboard(1600, 1000) });
+  const regions = [
+    { shape: "rect", x: 0.05, y: 0.1, w: 0.3, h: 0.4 },
+    { shape: "ellipse", x: 0.6, y: 0.5, w: 0.3, h: 0.4 },
+  ];
+  const result = await handler({ kind: "podcast", id: "5", imageUrl: IMAGE_URL, regions }, ADMIN);
+
+  const object = calls.put[0];
+  assert.equal(object.ContentType, "image/jpeg");
+  assert.match(object.Key, /^images\/blurred\/podcast\/5\/[0-9a-f]{12}\.jpg$/);
+  assert.notEqual(object.Key, blurredCoverKey("podcast", "5", await checkerboard(1600, 1000)));
+  assert.equal(result.url, `https://images.mantooq.com/${object.Key}`);
+  const metadata = await sharp(object.Body).metadata();
+  assert.equal(metadata.width, 1200);
+  assert.equal(metadata.height, 750);
+
+  // Inside each area the black and white squares are gone; away from them the checkerboard is intact.
+  assert.ok((await boxStdev(object.Body, { x: 0.1, y: 0.15, w: 0.2, h: 0.3 })) < 25);
+  assert.ok((await boxStdev(object.Body, { x: 0.68, y: 0.6, w: 0.14, h: 0.2 })) < 25);
+  assert.ok((await boxStdev(object.Body, { x: 0.45, y: 0.05, w: 0.1, h: 0.3 })) > 100);
+});
+
+test("blur cover pixelates in square blocks, over the whole picture or in an area", async () => {
+  // Stripes one pixel wide average to grey in every block.
+  const width = 480;
+  const height = 480;
+  const pixels = Buffer.alloc(width * height * 3);
+  for (let i = 0; i < width * height; i++) pixels.fill(i % 2 === 0 ? 0 : 255, i * 3, i * 3 + 3);
+  const stripes = await sharp(pixels, { raw: { width, height, channels: 3 } }).png().toBuffer();
+
+  const whole = harness({ fetchImage: async () => stripes });
+  await whole.handler({ kind: "podcast", id: "5", imageUrl: IMAGE_URL, effect: "pixelate" }, ADMIN);
+  const wholeBody = whole.calls.put[0].Body;
+  assert.equal((await sharp(wholeBody).metadata()).width, 480);
+  assert.ok((await boxStdev(wholeBody, { x: 0, y: 0, w: 1, h: 1 })) < 25);
+
+  const area = harness({ fetchImage: async () => stripes });
+  await area.handler(
+    { kind: "podcast", id: "5", imageUrl: IMAGE_URL, effect: "pixelate", regions: [{ shape: "rect", x: 0, y: 0, w: 0.5, h: 1 }] },
+    ADMIN
+  );
+  const areaBody = area.calls.put[0].Body;
+  assert.ok((await boxStdev(areaBody, { x: 0.05, y: 0.05, w: 0.4, h: 0.9 })) < 25);
+  assert.ok((await boxStdev(areaBody, { x: 0.6, y: 0.05, w: 0.35, h: 0.9 })) > 60);
+});
+
+test("blur cover keeps a transparent picture as PNG when it hides areas", async () => {
+  const transparent = await sharp({
+    create: { width: 300, height: 200, channels: 4, background: { r: 200, g: 30, b: 30, alpha: 0 } },
+  })
+    .png()
+    .toBuffer();
+  const { handler, calls } = harness({ fetchImage: async () => transparent });
+  await handler({ kind: "podcast", id: "5", imageUrl: IMAGE_URL, regions: [{ shape: "rect", x: 0.1, y: 0.1, w: 0.5, h: 0.5 }] }, ADMIN);
+
+  const object = calls.put[0];
+  assert.equal(object.ContentType, "image/png");
+  assert.match(object.Key, /\.png$/);
+  const metadata = await sharp(object.Body).metadata();
+  assert.equal(metadata.format, "png");
+  assert.equal(metadata.hasAlpha, true);
+});
+
+test("blur cover preview returns the picture and stores nothing", async () => {
+  const { handler, calls } = harness();
+  const result = await handler(
+    { kind: "book", id: "abc", imageUrl: IMAGE_URL, preview: true, regions: [{ shape: "ellipse", x: 0.2, y: 0.2, w: 0.3, h: 0.3 }] },
+    ADMIN
+  );
+  assert.equal(calls.put.length, 0);
+  assert.equal(result.url, undefined);
+  assert.equal(result.sourceHash, crypto.createHash("sha1").update(await checkerboard(1200, 800)).digest("hex").slice(0, 12));
+  const match = /^data:image\/jpeg;base64,(.+)$/.exec(result.preview);
+  assert.ok(match, "expected a JPEG data URL");
+  assert.equal((await sharp(Buffer.from(match[1], "base64")).metadata()).width, 1200);
 });
 
 test("blur cover never enlarges a small image", async () => {
