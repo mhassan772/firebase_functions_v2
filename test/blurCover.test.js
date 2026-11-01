@@ -113,6 +113,7 @@ test("blur cover accepts each kind with its own id format", () => {
     id: "920666",
     imageUrl: IMAGE_URL,
     effect: "blur",
+    strength: 5,
     regions: [],
     preview: false,
   });
@@ -136,7 +137,7 @@ test("blur cover uploads a resized, blurred JPEG and returns its public url", as
   const source = await checkerboard(1200, 800);
   const key = blurredCoverKey("book", "abc-123", source);
   const sourceHash = crypto.createHash("sha1").update(source).digest("hex").slice(0, 12);
-  assert.deepEqual(result, { url: `https://images.mantooq.com/${key}`, sourceHash });
+  assert.deepEqual(result, { url: `https://images.mantooq.com/${key}`, sourceHash, strength: 5 });
   assert.deepEqual(calls.admin, ["admin-uid"]);
   assert.deepEqual(calls.fetch, [IMAGE_URL]);
   assert.equal(calls.put.length, 1);
@@ -161,18 +162,25 @@ test("blur cover uploads a resized, blurred JPEG and returns its public url", as
   }
 });
 
-test("blur cover rejects a bad effect, area list or preview flag", async () => {
+test("blur cover rejects a bad effect, strength, area list or preview flag", async () => {
   const { handler, calls } = harness();
   const base = { kind: "podcast", id: "1", imageUrl: IMAGE_URL };
   const area = { shape: "rect", x: 0.1, y: 0.1, w: 0.2, h: 0.2 };
   const bad = [
     { ...base, effect: "sepia" },
+    { ...base, strength: 0 },
+    { ...base, strength: 11 },
+    { ...base, strength: 2.5 },
+    { ...base, strength: "5" },
     { ...base, preview: "yes" },
     { ...base, regions: "all" },
     { ...base, regions: [null] },
     { ...base, regions: [{ ...area, shape: "star" }] },
     { ...base, regions: [{ ...area, x: "0.1" }] },
     { ...base, regions: [{ ...area, w: Number.NaN }] },
+    { ...base, regions: [{ ...area, rotation: "10" }] },
+    { ...base, regions: [{ ...area, rotation: Number.POSITIVE_INFINITY }] },
+    { ...base, regions: [{ ...area, rotation: 400 }] },
     { ...base, regions: [{ ...area, x: -0.01 }] },
     { ...base, regions: [{ ...area, w: 0 }] },
     { ...base, regions: [{ ...area, x: 0.9, w: 0.2 }] },
@@ -196,30 +204,49 @@ test("blur cover areas are rounded and clamped to the picture's edge", () => {
   });
   assert.equal(request.effect, "pixelate");
   assert.equal(request.preview, true);
-  assert.deepEqual(request.regions, [{ shape: "ellipse", x: 0.1235, y: 0.5, w: 0.8765, h: 0.25 }]);
+  assert.deepEqual(request.regions, [{ shape: "ellipse", x: 0.1235, y: 0.5, w: 0.8765, h: 0.25, rotation: 0 }]);
 });
 
-test("blur cover keys change with the effect and the areas, and the whole-picture blur keeps its key", () => {
+test("blur cover tilts fold into -89 to 90 whole degrees, since a shape turned half a turn looks the same", () => {
+  const tilts = [[0, 0], [12.6, 13], [-45, -45], [90, 90], [-90, 90], [100, -80], [180, 0], [-135, 45], [359, -1]];
+  const request = parseBlurCoverRequest({
+    kind: "podcast",
+    id: "1",
+    imageUrl: IMAGE_URL,
+    strength: 8,
+    regions: tilts.map(([rotation]) => ({ shape: "rect", x: 0.1, y: 0.1, w: 0.2, h: 0.2, rotation })),
+  });
+  assert.equal(request.strength, 8);
+  assert.deepEqual(request.regions.map((region) => region.rotation), tilts.map(([, folded]) => folded));
+});
+
+test("blur cover keys change with the effect, strength and areas, and the whole-picture blur keeps its key", () => {
   const picture = Buffer.from("picture-1");
   const whole = blurredCoverKey("book", "b", picture);
-  const area = { shape: "rect", x: 0.1, y: 0.1, w: 0.2, h: 0.2 };
-  assert.equal(blurredCoverKey("book", "b", picture, { effect: "blur", regions: [] }), whole);
+  const area = { shape: "rect", x: 0.1, y: 0.1, w: 0.2, h: 0.2, rotation: 0 };
+  const key = (options, source = picture) => blurredCoverKey("book", "b", source, { effect: "blur", strength: 5, regions: [], ...options });
+  assert.equal(key({}), whole);
+  assert.equal(whole, `images/blurred/book/b/${crypto.createHash("sha1").update(picture).digest("hex").slice(0, 12)}.jpg`);
 
   const keys = [
     whole,
-    blurredCoverKey("book", "b", picture, { effect: "pixelate", regions: [] }),
-    blurredCoverKey("book", "b", picture, { effect: "blur", regions: [area] }),
-    blurredCoverKey("book", "b", picture, { effect: "pixelate", regions: [area] }),
-    blurredCoverKey("book", "b", picture, { effect: "blur", regions: [{ ...area, shape: "ellipse" }] }),
-    blurredCoverKey("book", "b", picture, { effect: "blur", regions: [{ ...area, x: 0.2 }] }),
-    blurredCoverKey("book", "b", Buffer.from("picture-2"), { effect: "blur", regions: [area] }),
+    key({ effect: "pixelate" }),
+    key({ strength: 8 }),
+    key({ regions: [area] }),
+    key({ regions: [area], strength: 8 }),
+    key({ effect: "pixelate", regions: [area] }),
+    key({ regions: [{ ...area, shape: "ellipse" }] }),
+    key({ regions: [{ ...area, x: 0.2 }] }),
+    key({ regions: [{ ...area, rotation: 15 }] }),
+    key({ regions: [area] }, Buffer.from("picture-2")),
   ];
   assert.equal(new Set(keys).size, keys.length);
-  assert.equal(
-    blurredCoverKey("book", "b", picture, { effect: "blur", regions: [area] }),
-    blurredCoverKey("book", "b", picture, { effect: "blur", regions: [{ ...area }] })
-  );
-  assert.match(blurredCoverKey("book", "b", picture, { effect: "blur", regions: [area] }, "png"), /^images\/blurred\/book\/b\/[0-9a-f]{12}\.png$/);
+  assert.equal(key({ regions: [area] }), key({ regions: [{ ...area }] }));
+  // An upright area at the default strength keeps the key it had before tilt and strength existed.
+  const before = JSON.stringify({ effect: "blur", regions: [["rect", 0.1, 0.1, 0.2, 0.2]] });
+  const beforeVersion = crypto.createHash("sha1").update(picture).update("\n").update(before).digest("hex").slice(0, 12);
+  assert.equal(key({ regions: [area] }), `images/blurred/book/b/${beforeVersion}.jpg`);
+  assert.match(blurredCoverKey("book", "b", picture, { effect: "blur", strength: 5, regions: [area] }, "png"), /^images\/blurred\/book\/b\/[0-9a-f]{12}\.png$/);
 });
 
 // The standard deviation of the pixels in a box, given in fractions of the picture.
@@ -257,6 +284,38 @@ test("blur cover hides only the chosen areas and keeps the rest sharp at the lar
   assert.ok((await boxStdev(object.Body, { x: 0.1, y: 0.15, w: 0.2, h: 0.3 })) < 25);
   assert.ok((await boxStdev(object.Body, { x: 0.68, y: 0.6, w: 0.14, h: 0.2 })) < 25);
   assert.ok((await boxStdev(object.Body, { x: 0.45, y: 0.05, w: 0.1, h: 0.3 })) > 100);
+});
+
+test("blur cover hides more at a higher strength", async () => {
+  const picture = await checkerboard(1200, 750, 60);
+  const area = { shape: "rect", x: 0.1, y: 0.1, w: 0.8, h: 0.8 };
+  const inside = { x: 0.3, y: 0.3, w: 0.4, h: 0.4 };
+  for (const effect of ["blur", "pixelate"]) {
+    const stdevs = [];
+    for (const strength of [1, 5, 10]) {
+      const { handler, calls } = harness({ fetchImage: async () => picture });
+      await handler({ kind: "podcast", id: "5", imageUrl: IMAGE_URL, effect, strength, regions: [area] }, ADMIN);
+      stdevs.push(await boxStdev(calls.put[0].Body, inside));
+    }
+    assert.ok(stdevs[0] > stdevs[1] && stdevs[1] > stdevs[2], `${effect} stdevs should fall with strength: ${stdevs}`);
+  }
+});
+
+test("blur cover tilts an area about its centre", async () => {
+  // A tall thin bar, turned a quarter turn, lies across the middle of the picture instead.
+  const bar = { shape: "rect", x: 0.45, y: 0.1, w: 0.1, h: 0.8 };
+  const leftOfCentre = { x: 0.3, y: 0.47, w: 0.05, h: 0.06 };
+  const middle = { x: 0.48, y: 0.3, w: 0.04, h: 0.1 };
+  const stdevs = async (rotation) => {
+    const { handler, calls } = harness({ fetchImage: async () => checkerboard(1600, 1000) });
+    await handler({ kind: "podcast", id: "5", imageUrl: IMAGE_URL, effect: "pixelate", regions: [{ ...bar, rotation }] }, ADMIN);
+    const body = calls.put[0].Body;
+    return { left: await boxStdev(body, leftOfCentre), middle: await boxStdev(body, middle) };
+  };
+  const upright = await stdevs(0);
+  assert.ok(upright.left > 100 && upright.middle < 25, JSON.stringify(upright));
+  const turned = await stdevs(90);
+  assert.ok(turned.left < 25 && turned.middle > 100, JSON.stringify(turned));
 });
 
 test("blur cover pixelates in square blocks, over the whole picture or in an area", async () => {
@@ -303,11 +362,12 @@ test("blur cover keeps a transparent picture as PNG when it hides areas", async 
 test("blur cover preview returns the picture and stores nothing", async () => {
   const { handler, calls } = harness();
   const result = await handler(
-    { kind: "book", id: "abc", imageUrl: IMAGE_URL, preview: true, regions: [{ shape: "ellipse", x: 0.2, y: 0.2, w: 0.3, h: 0.3 }] },
+    { kind: "book", id: "abc", imageUrl: IMAGE_URL, preview: true, strength: 7, regions: [{ shape: "ellipse", x: 0.2, y: 0.2, w: 0.3, h: 0.3 }] },
     ADMIN
   );
   assert.equal(calls.put.length, 0);
   assert.equal(result.url, undefined);
+  assert.equal(result.strength, 7);
   assert.equal(result.sourceHash, crypto.createHash("sha1").update(await checkerboard(1200, 800)).digest("hex").slice(0, 12));
   const match = /^data:image\/jpeg;base64,(.+)$/.exec(result.preview);
   assert.ok(match, "expected a JPEG data URL");
