@@ -181,6 +181,10 @@ test("blur cover rejects a bad effect, strength, area list or preview flag", asy
     { ...base, regions: [{ ...area, rotation: "10" }] },
     { ...base, regions: [{ ...area, rotation: Number.POSITIVE_INFINITY }] },
     { ...base, regions: [{ ...area, rotation: 400 }] },
+    // A tilted area may reach past the edges, but not have its centre outside or be huge.
+    { ...base, regions: [{ ...area, x: 0.95, w: 0.2, rotation: 30 }] },
+    { ...base, regions: [{ ...area, y: -0.3, h: 0.2, rotation: 30 }] },
+    { ...base, regions: [{ ...area, x: -1, w: 2.5, rotation: 30 }] },
     { ...base, regions: [{ ...area, x: -0.01 }] },
     { ...base, regions: [{ ...area, w: 0 }] },
     { ...base, regions: [{ ...area, x: 0.9, w: 0.2 }] },
@@ -205,6 +209,29 @@ test("blur cover areas are rounded and clamped to the picture's edge", () => {
   assert.equal(request.effect, "pixelate");
   assert.equal(request.preview, true);
   assert.deepEqual(request.regions, [{ shape: "ellipse", x: 0.1235, y: 0.5, w: 0.8765, h: 0.25, rotation: 0 }]);
+});
+
+test("blur cover lets a tilted area reach past the edges, with its centre inside", () => {
+  const request = parseBlurCoverRequest({
+    kind: "podcast",
+    id: "1",
+    imageUrl: IMAGE_URL,
+    regions: [
+      { shape: "rect", x: 0.6, y: -0.1, w: 0.6, h: 0.5, rotation: -44 },
+      { shape: "rect", x: -0.2, y: -0.2, w: 1.4, h: 1.4, rotation: 45 },
+      // Turned half a turn, it is upright, so it must lie inside the picture again.
+      { shape: "rect", x: 0.6, y: 0.1, w: 0.4, h: 0.5, rotation: 180 },
+    ],
+  });
+  assert.deepEqual(request.regions, [
+    { shape: "rect", x: 0.6, y: -0.1, w: 0.6, h: 0.5, rotation: -44 },
+    { shape: "rect", x: -0.2, y: -0.2, w: 1.4, h: 1.4, rotation: 45 },
+    { shape: "rect", x: 0.6, y: 0.1, w: 0.4, h: 0.5, rotation: 0 },
+  ]);
+  assert.throws(
+    () => parseBlurCoverRequest({ kind: "podcast", id: "1", imageUrl: IMAGE_URL, regions: [{ shape: "rect", x: 0.7, y: 0, w: 0.4, h: 0.5, rotation: 180 }] }),
+    /end inside the picture/
+  );
 });
 
 test("blur cover tilts fold into -89 to 90 whole degrees, since a shape turned half a turn looks the same", () => {

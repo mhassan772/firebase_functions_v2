@@ -31,6 +31,11 @@ export const BLUR_FEATHER_RATIO = 0.01;
 export const MAX_REGIONS = 20;
 /** The smallest width or height of an area, as a fraction of the picture. */
 export const MIN_REGION_SIZE = 0.005;
+/**
+ * The largest width or height of a tilted area, as a fraction of the picture. A tilted area may reach past
+ * the edges, where it is cut off, so it can lie along a picture's diagonal or cover a corner.
+ */
+export const MAX_TILTED_REGION_SIZE = 2;
 export const FETCH_TIMEOUT_MS = 15_000;
 export const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
 
@@ -41,6 +46,8 @@ const BOOK_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const MAX_URL_LENGTH = 4096;
 // Rounding slack for an area the portal clamped to the picture's edge.
 const EDGE_TOLERANCE = 1e-6;
+// A tilted area's centre is the sum of two numbers rounded to four decimals, so it may be off by that much.
+const CENTRE_TOLERANCE = 1e-4;
 
 export type BlurEffect = "blur" | "pixelate";
 export type BlurRegionShape = "rect" | "ellipse";
@@ -48,7 +55,9 @@ export type BlurRegionShape = "rect" | "ellipse";
 /**
  * An area to hide, in fractions of the picture's width and height, so it fits the picture at any size.
  *
- * The box is the shape before it is tilted; the tilt turns it clockwise about its centre.
+ * The box is the shape before it is tilted; the tilt turns it clockwise about its centre. An upright box
+ * lies inside the picture. A tilted one only has its centre inside, since its corners may need to reach
+ * past the edges for the shape to cover what is at the edge.
  */
 export interface BlurRegion {
   shape: BlurRegionShape;
@@ -190,9 +199,20 @@ function parseRegions(value: unknown): BlurRegion[] {
       throw invalid(`${where}: x, y, w and h must be numbers.`);
     }
     const [nx, ny, nw, nh] = numbers as number[];
-    if (nx < 0 || ny < 0 || nw < MIN_REGION_SIZE || nh < MIN_REGION_SIZE) {
-      throw invalid(`${where} must start inside the picture and have a size.`);
+    const tilt = normalizeRotation((rotation as number | undefined) ?? 0);
+    if (nw < MIN_REGION_SIZE || nh < MIN_REGION_SIZE) throw invalid(`${where} must have a size.`);
+    if (tilt !== 0) {
+      if (nw > MAX_TILTED_REGION_SIZE || nh > MAX_TILTED_REGION_SIZE) {
+        throw invalid(`${where} must be at most ${MAX_TILTED_REGION_SIZE} times the picture's size.`);
+      }
+      const cx = nx + nw / 2;
+      const cy = ny + nh / 2;
+      if (cx < -CENTRE_TOLERANCE || cx > 1 + CENTRE_TOLERANCE || cy < -CENTRE_TOLERANCE || cy > 1 + CENTRE_TOLERANCE) {
+        throw invalid(`${where} must have its centre inside the picture.`);
+      }
+      return { shape, x: round4(nx), y: round4(ny), w: round4(nw), h: round4(nh), rotation: tilt };
     }
+    if (nx < 0 || ny < 0) throw invalid(`${where} must start inside the picture.`);
     if (nx + nw > 1 + EDGE_TOLERANCE || ny + nh > 1 + EDGE_TOLERANCE) {
       throw invalid(`${where} must end inside the picture.`);
     }
@@ -202,7 +222,7 @@ function parseRegions(value: unknown): BlurRegion[] {
       y: round4(ny),
       w: round4(Math.min(nw, 1 - nx)),
       h: round4(Math.min(nh, 1 - ny)),
-      rotation: normalizeRotation((rotation as number | undefined) ?? 0),
+      rotation: 0,
     };
   });
 }
