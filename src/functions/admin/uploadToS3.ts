@@ -3,7 +3,8 @@ import { Request, Response } from "express";
 import { REGION } from "../../config/constants";
 import { validateRequestAuthentication } from "../../utils/authentication";
 import { setCorsHeaders, handleOptionsRequest } from "../../utils/cors";
-import { handleS3Upload } from "../../handlers/s3Handlers";
+import { handleS3Upload, validateReadAlongRequest } from "../../handlers/s3Handlers";
+import { S3UploadRequest } from "../../types";
 import { requirePortalRole } from "../../utils/adminRole";
 
 export const admin_upload_to_S3 = functions.region(REGION).https.onRequest(
@@ -31,6 +32,12 @@ export const admin_upload_to_S3 = functions.region(REGION).https.onRequest(
           code: 403,
           message: "Unauthorized: User is not an admin"
         });
+        return;
+      }
+
+      const validationError = validateReadAlongRequest(req.body as S3UploadRequest);
+      if (validationError) {
+        res.status(400).json(validationError);
         return;
       }
 
