@@ -1,6 +1,7 @@
 import { admin } from "../config/admin";
 import { GetUrlsRequest, GetUrlsResponse, Recording, Settings } from "../types";
 import {
+  allowsUnverifiedEmail,
   BookSource,
   buildGroupedResponse,
   buildSuccessResponse,
@@ -13,7 +14,7 @@ export async function handleGetUrls(
   authId: string,
   publicDomain?: string
 ): Promise<GetUrlsResponse> {
-  await verifyUserEmail(authId);
+  await verifyUserEmail(authId, request);
 
   const bookGuids = request.books.map((b) => b.bookGuid);
 
@@ -34,10 +35,11 @@ export async function handleGetUrls(
   return buildSuccessResponse(buildGroupedResponse(request, sources, publicDomain));
 }
 
-async function verifyUserEmail(authId: string): Promise<void> {
+async function verifyUserEmail(authId: string, request: GetUrlsRequest): Promise<void> {
   try {
     const user = await admin.auth().getUser(authId);
-    if (!user.emailVerified) {
+    // Listening comes before the account is in force; only a download waits on the verified email.
+    if (!user.emailVerified && !allowsUnverifiedEmail(request.books)) {
       throw emailNotVerifiedError();
     }
   } catch (error: any) {

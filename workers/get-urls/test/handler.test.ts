@@ -203,11 +203,42 @@ describe("handleGetUrls", () => {
     expect(body).toEqual({ code: 602, message: "not-found-user" });
   });
 
-  it("answers 608 when the email is not verified", async () => {
+  it("streams and samples for an account without a verified email", async () => {
     google.users["user-1"] = { emailVerified: false };
 
     const { status, body } = await call({
-      books: [{ bookGuid: "bookA", quality: 64, reason: "stream" }],
+      books: [
+        { bookGuid: "bookA", quality: 64, reason: "stream" },
+        { bookGuid: "bookB", quality: 128, reason: "sample" },
+      ],
+      platform: "android",
+    });
+
+    expect(status).toBe(200);
+    expect(body.data.bookA.recordings).toHaveLength(2);
+    expect(body.data.bookB.recordings).toHaveLength(1);
+  });
+
+  it("serves an anonymous account, which has no email at all", async () => {
+    google.users["user-1"] = {};
+
+    const { status, body } = await call({
+      books: [{ bookGuid: "bookA", quality: 64, reason: "sample" }],
+      platform: "android",
+    });
+
+    expect(status).toBe(200);
+    expect(body.data.bookA.recordings).toHaveLength(2);
+  });
+
+  it("answers 608 for a download when the email is not verified", async () => {
+    google.users["user-1"] = { emailVerified: false };
+
+    const { status, body } = await call({
+      books: [
+        { bookGuid: "bookA", quality: 64, reason: "stream" },
+        { bookGuid: "bookB", quality: 64, reason: "download" },
+      ],
       platform: "android",
     });
 

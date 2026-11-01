@@ -1,4 +1,5 @@
 import {
+  allowsUnverifiedEmail,
   ApiErrorBody,
   BookSource,
   buildGroupedResponse,
@@ -90,7 +91,8 @@ export async function handleGetUrls(request: Request, env: Env): Promise<Respons
     if (account.validSince !== null && issuedAt < account.validSince) {
       return json(401, { code: 401, message: "Authentication failed: token was revoked." });
     }
-    if (!account.emailVerified) {
+    // Listening comes before the account is in force; only a download waits on the verified email.
+    if (!account.emailVerified && !allowsUnverifiedEmail(getUrlsRequest.books)) {
       throw emailNotVerifiedError();
     }
 
