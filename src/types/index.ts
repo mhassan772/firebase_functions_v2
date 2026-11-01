@@ -34,6 +34,10 @@ export interface S3UploadRequest {
   content_type?: string;
   type?: string;
   id?: string;
+  /** Read-along only: the key of book_recordings.recordings, a positive integer as a string. */
+  recording_key?: string;
+  /** Read-along only: the first 16 lowercase hex characters of the file's sha256. */
+  content_hash?: string;
 }
 
 export type Quality = 64 | 128 | 256;
