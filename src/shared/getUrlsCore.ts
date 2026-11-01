@@ -49,6 +49,17 @@ export const notFoundUserError = () => new GetUrlsError({ code: 602, message: "n
 export const emailNotVerifiedError = () =>
   new GetUrlsError({ code: 608, message: "email-not-verified" });
 
+/**
+ * Whether an account without a verified email may have [books]' URLs.
+ *
+ * A guest's anonymous account and an email account not confirmed yet listen before having an
+ * account in force: streams and samples are theirs. A download belongs to an account, so it
+ * still needs the verified email.
+ */
+export function allowsUnverifiedEmail(books: { reason?: string }[]): boolean {
+  return books.every((book) => book.reason !== "download");
+}
+
 /** Returns the 400 body for an invalid request, or null when the request is valid. */
 export function validateGetUrlsRequest(
   books: BookItem[] | undefined,
