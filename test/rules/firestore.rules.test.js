@@ -76,6 +76,9 @@ describe("data owned by one user", () => {
     "routine_activity/{uid}",
     "pdf_progress/{uid}",
     "device_sessions_v2/{uid}",
+    "listening_history/{uid}",
+    "listening_history/{uid}/chunks/2026",
+    "listening_history/{uid}/completions/2026",
     "podcast_subscriptions/{uid}",
     "episodes_lists/{uid}",
     "episodes_lists/{uid}/lists/default-episode-list",
@@ -100,6 +103,19 @@ describe("data owned by one user", () => {
   test("hidden_podcasts, replaced by blocked_content, is closed to its owner", async () => {
     await assertFails(setDoc(doc(asUser("user-1"), "hidden_podcasts/user-1"), { value: 1 }));
     await assertFails(getDoc(doc(asUser("user-1"), "hidden_podcasts/user-1")));
+  });
+
+  test("listening_history: the owner lists and deletes their year documents, another user and admins cannot", async () => {
+    for (const sub of ["chunks", "completions"]) {
+      await assertSucceeds(setDoc(doc(asUser("user-1"), `listening_history/user-1/${sub}/2026`), { rows: [] }));
+      await assertSucceeds(getDocs(collection(asUser("user-1"), `listening_history/user-1/${sub}`)));
+      await assertFails(getDocs(collection(asUser("user-2"), `listening_history/user-1/${sub}`)));
+      await assertFails(getDoc(doc(asUser("admin-1"), `listening_history/user-1/${sub}/2026`)));
+      await assertFails(deleteDoc(doc(asUser("user-2"), `listening_history/user-1/${sub}/2026`)));
+      await assertSucceeds(deleteDoc(doc(asUser("user-1"), `listening_history/user-1/${sub}/2026`)));
+    }
+    await assertFails(getDoc(doc(asUser("admin-1"), "listening_history/user-1")));
+    await assertSucceeds(deleteDoc(doc(asUser("user-1"), "listening_history/user-1")));
   });
 
   test("user_books chunks of one user cannot be listed by another", async () => {

@@ -266,6 +266,19 @@ service cloud.firestore {
       allow create, read, write, update: if isPortalAdmin();
       allow read: if isPortalAdmin();
     }
+    // The app's listening history: an index of years, and per year a days document (chunks) and a
+    // completions document. Owner only; nothing in the portal reads it.
+    match /listening_history/{userId} {
+      allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
+
+      match /chunks/{year} {
+        allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
+      }
+
+      match /completions/{year} {
+        allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
+      }
+    }
  		match /bookmarks/{userId}/bookmarks_chunk/{book_mark_chunck} {
       allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
             allow create, read, write, update: if isPortalAdmin();
