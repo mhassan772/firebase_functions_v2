@@ -266,6 +266,11 @@ service cloud.firestore {
       allow create, read, write, update: if isPortalAdmin();
       allow read: if isPortalAdmin();
     }
+    // The app's account settings, one document per user: a map of settings, each with its value and change
+    // time. Owner only; nothing in the portal reads it.
+    match /user_settings/{userId} {
+      allow create, read, update, delete: if request.auth != null && request.auth.uid == userId;
+    }
     // The app's listening history: an index of years, and per year a days document (chunks) and a
     // completions document. Owner only; nothing in the portal reads it.
     match /listening_history/{userId} {

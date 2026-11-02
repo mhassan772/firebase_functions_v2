@@ -79,6 +79,7 @@ describe("data owned by one user", () => {
     "listening_history/{uid}",
     "listening_history/{uid}/chunks/2026",
     "listening_history/{uid}/completions/2026",
+    "user_settings/{uid}",
     "podcast_subscriptions/{uid}",
     "episodes_lists/{uid}",
     "episodes_lists/{uid}/lists/default-episode-list",
@@ -116,6 +117,25 @@ describe("data owned by one user", () => {
     }
     await assertFails(getDoc(doc(asUser("admin-1"), "listening_history/user-1")));
     await assertSucceeds(deleteDoc(doc(asUser("user-1"), "listening_history/user-1")));
+  });
+
+  test("user_settings/{uid}: the owner creates, updates and deletes it; another user, an admin and a guest cannot", async () => {
+    const values = { values: { daily_goal_minutes: { v: 20, u: Timestamp.now() } }, updatedAt: Timestamp.now() };
+    await assertFails(setDoc(doc(asGuest(), "user_settings/user-1"), values));
+    await assertSucceeds(setDoc(doc(asUser("user-1"), "user_settings/user-1"), values));
+    await assertSucceeds(updateDoc(doc(asUser("user-1"), "user_settings/user-1"), { updatedAt: Timestamp.now() }));
+
+    await assertFails(getDoc(doc(asUser("user-2"), "user_settings/user-1")));
+    await assertFails(updateDoc(doc(asUser("user-2"), "user_settings/user-1"), { updatedAt: Timestamp.now() }));
+    await assertFails(deleteDoc(doc(asUser("user-2"), "user_settings/user-1")));
+    await assertFails(getDoc(doc(asUser("admin-1"), "user_settings/user-1")));
+    await assertFails(getDoc(doc(asGuest(), "user_settings/user-1")));
+    await assertFails(deleteDoc(doc(asGuest(), "user_settings/user-1")));
+    // The owner's rule never opens the admin's settings collection.
+    await assertFails(getDoc(doc(asUser("user-1"), "settings/mantooqAppSettings")));
+    await assertFails(setDoc(doc(asUser("user-1"), "settings/user-1"), values));
+
+    await assertSucceeds(deleteDoc(doc(asUser("user-1"), "user_settings/user-1")));
   });
 
   test("user_books chunks of one user cannot be listed by another", async () => {
