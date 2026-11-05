@@ -618,6 +618,22 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    // Audio URL allowance ledgers, written only by the URL functions and the
+    // Worker through the Admin SDK. Not even the owner reads their own.
+    match /url_grants/{document=**} {
+      allow read, write: if false;
+    }
+
+    match /url_grants_devices/{document=**} {
+      allow read, write: if false;
+    }
+
+    // Daily allowance digest, written by urlPolicyDigest.
+    match /url_policy_digest/{day} {
+      allow read: if isPortalAdmin();
+      allow write: if false;
+    }
+
     // Admin dashboard stats, rebuilt daily by refreshSubscriptionStats.
     match /subscription_stats/{id} {
       allow read: if isPortalAdmin();

@@ -18,6 +18,7 @@ enabled = true
 
 [vars]
 FIREBASE_PROJECT_ID = "mantooq-test"
+FIREBASE_PROJECT_NUMBER = "1008654973131"
 
 # Google's securetoken signing keys, kept forever after Google retires them so old tokens still verify.
 [[kv_namespaces]]
@@ -29,3 +30,7 @@ crons = ["17 */6 * * *"]
 
 # Secret, set with `wrangler secret put GOOGLE_SERVICE_ACCOUNT`: the JSON key of a dedicated
 # service account with Cloud Datastore User and Firebase Authentication Viewer only.
+#
+# Secrets, set with `wrangler secret put AUDIO_SIGN_CF` and `wrangler secret put AUDIO_SIGN_BUNNY`:
+# the HMAC keys the two CDNs validate signed audio links with. They are also in Secret Manager
+# under the same names for the Firebase `getUrls` function, and rotate with `urlPolicy.keyVersion`.

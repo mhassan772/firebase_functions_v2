@@ -4,27 +4,58 @@ import { REGION } from "../../config/constants";
 import { validateRequestAuthentication } from "../../utils/authentication";
 import { handleGetUrls } from "../../handlers/downloadHandlers";
 import { GetUrlsRequest } from "../../types";
-import { validateGetUrlsRequest } from "../../shared/getUrlsCore";
+import { DEFAULT_MAX_BOOKS_PER_REQUEST, GetUrlsError, validateGetUrlsRequest } from "../../shared/getUrlsCore";
+import { parseUrlPolicy } from "../../shared/urlPolicy";
 import { audioDomainForRequest } from "../../utils/audioCountry";
+import { getCachedSettings, isAttestedRequest } from "../../services/urlGrantsLedger";
 
-export const getUrls = functions.region(REGION).https.onRequest(
-  async (req: Request, res: Response) => {
+/** Secret Manager names of the HMAC keys the CDNs check; rotate them with `urlPolicy.keyVersion`. */
+export const AUDIO_SIGNING_SECRETS = { cloudflare: "AUDIO_SIGN_CF", bunny: "AUDIO_SIGN_BUNNY" };
+
+export const getUrls = functions
+  .region(REGION)
+  .runWith({ secrets: [AUDIO_SIGNING_SECRETS.cloudflare, AUDIO_SIGNING_SECRETS.bunny] })
+  .https.onRequest(async (req: Request, res: Response) => {
     try {
       const auth = await validateRequestAuthentication(req, res);
       const userId = auth.uid;
 
-      const { books, platform, deviceId } = req.body as GetUrlsRequest;
+      const { books, platform, deviceId, build_number } = req.body as GetUrlsRequest;
+      const settings = await getCachedSettings();
+      const policy = parseUrlPolicy(settings.urlPolicy);
 
-      const validationError = validateGetUrlsRequest(books, platform);
+      const validationError = validateGetUrlsRequest(
+        books,
+        platform,
+        policy?.maxBooksPerRequest ?? DEFAULT_MAX_BOOKS_PER_REQUEST
+      );
       if (validationError) {
         res.status(400).json(validationError);
         return;
       }
 
-      const response = await handleGetUrls({ books, platform, deviceId }, userId, audioDomainForRequest(req));
+      const appCheckHeader = req.header("X-Firebase-AppCheck");
+      const response = await handleGetUrls(
+        { books, platform, deviceId, build_number: build_number ? String(build_number) : undefined },
+        userId,
+        audioDomainForRequest(req),
+        {
+          settings,
+          attested: await isAttestedRequest(appCheckHeader),
+          secrets: {
+            cloudflare: process.env[AUDIO_SIGNING_SECRETS.cloudflare] ?? "",
+            bunny: process.env[AUDIO_SIGNING_SECRETS.bunny] ?? "",
+          },
+        }
+      );
       res.status(200).json(response);
     } catch (error: any) {
-      functions.logger.error(error);
+      if (error instanceof GetUrlsError) {
+        // A coded answer the client expects, such as an allowance refusal, not a failure of ours.
+        functions.logger.warn({ event: "getUrls.refused", ...error.body });
+      } else {
+        functions.logger.error(error);
+      }
 
       try {
         const parsedError = JSON.parse(error.message);
@@ -38,5 +69,4 @@ export const getUrls = functions.region(REGION).https.onRequest(
         }
       }
     }
-  }
-);
+  });

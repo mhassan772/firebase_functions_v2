@@ -2,6 +2,8 @@ export interface AuthResult {
   uid: string;
   email?: string;
   email_verified?: boolean;
+  /** The token's `firebase.sign_in_provider`; "anonymous" for a guest. */
+  signInProvider?: string;
 }
 
 export interface SubscriptionFields {
@@ -69,10 +71,21 @@ export interface BookUrlData {
   expiresAt: string;
 }
 
+/** A book the allowance policy refused; see `shared/urlPolicy.ts`. */
+export interface BookRefusal {
+  error: 609;
+  retryAfterSeconds: number;
+  allowance: number;
+  used: number;
+  kind: "books" | "samples";
+}
+
+export type GetUrlsData = Record<string, BookUrlData | BookRefusal>;
+
 export interface GetUrlsResponse {
   code: number;
   message: string;
-  data: Record<string, BookUrlData>;
+  data: GetUrlsData;
 }
 
 export interface Book {
@@ -94,6 +107,8 @@ export interface Recording {
 export interface Settings {
   isNoAuthAllowed?: boolean;
   subscription?: SubscriptionSettings;
+  /** The audio URL allowance policy, parsed by `shared/urlPolicy.ts`; absent means off. */
+  urlPolicy?: unknown;
 }
 
 export interface SubscriptionSettings {

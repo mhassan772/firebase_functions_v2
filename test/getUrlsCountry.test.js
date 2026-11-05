@@ -6,11 +6,16 @@ const { buildGroupedResponse, buildSuccessResponse } = require("../lib/shared/ge
 // point, IP extraction, bundled country lookup and URL builder together.
 const authenticationPath = require.resolve("../lib/utils/authentication");
 const handlerPath = require.resolve("../lib/handlers/downloadHandlers");
+const ledgerPath = require.resolve("../lib/services/urlGrantsLedger");
+// No settings document means the allowance policy is off.
+require.cache[ledgerPath] = { id: ledgerPath, filename: ledgerPath, loaded: true,
+  exports: { getCachedSettings: async () => ({}), isAttestedRequest: async () => false } };
 require.cache[authenticationPath] = { id: authenticationPath, filename: authenticationPath, loaded: true,
   exports: { validateRequestAuthentication: async () => ({ uid: "test-user" }) } };
 require.cache[handlerPath] = { id: handlerPath, filename: handlerPath, loaded: true,
-  exports: { handleGetUrls: async (request, uid, domain) => {
+  exports: { handleGetUrls: async (request, uid, domain, policyContext) => {
     assert.equal(uid, "test-user");
+    assert.equal(policyContext.attested, false);
     return buildSuccessResponse(buildGroupedResponse(request, [{ bookExists: true, recordings: {
       one: { name: "Chapter", duration: 1, url_list: { "64kb_url": "/book/1.opus" } },
     } }], domain));
@@ -32,6 +37,7 @@ for (const [ip, domain] of [
       method: "POST",
       headers: ip ? { "x-forwarded-for": `${ip}, 127.0.0.1` } : {},
       socket: { remoteAddress: "127.0.0.1" },
+      header(name) { return this.headers[name.toLowerCase()]; },
       body: { books: [{ bookGuid: "book", quality: 64, reason: "stream" }], platform: "ios", country: "EG" },
     };
     let status, body;
