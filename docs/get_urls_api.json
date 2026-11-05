@@ -14,7 +14,8 @@
   "request": {
     "headers": {
       "Authorization": "Bearer <firebase-id-token>",
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
+      "X-Firebase-AppCheck": "<app-check-token> (optional; a valid token gets the larger allowance)"
     },
     "body": {
       "books": {
@@ -38,7 +39,8 @@
             "enum": ["download", "stream", "sample"],
             "description": "Purpose of request - determines which counter to increment (download=num_downloads, stream=num_streams, sample=num_samples)"
           }
-        }
+        },
+        "maxItems": 40
       },
       "platform": {
         "type": "string",
@@ -54,7 +56,7 @@
       "build_number": {
         "type": "string",
         "required": false,
-        "description": "Client app build number (reserved for future minimum build check)"
+        "description": "Client app build number. Compared with urlPolicy.minBuild to decide whether the allowance policy applies; missing counts as 0"
       },
       "uid": {
         "type": "string",
@@ -110,6 +112,12 @@
         "cause": "Book object missing quality"
       },
       {
+        "code": 400,
+        "httpStatus": 400,
+        "message": "At most 40 books per request.",
+        "cause": "More than 40 books in one request"
+      },
+      {
         "code": 401,
         "httpStatus": 401,
         "message": "Missing or invalid authorization header",
@@ -152,6 +160,13 @@
         "httpStatus": 400,
         "message": "email-not-verified",
         "cause": "User's email address is not verified"
+      },
+      {
+        "code": 609,
+        "httpStatus": 400,
+        "message": "allowance-exhausted",
+        "cause": "Single-book request refused by the allowance policy",
+        "additionalFields": ["bookGuid", "retryAfterSeconds", "allowance", "used", "kind"]
       }
     ]
   },
@@ -245,5 +260,37 @@
         "platform": "android"
       }
     }
+  },
+  "allowancePolicy": {
+    "appliesWhen": "settings/mantooqAppSettings.urlPolicy exists and build_number >= urlPolicy.minBuild (minBuild 0 applies it to every build)",
+    "refusedBookEntry": {
+      "location": "data[<bookGuid>], alongside granted books",
+      "body": {
+        "error": "number - 609",
+        "retryAfterSeconds": "number - seconds until a slot frees (>= 60)",
+        "allowance": "number - new items allowed per rolling 24 hours",
+        "used": "number - new items issued in the last 24 hours",
+        "kind": "string - books | samples"
+      }
+    },
+    "singleBookRefusal": {
+      "httpStatus": 400,
+      "body": {
+        "code": 609,
+        "message": "allowance-exhausted",
+        "bookGuid": "string",
+        "retryAfterSeconds": "number",
+        "allowance": "number",
+        "used": "number",
+        "kind": "string - books | samples"
+      }
+    },
+    "expiresAt": "Real link expiry, 7 days after the request",
+    "signedUrlQuery": {
+      "books.good-storage.click": ["u", "k", "verify"],
+      "good-storage.b-cdn.net": ["token", "expires"],
+      "note": "Send URLs unchanged; the signature covers the path, so a URL cannot be rewritten to another quality"
+    },
+    "samples": "A sample request returns chapter 1 only"
   }
 }

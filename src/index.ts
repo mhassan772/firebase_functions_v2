@@ -14,6 +14,7 @@ export { appleSubscriptionNotifications } from "./functions/subscriptions/appleS
 export { googleSubscriptionNotifications } from "./functions/subscriptions/googleSubscriptionNotifications";
 export { reconcileSubscriptions } from "./functions/subscriptions/reconcileSubscriptions";
 export { refreshSubscriptionStats } from "./functions/subscriptions/refreshSubscriptionStats";
+export { urlPolicyDigest } from "./functions/urlPolicy/urlPolicyDigest";
 export { admin_upload_to_S3 } from "./functions/admin/uploadToS3";
 export { adminBlurCover } from "./functions/admin/adminBlurCover";
 export { review } from "./functions/reviews/review";

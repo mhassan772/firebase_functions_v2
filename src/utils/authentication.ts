@@ -40,7 +40,8 @@ export async function validateRequestAuthentication(
     return {
       uid: decodedToken.uid,
       email: decodedToken.email,
-      email_verified: decodedToken.email_verified
+      email_verified: decodedToken.email_verified,
+      signInProvider: decodedToken.firebase?.sign_in_provider,
     };
   } catch (error: any) {
     console.error('Authentication error:', error);

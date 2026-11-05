@@ -10,6 +10,8 @@ export interface VerifiedToken {
   uid: string;
   /** Seconds since the epoch, compared with the account's `validSince` to detect revocation. */
   issuedAt: number;
+  /** The token's `firebase.sign_in_provider`; "anonymous" for a guest. */
+  signInProvider: string | undefined;
 }
 
 /**
@@ -72,5 +74,8 @@ export async function verifyFirebaseIdToken(
     throw new AuthError("Token has no expiry.");
   }
 
-  return { uid: sub, issuedAt: iat };
+  const firebase = payload.firebase as { sign_in_provider?: unknown } | undefined;
+  const signInProvider =
+    typeof firebase?.sign_in_provider === "string" ? firebase.sign_in_provider : undefined;
+  return { uid: sub, issuedAt: iat, signInProvider };
 }

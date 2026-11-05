@@ -70,3 +70,6 @@ backfill-book-listeners-*
 service-account-key.json
 firebase-adminsdk-*.json
 migration-reports/
+
+# Functions emulator secrets (local lab only)
+.secret.local

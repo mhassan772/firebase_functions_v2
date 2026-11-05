@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { resetAppCheckKeys } from "../src/auth/appCheck";
 import { clearGoogleKeyCacheForTests } from "../src/auth/googleKeys";
 import { Env } from "../src/env";
 import { clearAccessTokenCacheForTests } from "../src/google/accessToken";
-import { handleGetUrls } from "../src/handler";
+import { decodeFields, encodeFields, EncodableValue, FirestoreTimestamp } from "../src/google/firestore";
+import { handleGetUrls, resetPolicyCache } from "../src/handler";
 import { buildGroupedResponse } from "../../../src/shared/getUrlsCore";
 import {
   createEnv,
@@ -13,6 +15,7 @@ import {
   NOW,
   NOW_SECONDS,
   recordingFields,
+  signAppCheckToken,
   signIdToken,
   SigningKey,
 } from "./helpers";
@@ -30,6 +33,8 @@ describe("handleGetUrls", () => {
     vi.setSystemTime(NOW);
     clearGoogleKeyCacheForTests();
     clearAccessTokenCacheForTests();
+    resetPolicyCache();
+    resetAppCheckKeys();
 
     env = await createEnv(new FakeKV());
     key = await createSigningKey("current");
@@ -69,10 +74,14 @@ describe("handleGetUrls", () => {
     vi.unstubAllGlobals();
   });
 
-  async function call(body: unknown, init: { method?: string; auth?: string | null; country?: string } = {}) {
+  async function call(
+    body: unknown,
+    init: { method?: string; auth?: string | null; country?: string; appCheck?: string } = {}
+  ) {
     const headers: Record<string, string> = { "content-type": "application/json" };
     const auth = init.auth === undefined ? `Bearer ${token}` : init.auth;
     if (auth !== null) headers.authorization = auth;
+    if (init.appCheck !== undefined) headers["X-Firebase-AppCheck"] = init.appCheck;
     const request = new Request("https://example.test/getUrls", {
         method: init.method ?? "POST",
         headers,
@@ -321,5 +330,334 @@ describe("handleGetUrls", () => {
 
     expect(status).toBe(400);
     expect(body).toEqual({ code: 400, message: "Invalid JSON body" });
+  });
+  describe("under the allowance policy", () => {
+    const BUNNY = "https://good-storage.b-cdn.net";
+    const DAY_MS = 24 * 60 * 60 * 1000;
+    const streamA = { bookGuid: "bookA", quality: 64, reason: "stream" };
+    const streamB = { bookGuid: "bookB", quality: 128, reason: "stream" };
+
+    function seedPolicy(overrides: Record<string, EncodableValue> = {}) {
+      google.docs = {
+        ...google.docs,
+        "settings/mantooqAppSettings": encodeFields({
+          urlPolicy: {
+            minBuild: 616,
+            enforce: true,
+            linkTtlHours: 168,
+            attested: {
+              guest: { books: 2, samples: 2 },
+              newAccount: { books: 2, samples: 2 },
+              free: { books: 3, samples: 3 },
+              premium: { books: 10, samples: 10 },
+            },
+            unattested: {
+              guest: { books: 1, samples: 1 },
+              newAccount: { books: 1, samples: 1 },
+              free: { books: 1, samples: 1 },
+              premium: { books: 5, samples: 5 },
+            },
+            ...overrides,
+          },
+        }),
+      };
+    }
+
+    async function useGuest() {
+      google.users["user-1"] = { createdAt: String(NOW.getTime() - 400 * DAY_MS) };
+      token = await signIdToken(key, { uid: "user-1", signInProvider: "anonymous" });
+    }
+
+    async function useFreeAccount() {
+      google.users["user-1"] = { emailVerified: true, createdAt: String(NOW.getTime() - 400 * DAY_MS) };
+      token = await signIdToken(key, { uid: "user-1", signInProvider: "password" });
+    }
+
+    const doc = (path: string) => decodeFields(google.docs?.[path] ?? {});
+    const written = (index: number) =>
+      google.commits[index].writes.map((write: any) => write.update.name.split("/documents/")[1]);
+
+    beforeEach(() => {
+      google.docs = {};
+      seedPolicy();
+    });
+
+    it("gives an unattested guest one book and refuses the second in the same batch", async () => {
+      await useGuest();
+
+      const { status, body } = await call({
+        books: [streamA, streamB],
+        platform: "android",
+        deviceId: "d1",
+        build_number: "616",
+      });
+
+      expect(status).toBe(200);
+      expect(body.data.bookA.recordings).toHaveLength(2);
+      expect(body.data.bookB).toEqual({
+        error: 609,
+        retryAfterSeconds: 86400,
+        allowance: 1,
+        used: 1,
+        kind: "books",
+      });
+      expect(google.beginTransactions).toBe(1);
+      expect(google.commits).toHaveLength(1);
+      expect(google.commits[0].transaction).toBe("tx-1");
+      expect(written(0)).toEqual([
+        "url_grants/user-1",
+        "url_grants/user-1/books/bookA",
+        "url_grants_devices/d1",
+      ]);
+
+      const ledger = doc("url_grants/user-1");
+      expect(ledger).toMatchObject({
+        anonymous: true,
+        recentBooksCount: 1,
+        recentSamplesCount: 0,
+        recentBooks: [{ guid: "bookA", at: NOW.toISOString() }],
+        devices: { d1: NOW.toISOString() },
+        firstGrantAt: NOW.toISOString(),
+        createdAt: new Date(NOW.getTime() - 400 * DAY_MS).toISOString(),
+      });
+      expect(doc("url_grants/user-1/books/bookA")).toEqual({
+        firstAt: NOW.toISOString(),
+        kind: "books",
+        reason: "stream",
+      });
+      expect(doc("url_grants_devices/d1")).toMatchObject({
+        guestUids: { "user-1": NOW.toISOString() },
+        guestUidsCount: 1,
+        recentBooksCount: 1,
+      });
+
+      // The same book again is known: granted, and nothing new is recorded.
+      vi.setSystemTime(NOW.getTime() + 60_000);
+      const again = await call({ books: [streamA], platform: "android", deviceId: "d1", build_number: "616" });
+
+      expect(again.status).toBe(200);
+      expect(again.body.data.bookA.recordings).toHaveLength(2);
+      expect(written(1)).toEqual(["url_grants/user-1", "url_grants_devices/d1"]);
+      expect(doc("url_grants/user-1")).toMatchObject({
+        recentBooksCount: 1,
+        firstGrantAt: NOW.toISOString(),
+        recentBooks: [{ guid: "bookA", at: NOW.toISOString() }],
+      });
+      expect(doc("url_grants_devices/d1").recentBooksCount).toBe(1);
+    });
+
+    it("binds a guest by the device's list across anonymous accounts", async () => {
+      await useGuest();
+      await call({ books: [streamA], platform: "android", deviceId: "d1", build_number: "616" });
+
+      google.users["user-2"] = {};
+      token = await signIdToken(key, { uid: "user-2", signInProvider: "anonymous" });
+      const { status, body } = await call({ books: [streamB], platform: "android", deviceId: "d1", build_number: "616" });
+
+      expect(status).toBe(400);
+      expect(body).toMatchObject({ code: 609, bookGuid: "bookB", used: 1, allowance: 1 });
+      expect(doc("url_grants_devices/d1").guestUidsCount).toBe(2);
+    });
+
+    it("signs Cloudflare links for an attested free account", async () => {
+      await useFreeAccount();
+
+      const { status, body } = await call(
+        { books: [streamA, streamB], platform: "android", build_number: "616" },
+        { appCheck: await signAppCheckToken(env) }
+      );
+
+      expect(status).toBe(200);
+      const url = new URL(body.data.bookA.recordings[0].url);
+      expect(url.origin).toBe(DOMAIN);
+      expect(url.pathname).toBe("/643/64/64_1.opus");
+      expect(url.searchParams.get("u")).toBe("c6c289e4");
+      expect(url.searchParams.get("k")).toBe("1");
+      expect(url.searchParams.get("verify")).toMatch(new RegExp(`^${NOW_SECONDS}-[A-Za-z0-9_-]{43}$`));
+      expect([...url.searchParams.keys()].at(-1)).toBe("verify");
+      expect(body.data.bookB.recordings[0].url).toContain("verify=");
+      expect(body.data.bookA.expiresAt).toBe(new Date(NOW.getTime() + 168 * 3600 * 1000).toISOString());
+      expect(doc("url_grants/user-1")).toMatchObject({ anonymous: false, recentBooksCount: 2 });
+    });
+
+    it("signs Bunny links for EG", async () => {
+      await useFreeAccount();
+
+      const { body } = await call(
+        { books: [streamA], platform: "android", build_number: "616" },
+        { country: "EG", appCheck: await signAppCheckToken(env) }
+      );
+
+      const url = new URL(body.data.bookA.recordings[0].url);
+      expect(url.origin).toBe(BUNNY);
+      expect(url.searchParams.get("token")).toMatch(/^HS256-[A-Za-z0-9_-]{43}$/);
+      expect(url.searchParams.get("expires")).toBe(String(NOW_SECONDS + 168 * 3600));
+    });
+
+    it("treats a free account without a valid App Check token as unattested", async () => {
+      await useFreeAccount();
+
+      const wrongProject = await signAppCheckToken(env, { aud: "projects/1" });
+      const { body } = await call(
+        { books: [streamA, streamB], platform: "android", build_number: "616" },
+        { appCheck: wrongProject }
+      );
+
+      expect(body.data.bookA.recordings).toHaveLength(2);
+      expect(body.data.bookB).toMatchObject({ error: 609, allowance: 1 });
+    });
+
+    it("gives a young account the newAccount allowance", async () => {
+      await useFreeAccount();
+      google.users["user-1"].createdAt = String(NOW.getTime() - 2 * DAY_MS);
+      seedPolicy({ unattested: { newAccount: { books: 1 }, free: { books: 5 } } });
+
+      const { body } = await call({ books: [streamA, streamB], platform: "android", build_number: "616" });
+
+      expect(body.data.bookA.recordings).toHaveLength(2);
+      expect(body.data.bookB).toMatchObject({ error: 609, allowance: 1 });
+    });
+
+    it("returns one recording for a sample", async () => {
+      await useFreeAccount();
+
+      const { body } = await call({
+        books: [{ bookGuid: "bookA", quality: 64, reason: "sample" }],
+        platform: "android",
+        build_number: "616",
+      });
+
+      expect(body.data.bookA.recordings).toHaveLength(1);
+      expect(body.data.bookA.recordings[0].name).toBe("Part 1");
+      expect(doc("url_grants/user-1/books/bookA").kind).toBe("samples");
+      expect(doc("url_grants/user-1").recentSamplesCount).toBe(1);
+    });
+
+    it("answers 400 code 609 for a single refused book", async () => {
+      await useFreeAccount();
+      await call({ books: [streamA], platform: "android", build_number: "616" });
+
+      const { status, body } = await call({ books: [streamB], platform: "android", build_number: "616" });
+
+      expect(status).toBe(400);
+      expect(body).toEqual({
+        code: 609,
+        message: "allowance-exhausted",
+        bookGuid: "bookB",
+        error: 609,
+        retryAfterSeconds: 86400,
+        allowance: 1,
+        used: 1,
+        kind: "books",
+      });
+    });
+
+    it("gives a build below minBuild the old unsigned response and writes nothing", async () => {
+      await useGuest();
+
+      const { status, body } = await call({
+        books: [streamA, streamB],
+        platform: "android",
+        deviceId: "d1",
+        build_number: "600",
+      });
+
+      expect(status).toBe(200);
+      expect(body.data.bookA.recordings[0].url).toBe(`${DOMAIN}/643/64/64_1.opus`);
+      expect(body.data.bookB.recordings[0].url).toBe(`${DOMAIN}/b/128/1.opus`);
+      expect(google.beginTransactions ?? 0).toBe(0);
+      expect(google.commits).toHaveLength(0);
+    });
+
+    it("grants everything when enforce is off but still keeps the ledger", async () => {
+      seedPolicy({ enforce: false });
+      await useGuest();
+
+      const { status, body } = await call({
+        books: [streamA, streamB],
+        platform: "android",
+        deviceId: "d1",
+        build_number: "616",
+      });
+
+      expect(status).toBe(200);
+      expect(body.data.bookA.recordings).toHaveLength(2);
+      expect(body.data.bookB.recordings).toHaveLength(1);
+      expect(body.data.bookB.recordings[0].url).toContain("verify=");
+      expect(doc("url_grants/user-1").recentBooksCount).toBe(2);
+    });
+
+    it("retries an ABORTED commit from a fresh transaction", async () => {
+      await useFreeAccount();
+      google.failNextCommits = 1;
+
+      const { status, body } = await call({ books: [streamA], platform: "android", build_number: "616" });
+
+      expect(status).toBe(200);
+      expect(body.data.bookA.recordings).toHaveLength(2);
+      expect(google.beginTransactions).toBe(2);
+      expect(google.commits).toHaveLength(1);
+      expect(google.commits[0].transaction).toBe("tx-2");
+    });
+
+    it("answers 500 when the commit is aborted twice", async () => {
+      await useFreeAccount();
+      google.failNextCommits = 2;
+
+      const { status } = await call({ books: [streamA], platform: "android", build_number: "616" });
+
+      expect(status).toBe(500);
+      expect(google.beginTransactions).toBe(2);
+    });
+
+    it("gives an active subscription the premium allowance", async () => {
+      await useFreeAccount();
+      seedPolicy({ unattested: { free: { books: 1 }, premium: { books: 2 } } });
+      google.docs!["subscription_master/user-1"] = encodeFields({
+        active: true,
+        expiresAt: new FirestoreTimestamp(NOW.getTime() + DAY_MS),
+      });
+
+      const { status, body } = await call({ books: [streamA, streamB], platform: "android", build_number: "616" });
+
+      expect(status).toBe(200);
+      expect(body.data.bookA.recordings).toHaveLength(2);
+      expect(body.data.bookB.recordings).toHaveLength(1);
+    });
+
+    it("treats an expired subscription as free", async () => {
+      await useFreeAccount();
+      seedPolicy({ unattested: { free: { books: 1 }, premium: { books: 2 } } });
+      google.docs!["subscription_master/user-1"] = encodeFields({
+        active: true,
+        expiresAt: new FirestoreTimestamp(NOW.getTime() - 1000),
+      });
+
+      const { status, body } = await call({ books: [streamA, streamB], platform: "android", build_number: "616" });
+
+      expect(status).toBe(200);
+      expect(body.data.bookB).toMatchObject({ error: 609, allowance: 1 });
+    });
+
+    it("answers 400 for more than maxBooksPerRequest books", async () => {
+      await useFreeAccount();
+      const books = Array.from({ length: 41 }, () => streamA);
+
+      const { status, body } = await call({ books, platform: "android", build_number: "616" });
+
+      expect(status).toBe(400);
+      expect(body).toEqual({ code: 400, message: "At most 40 books per request." });
+      expect(google.commits).toHaveLength(0);
+    });
+
+    it("lowers the cap through the policy", async () => {
+      seedPolicy({ maxBooksPerRequest: 1 });
+      await useFreeAccount();
+
+      const { status, body } = await call({ books: [streamA, streamB], platform: "android", build_number: "600" });
+
+      expect(status).toBe(400);
+      expect(body.message).toBe("At most 1 books per request.");
+    });
   });
 });

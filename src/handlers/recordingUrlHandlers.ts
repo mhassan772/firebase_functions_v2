@@ -41,14 +41,13 @@ export async function respondWithRecordingUrls(
     const auth = await validateLegacyRequestAuthentication(request);
     const settings = await getSettings();
     const result = await handler(request.body as RecordingUrlsRequest, auth.uid, settings);
-    functions.logger.info(`${logLabel} is: ` + JSON.stringify(result));
     response.json(result).status(200);
   } catch (error) {
     if (error instanceof functions.https.HttpsError) {
-      functions.logger.error(error.code, error.message, error, request.body, request.headers);
+      functions.logger.error(error.code, error.message, error, request.body);
       response.status(400).send(error.message);
     } else {
-      functions.logger.error(error, request.body, request.headers);
+      functions.logger.error(error, request.body);
       response.status(500).send(JSON.stringify({ code: 607, message: "unexpected-error", data: error }));
     }
   }

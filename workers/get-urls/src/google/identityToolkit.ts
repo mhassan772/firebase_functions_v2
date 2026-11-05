@@ -6,6 +6,8 @@ export interface AuthAccount {
   disabled: boolean;
   /** Seconds since the epoch; tokens issued before it were revoked. */
   validSince: number | null;
+  /** Epoch milliseconds the account was created; null when Google did not say. */
+  createdAtMs: number | null;
 }
 
 /** Looks up a Firebase Auth account by uid, the REST equivalent of `admin.auth().getUser`. */
@@ -26,7 +28,7 @@ export async function lookupAccount(uid: string, env: Env): Promise<AuthAccount 
   }
 
   const { users } = (await response.json()) as {
-    users?: { emailVerified?: boolean; disabled?: boolean; validSince?: string }[];
+    users?: { emailVerified?: boolean; disabled?: boolean; validSince?: string; createdAt?: string }[];
   };
   const user = users?.[0];
   if (!user) return null;
@@ -35,5 +37,6 @@ export async function lookupAccount(uid: string, env: Env): Promise<AuthAccount 
     emailVerified: user.emailVerified === true,
     disabled: user.disabled === true,
     validSince: user.validSince ? Number(user.validSince) : null,
+    createdAtMs: user.createdAt && Number.isFinite(Number(user.createdAt)) ? Number(user.createdAt) : null,
   };
 }

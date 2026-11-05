@@ -338,6 +338,42 @@ describe("admin portal roles", () => {
     await assertSucceeds(getDoc(doc(asUser("user-1"), "subscription_migration_restoration/req-2")));
   });
 
+  test("audio URL ledgers are closed to every client, the owner and portal roles included", async () => {
+    await env.withSecurityRulesDisabled(async (context) => {
+      const db = context.firestore();
+      await setDoc(doc(db, "url_grants/user-1"), { recentBooksCount: 1 });
+      await setDoc(doc(db, "url_grants/user-1/books/b1"), { kind: "books" });
+      await setDoc(doc(db, "url_grants_devices/d1"), { guestUidsCount: 1 });
+    });
+    const clients = [asUser("user-2"), asUser("user-1"), asUser("cm-1"), asUser("admin-1"), asGuest()];
+    for (const path of ["url_grants/user-1", "url_grants/user-1/books/b1", "url_grants_devices/d1"]) {
+      const parent = path.slice(0, path.lastIndexOf("/"));
+      for (const db of clients) {
+        await assertFails(getDoc(doc(db, path)));
+        await assertFails(getDocs(collection(db, parent)));
+        await assertFails(setDoc(doc(db, path), { recentBooksCount: 0 }));
+      }
+    }
+  });
+
+  test("url_policy_digest: admins read it, nobody writes it", async () => {
+    await env.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "url_policy_digest/20261105"), { histogram: {} });
+    });
+    for (const uid of admins) {
+      await assertSucceeds(getDoc(doc(asUser(uid), "url_policy_digest/20261105")));
+      await assertSucceeds(getDocs(collection(asUser(uid), "url_policy_digest")));
+    }
+    for (const uid of others(admins)) {
+      await assertFails(getDoc(doc(asUser(uid), "url_policy_digest/20261105")));
+    }
+    await assertFails(getDoc(doc(asGuest(), "url_policy_digest/20261105")));
+    for (const db of [...everyone.map(asUser), asGuest()]) {
+      await assertFails(setDoc(doc(db, "url_policy_digest/20261105"), { histogram: { x: 1 } }));
+      await assertFails(deleteDoc(doc(db, "url_policy_digest/20261105")));
+    }
+  });
+
   test("subscription stats and the legacy manual grants stay with admins, approvers included", async () => {
     for (const uid of admins) {
       await assertSucceeds(getDoc(doc(asUser(uid), "subscription_stats/current")));

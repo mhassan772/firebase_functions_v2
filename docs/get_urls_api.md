@@ -69,7 +69,7 @@ Content-Type: application/json
 | `books[].reason` | String | Yes | Purpose of the request: `download`, `stream` or `sample`. It is validated but not recorded |
 | `platform` | String | Yes | Target platform - determines file format |
 | `deviceId` | String | No | Device identifier. Accepted for older apps; not stored |
-| `build_number` | String | No | Client app build number (reserved for future minimum build check) |
+| `build_number` | String | No | Client app build number. Decides whether the allowance policy applies (see Allowance policy) |
 | `uid` | String | NoAuth only | Firebase user ID (only for `getUrlsNoAuth`) |
 
 ### Platform Effects
@@ -336,6 +336,78 @@ curl -X POST \
     "platform": "android"
   }'
 ```
+
+---
+
+## Allowance policy
+
+The policy is switched on by the `urlPolicy` block of `settings/mantooqAppSettings`. Without that block, or for a build below its `minBuild`, the endpoint answers as described above. The request cap applies to every build.
+
+### Request
+
+| Field / header | Description |
+|----------------|-------------|
+| `build_number` | Now read. Compared with `minBuild` to decide whether the request is under the policy; a missing or non-numeric value counts as build 0 |
+| `X-Firebase-AppCheck` (header, optional) | Firebase App Check token. A request with a valid token gets the larger allowance; without one it gets the smaller allowance |
+| `books` | At most 40 books per request. A longer list fails with HTTP 400: `{"code": 400, "message": "At most 40 books per request."}` |
+
+### Response under the policy
+
+Granted books keep the shape above. A book the allowance refused is a refusal entry in `data` next to the granted ones:
+
+```json
+{
+  "code": 600,
+  "message": "success",
+  "data": {
+    "<grantedBookGuid>": {
+      "recordings": [{ "name": "Chapter 1", "duration": 1234, "ext": "m4a", "url": "https://books.good-storage.click/path/to/file.m4a?u=...&k=...&verify=..." }],
+      "expiresAt": "2026-11-12T12:00:00.000Z"
+    },
+    "<refusedBookGuid>": {
+      "error": 609,
+      "retryAfterSeconds": 3600,
+      "allowance": 10,
+      "used": 10,
+      "kind": "books"
+    }
+  }
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `data[bookGuid].error` | Number | `609` when the book was refused |
+| `data[bookGuid].retryAfterSeconds` | Number | Seconds until the allowance frees a slot (at least 60) |
+| `data[bookGuid].allowance` | Number | New books (or samples) allowed per rolling 24 hours |
+| `data[bookGuid].used` | Number | New books (or samples) issued in the last 24 hours |
+| `data[bookGuid].kind` | String | `books` for streams and downloads, `samples` for samples |
+
+A book already issued to the account in the window does not use the allowance again.
+
+When the request holds a single book and it is refused, the response is HTTP 400 with the refusal at the top level, so clients that only handle errors still see one code:
+
+```json
+{
+  "code": 609,
+  "message": "allowance-exhausted",
+  "bookGuid": "<bookGuid>",
+  "retryAfterSeconds": 3600,
+  "allowance": 10,
+  "used": 10,
+  "kind": "books"
+}
+```
+
+| Code | HTTP Status | Message | Description |
+|------|-------------|---------|-------------|
+| 609 | 400 | `allowance-exhausted` | Single-book request refused by the allowance |
+
+### Links under the policy
+
+- **Expiry**: `expiresAt` is the real expiry of the links, 7 days after the request. After it the CDN refuses them; request new ones.
+- **Signed query parameters**: on the Cloudflare host (`books.good-storage.click`) each URL carries `u`, `k` and `verify`; on the Bunny host (`good-storage.b-cdn.net`) it carries `token` and `expires`. Send the URL unchanged. The signature covers the path, so a URL cannot be rewritten to another quality or file; request the other quality instead.
+- **Samples**: a `sample` request returns chapter 1 only.
 
 ---
 
