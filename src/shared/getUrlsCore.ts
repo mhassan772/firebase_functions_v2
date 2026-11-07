@@ -27,6 +27,19 @@ export function audioDomainForCountry(country: unknown): string {
     : ORIGINAL_PUBLIC_DOMAIN;
 }
 
+/**
+ * The CDN host for a request: the provider the app asked for, else the country's default.
+ *
+ * The app names a provider when its usual CDN is unreachable from where the listener is.
+ */
+export function audioDomainFor(provider: unknown, country: unknown): string {
+  if (provider === "bunny") return PUBLIC_DOMAIN;
+  if (provider === "cloudflare") return ORIGINAL_PUBLIC_DOMAIN;
+  return audioDomainForCountry(country);
+}
+
+const VALID_PROVIDERS: readonly unknown[] = ["bunny", "cloudflare"];
+
 const VALID_REASONS = ["download", "stream", "sample"];
 
 /** The cap applies to every build; the policy block can lower it. */
@@ -85,7 +98,8 @@ export function allowsUnverifiedEmail(books: { reason?: string }[]): boolean {
 export function validateGetUrlsRequest(
   books: BookItem[] | undefined,
   platform: string | undefined,
-  maxBooks: number = DEFAULT_MAX_BOOKS_PER_REQUEST
+  maxBooks: number = DEFAULT_MAX_BOOKS_PER_REQUEST,
+  provider?: unknown
 ): ApiErrorBody | null {
   if (!books || !Array.isArray(books) || books.length === 0) {
     return { code: 400, message: "Missing or invalid 'books' field. Expected non-empty array." };
@@ -97,6 +111,10 @@ export function validateGetUrlsRequest(
 
   if (!platform) {
     return { code: 400, message: "Missing required field: platform" };
+  }
+
+  if (provider !== undefined && !VALID_PROVIDERS.includes(provider)) {
+    return { code: 400, message: "Invalid 'provider'. Expected bunny or cloudflare." };
   }
 
   for (const book of books) {

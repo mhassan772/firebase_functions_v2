@@ -1,3 +1,5 @@
+import type { Cdn } from "../shared/audioSigning";
+
 export interface AuthResult {
   uid: string;
   email?: string;
@@ -57,6 +59,8 @@ export interface GetUrlsRequest {
   platform: string;
   deviceId?: string;
   build_number?: string;
+  /** Asks for one CDN, so the app can retry on the other when its usual one fails to play. */
+  provider?: Cdn;
 }
 
 export interface RecordingUrl {

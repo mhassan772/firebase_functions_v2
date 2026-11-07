@@ -58,6 +58,12 @@
         "required": false,
         "description": "Client app build number. Compared with urlPolicy.minBuild to decide whether the allowance policy applies; missing counts as 0"
       },
+      "provider": {
+        "type": "string",
+        "required": false,
+        "enum": ["bunny", "cloudflare"],
+        "description": "CDN to issue links on, overriding the country rule so the app can switch when one fails to play: bunny = https://good-storage.b-cdn.net, cloudflare = https://books.good-storage.click. Any other value is a 400. getUrls and the Worker only"
+      },
       "uid": {
         "type": "string",
         "required": "only for getUrlsNoAuth",

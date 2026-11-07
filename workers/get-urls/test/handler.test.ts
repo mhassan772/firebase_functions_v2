@@ -141,6 +141,34 @@ describe("handleGetUrls", () => {
     ]);
   });
 
+  it.each([
+    ["EG", "cloudflare", DOMAIN],
+    ["US", "bunny", "https://good-storage.b-cdn.net"],
+  ])("lets the requested provider override country %s", async (country, provider, domain) => {
+    const { status, body } = await call({
+      books: [{ bookGuid: "bookA", quality: 64, reason: "stream" }],
+      platform: "ios",
+      provider,
+    }, { country });
+
+    expect(status).toBe(200);
+    expect(body.data.bookA.recordings.map((recording: { url: string }) => recording.url)).toEqual([
+      `${domain}/643/64/64_1.m4a`,
+      `${domain}/643/64/64_2.m4a`,
+    ]);
+  });
+
+  it("answers 400 for an unknown provider", async () => {
+    const { status, body } = await call({
+      books: [{ bookGuid: "bookA", quality: 64, reason: "stream" }],
+      platform: "ios",
+      provider: "akamai",
+    });
+
+    expect(status).toBe(400);
+    expect(body).toEqual({ code: 400, message: "Invalid 'provider'. Expected bunny or cloudflare." });
+  });
+
   it("defaults to Bunny CDN for Firebase callers that do not override the domain", () => {
     const data = buildGroupedResponse({
       books: [{ bookGuid: "bookA", quality: 64, reason: "stream" }],
@@ -492,6 +520,36 @@ describe("handleGetUrls", () => {
       expect(url.origin).toBe(BUNNY);
       expect(url.searchParams.get("token")).toMatch(/^HS256-[A-Za-z0-9_-]{43}$/);
       expect(url.searchParams.get("expires")).toBe(String(NOW_SECONDS + 168 * 3600));
+    });
+
+    it("signs Cloudflare links for EG when the app asks for cloudflare", async () => {
+      await useFreeAccount();
+
+      const { body } = await call(
+        { books: [streamA], platform: "android", build_number: "616", provider: "cloudflare" },
+        { country: "EG", appCheck: await signAppCheckToken(env) }
+      );
+
+      const url = new URL(body.data.bookA.recordings[0].url);
+      expect(url.origin).toBe(DOMAIN);
+      expect(url.searchParams.get("verify")).toMatch(new RegExp(`^${NOW_SECONDS}-[A-Za-z0-9_-]{43}$`));
+      expect([...url.searchParams.keys()].at(-1)).toBe("verify");
+      expect(url.searchParams.has("token")).toBe(false);
+    });
+
+    it("signs Bunny links for US when the app asks for bunny", async () => {
+      await useFreeAccount();
+
+      const { body } = await call(
+        { books: [streamA], platform: "android", build_number: "616", provider: "bunny" },
+        { country: "US", appCheck: await signAppCheckToken(env) }
+      );
+
+      const url = new URL(body.data.bookA.recordings[0].url);
+      expect(url.origin).toBe(BUNNY);
+      expect(url.searchParams.get("token")).toMatch(/^HS256-[A-Za-z0-9_-]{43}$/);
+      expect(url.searchParams.get("expires")).toBe(String(NOW_SECONDS + 168 * 3600));
+      expect(url.searchParams.has("verify")).toBe(false);
     });
 
     it("treats a free account without a valid App Check token as unattested", async () => {
