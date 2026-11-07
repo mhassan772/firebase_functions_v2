@@ -4,7 +4,7 @@ A Cloudflare Worker that serves `getUrls` for users who cannot reach Google. Its
 
 ## Differences from the Firebase function
 
-- **Country lookup.** IPs from Egypt (`EG`), Algeria (`DZ`), and Lebanon (`LB`) receive `https://good-storage.b-cdn.net`; all other or unknown locations receive `https://books.good-storage.click`. Firebase `getUrls` uses the same rule with bundled IPverse country registrations instead of Cloudflare metadata; the providers can disagree about a country's assignment.
+- **Country lookup.** IPs from Egypt (`EG`), Algeria (`DZ`), and Lebanon (`LB`) receive `https://good-storage.b-cdn.net`; all other or unknown locations receive `https://books.good-storage.click`. Firebase `getUrls` uses the same rule with bundled IPverse country registrations instead of Cloudflare metadata; the providers can disagree about a country's assignment. A request that sets `provider` (`bunny` or `cloudflare`) gets that host instead, in both servers, so the app can switch CDN when one fails to play.
 - **Expired ID tokens.** A token is accepted after it expires, for as long as its account is not deleted, disabled or revoked, because users who cannot reach Google cannot refresh it. Google's signing keys are kept in KV with no expiry so old tokens can still be verified.
 - **Disabled and revoked accounts.** Every request looks up the account, and a disabled account or revoked sessions get a 401.
 - **Requests.** POST only. A body that is not JSON gets a 400.

@@ -4,7 +4,7 @@ const { readFileSync } = require("node:fs");
 const { packCountries } = require("../scripts/build-country-database.cjs");
 const { CountryDatabase } = require("../lib/utils/countryDatabase");
 const { clientPublicIp, createAudioDomainResolver, COUNTRY_DATABASE_PATH } = require("../lib/utils/audioCountry");
-const { buildGroupedResponse, audioDomainForCountry } = require("../lib/shared/getUrlsCore");
+const { buildGroupedResponse, audioDomainFor, audioDomainForCountry } = require("../lib/shared/getUrlsCore");
 
 const BUNNY = "https://good-storage.b-cdn.net";
 const ORIGINAL = "https://books.good-storage.click";
@@ -52,6 +52,16 @@ test("only explicit EG, DZ and LB use Bunny; unknown lookup and client country h
   req.headers["cf-ipcountry"] = "EG";
   req.body = { country: "EG" };
   assert.equal(createAudioDomainResolver(() => ({ get: () => undefined }))(req), ORIGINAL);
+});
+
+test("a requested provider overrides the country; absent falls back to it", () => {
+  for (const country of ["EG", "US", undefined]) {
+    assert.equal(audioDomainFor("bunny", country), BUNNY);
+    assert.equal(audioDomainFor("cloudflare", country), ORIGINAL);
+  }
+  assert.equal(audioDomainFor(undefined, "EG"), BUNNY);
+  assert.equal(audioDomainFor(undefined, "US"), ORIGINAL);
+  assert.equal(audioDomainFor(undefined, undefined), ORIGINAL);
 });
 
 test("database loads once per resolver; missing/corrupt data falls back and reports once", () => {

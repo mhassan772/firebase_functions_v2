@@ -21,6 +21,21 @@ require.cache[handlerPath] = { id: handlerPath, filename: handlerPath, loaded: t
     } }], domain));
   } } };
 const { getUrls } = require("../lib/functions/downloads/getUrls");
+const audioCountry = require("../lib/utils/audioCountry");
+
+async function callGetUrls(ip, extraBody = {}) {
+  const req = {
+    method: "POST",
+    headers: ip ? { "x-forwarded-for": `${ip}, 127.0.0.1` } : {},
+    socket: { remoteAddress: "127.0.0.1" },
+    header(name) { return this.headers[name.toLowerCase()]; },
+    body: { books: [{ bookGuid: "book", quality: 64, reason: "stream" }], platform: "ios", country: "EG", ...extraBody },
+  };
+  let status, body;
+  const res = { status(code) { status = code; return this; }, json(value) { body = value; return this; } };
+  await getUrls(req, res);
+  return { status, body };
+}
 
 for (const [ip, domain] of [
   ["197.32.0.1", "https://good-storage.b-cdn.net"],
@@ -47,3 +62,26 @@ for (const [ip, domain] of [
     assert.equal(body.data.book.recordings[0].url, `${domain}/book/1.m4a`);
   });
 }
+
+for (const [ip, provider, domain] of [
+  ["197.32.0.1", "cloudflare", "https://books.good-storage.click"],
+  ["8.8.8.8", "bunny", "https://good-storage.b-cdn.net"],
+]) {
+  test(`Firebase getUrls uses the requested ${provider} host for ${ip} without an IP lookup`, async () => {
+    const lookup = audioCountry.audioDomainForRequest;
+    audioCountry.audioDomainForRequest = () => { throw new Error("IP lookup must be skipped"); };
+    try {
+      const { status, body } = await callGetUrls(ip, { provider });
+      assert.equal(status, 200);
+      assert.equal(body.data.book.recordings[0].url, `${domain}/book/1.m4a`);
+    } finally {
+      audioCountry.audioDomainForRequest = lookup;
+    }
+  });
+}
+
+test("Firebase getUrls answers 400 for an unknown provider", async () => {
+  const { status, body } = await callGetUrls("8.8.8.8", { provider: "akamai" });
+  assert.equal(status, 400);
+  assert.deepEqual(body, { code: 400, message: "Invalid 'provider'. Expected bunny or cloudflare." });
+});

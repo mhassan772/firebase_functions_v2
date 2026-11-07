@@ -70,6 +70,7 @@ Content-Type: application/json
 | `platform` | String | Yes | Target platform - determines file format |
 | `deviceId` | String | No | Device identifier. Accepted for older apps; not stored |
 | `build_number` | String | No | Client app build number. Decides whether the allowance policy applies (see Allowance policy) |
+| `provider` | String | No | `bunny` (`https://good-storage.b-cdn.net`) or `cloudflare` (`https://books.good-storage.click`). Overrides the country rule so the app can switch CDN when one fails to play; absent keeps the country rule. Any other value fails with HTTP 400: `{"code": 400, "message": "Invalid 'provider'. Expected bunny or cloudflare."}`. Read by `getUrls` and the Worker only |
 | `uid` | String | NoAuth only | Firebase user ID (only for `getUrlsNoAuth`) |
 
 ### Platform Effects
@@ -349,6 +350,7 @@ The policy is switched on by the `urlPolicy` block of `settings/mantooqAppSettin
 |----------------|-------------|
 | `build_number` | Now read. Compared with `minBuild` to decide whether the request is under the policy; a missing or non-numeric value counts as build 0 |
 | `X-Firebase-AppCheck` (header, optional) | Firebase App Check token. A request with a valid token gets the larger allowance; without one it gets the smaller allowance |
+| `provider` | Chooses the host as above; each link is signed in that host's format (Cloudflare `verify`, Bunny `token` and `expires`) |
 | `books` | At most 40 books per request. A longer list fails with HTTP 400: `{"code": 400, "message": "At most 40 books per request."}` |
 
 ### Response under the policy

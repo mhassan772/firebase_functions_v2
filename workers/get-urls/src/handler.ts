@@ -10,7 +10,7 @@ import {
   emailNotVerifiedError,
   GetUrlsError,
   notFoundUserError,
-  audioDomainForCountry,
+  audioDomainFor,
   validateGetUrlsRequest,
 } from "../../../src/shared/getUrlsCore";
 import { uidHash } from "../../../src/shared/audioSigning";
@@ -93,11 +93,12 @@ export async function handleGetUrls(request: Request, env: Env): Promise<Respons
 
   try {
     const policy = await readPolicy(env);
-    const { books, platform, deviceId, build_number } = body;
+    const { books, platform, deviceId, build_number, provider } = body;
     const validationError = validateGetUrlsRequest(
       books,
       platform,
-      policy?.maxBooksPerRequest ?? DEFAULT_MAX_BOOKS_PER_REQUEST
+      policy?.maxBooksPerRequest ?? DEFAULT_MAX_BOOKS_PER_REQUEST,
+      provider
     );
     if (validationError) {
       return json(400, validationError);
@@ -107,6 +108,7 @@ export async function handleGetUrls(request: Request, env: Env): Promise<Respons
       platform: platform!,
       deviceId,
       build_number: build_number === undefined ? undefined : String(build_number),
+      provider,
     };
     const applies = policyApplies(policy, getUrlsRequest.build_number);
 
@@ -139,9 +141,9 @@ export async function handleGetUrls(request: Request, env: Env): Promise<Respons
       bookExists: bookDocs.get(guid) != null,
       recordings: recordingsByGuid.get(guid) ?? null,
     }));
-    // Country comes from Cloudflare's IP geolocation, not the request body.
-    // Unknown locations use the original domain.
-    const publicDomain = audioDomainForCountry(request.cf?.country);
+    // A provider the app asked for wins; otherwise the country comes from Cloudflare's IP
+    // geolocation, not the request body. Unknown locations use the original domain.
+    const publicDomain = audioDomainFor(getUrlsRequest.provider, request.cf?.country);
 
     if (!applies || !policy) {
       return json(200, buildSuccessResponse(buildGroupedResponse(getUrlsRequest, sources, publicDomain)));
