@@ -646,22 +646,36 @@ service cloud.firestore {
     }
 
 		
-    // DONATION PAGE
-    // Storefront catalog: public read, server-only writes.
+    // DONATION PAGE (mantooq-donation). Cloud Functions and scripts use the
+    // Admin SDK and bypass these rules.
+    // Storefront catalog: public read; the admin console manages books.
     match /DONATE_books/{bookId} {
       allow read: if true;
+      allow write: if isPortalAdmin();
+    }
+
+    // Donor records and email history: the admin console may read them.
+    match /DONATE_donations/{donationId} {
+      allow read: if isPortalAdmin();
+      allow write: if false;
+    }
+    match /DONATE_mail_log/{logId} {
+      allow read: if isPortalAdmin();
       allow write: if false;
     }
 
-    // Donor records and mail audit log: server-only (Cloud Functions /
-    // Admin SDK bypass these rules).
-    match /DONATE_donations/{donationId} {
+    // Custom emails: the admin console creates them and sets `request`;
+    // the onCampaignWrite function does the sending.
+    match /DONATE_campaigns/{campaignId} {
+      allow read, create, update: if isPortalAdmin();
+      allow delete: if false;
+    }
+
+    // Unsubscribe tokens: server only.
+    match /DONATE_email_prefs/{prefId} {
       allow read, write: if false;
     }
-    match /DONATE_mail_log/{logId} {
-      allow read, write: if false;
-    }
-    
+
     match /{document=**} {
       allow read: if false;
       allow write: if false;
