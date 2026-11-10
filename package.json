@@ -16,6 +16,7 @@
     "emulators:seed": "node scripts/emulator/seed.mjs",
     "backfill:podcast-audit": "node scripts/backfill/podcast-audit.mjs",
     "backfill:book-listeners": "TZ=UTC node scripts/backfill/book-listeners.mjs",
+    "backfill:listen-stats": "TZ=UTC node scripts/backfill/listen-stats.mjs",
     "cleanup:delete-collection": "node scripts/cleanup/delete-collection.mjs",
     "test:integration": "npm run build && bash scripts/emulator/with-java.sh firebase emulators:exec --config firebase.integration-test.json --only firestore,auth --project demo-mantooq 'node --test --test-concurrency=1 test/integration/*.test.js'",
     "admin:manual-grant": "node scripts/admin/manual-grant.mjs",

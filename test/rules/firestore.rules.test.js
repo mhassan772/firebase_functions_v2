@@ -853,6 +853,43 @@ describe("book listeners", () => {
   });
 });
 
+describe("listening stats", () => {
+  const privateDocs = {
+    "podcast_listeners/user-1_p-1": { podcast_id: "p-1", user_guid: "user-1", seconds: 600, updatedAt: Timestamp.now() },
+    "listener_totals/user-1": { user_guid: "user-1", bookSeconds: 600, podcastSeconds: 0, totalSeconds: 600, isListener: true },
+  };
+  const statsPath = "public_stats/site";
+  const stats = { listeners: 10, hoursListened: 100, audiobooks: 5, donors: 2 };
+
+  test("no client reads or writes podcast lines or user totals, the owner and admins included", async () => {
+    await env.withSecurityRulesDisabled(async (context) => {
+      for (const [path, data] of Object.entries(privateDocs)) {
+        await setDoc(doc(context.firestore(), path), data);
+      }
+    });
+    for (const [path, data] of Object.entries(privateDocs)) {
+      for (const db of [asUser("user-1"), asUser("admin-1"), asGuest()]) {
+        await assertFails(getDoc(doc(db, path)));
+        await assertFails(setDoc(doc(db, path), data));
+        await assertFails(deleteDoc(doc(db, path)));
+      }
+    }
+  });
+
+  test("anyone reads the public stats and no client writes them", async () => {
+    await env.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), statsPath), stats);
+    });
+    await assertSucceeds(getDoc(doc(asGuest(), statsPath)));
+    await assertSucceeds(getDoc(doc(asUser("user-1"), statsPath)));
+    for (const db of [asUser("user-1"), asUser("admin-1"), asGuest()]) {
+      await assertFails(setDoc(doc(db, statsPath), { ...stats, listeners: 999 }));
+      await assertFails(updateDoc(doc(db, statsPath), { listeners: 999 }));
+      await assertFails(deleteDoc(doc(db, statsPath)));
+    }
+  });
+});
+
 describe("content_reports", () => {
   const podcastReport = (overrides = {}) => ({
     uid: "user-1",

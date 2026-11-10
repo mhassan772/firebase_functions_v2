@@ -88,6 +88,20 @@ service cloud.firestore {
     match /book_listeners/{lineId} {
       allow read, write, delete, create: if false;
     }
+    // Each user's listening time per podcast and in all, kept by the same triggers through the
+    // Admin SDK. See docs/listening-stats.md.
+    match /podcast_listeners/{lineId} {
+      allow read, write, delete, create: if false;
+    }
+    match /listener_totals/{userId} {
+      allow read, write, delete, create: if false;
+    }
+    // Totals the donation site shows to everyone (listeners, hours listened, audiobooks, donors).
+    // Numbers only, no user data; written by the Admin SDK.
+    match /public_stats/{statsId} {
+      allow read: if true;
+      allow write, delete, create: if false;
+    }
     match /admin/{adminuid} {
       allow read:if request.auth != null 
       // && get(/databases/$(database)/documents/admin/$(request.auth.uid)).data.isAdmin == true;

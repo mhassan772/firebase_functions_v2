@@ -14,7 +14,7 @@ The app keeps a running total of the audio it has played per book and device, in
 | `device_sessions/{uid}` | 88.4 to 90.2 | `listenTimes: [{deviceId, listenTimes: {contentId: seconds}}]`; before Feb 2026 the map was named `listenTimeByBooks` |
 
 - Seeking does not add time; only audio played does.
-- Podcasts are recorded under `p-<feedId>` (or `podcast-…`) and are skipped. `backfill` entries are milestone credits the app made up and are skipped too. Samples are never recorded.
+- Podcasts are recorded under `p-<feedId>` (or `podcast-…`) and are skipped here; the same triggers record them in `podcast_listeners` (see [listening-stats.md](listening-stats.md)). `backfill` entries are milestone credits the app made up and are skipped too. Samples are never recorded.
 - One user's totals are summed over devices and play sources. The two collections are never added together: 90.3 copies the older document's time into v2 (as `source: unknown`), so the larger of the two totals wins.
 - The whole document is rewritten on every push and has no "changed at" field, which is why triggers read it rather than a nightly query.
 - Free users push every `sync_intervals_config.experience.regular` minutes (set to 60, like progress) and premium users every `premium` minutes.
