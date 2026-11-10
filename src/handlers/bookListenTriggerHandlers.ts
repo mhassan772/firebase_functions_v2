@@ -124,7 +124,8 @@ function applyGrowth(
 
     let totals: (ListenerTotals & { becameListener: boolean }) | null = null;
     let seeded = false;
-    if (!totalsSnapshot.exists && !totalsSeeded) {
+    // No lifetime totals yet: the community goal trigger can create the document first, with only `months`.
+    if (totalsSnapshot.get("totalSeconds") === undefined && !totalsSeeded) {
       const fromSession = totalsFromSession(uid, session, minListenSeconds);
       const lastListenAt = fromSession.lastListenAt && fromSession.lastListenAt < now ? fromSession.lastListenAt : now;
       totals = { ...fromSession, lastListenAt, becameListener: fromSession.isListener };

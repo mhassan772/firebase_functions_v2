@@ -890,6 +890,99 @@ describe("listening stats", () => {
   });
 });
 
+describe("community goal", () => {
+  const goalPath = "community_goals/h144807";
+  const statsPath = "community_goal_stats/h144807";
+  const goal = {
+    hijriYear: 1448,
+    hijriMonth: 7,
+    firstDay: 20797,
+    lastDay: 20826,
+    targetHours: null,
+    dailyCapSeconds: 43200,
+    closeAfterDays: 3,
+    show: { participants: false, pace: false, target: false, history: true },
+    auto: true,
+    status: "open",
+    totalSeconds: 100,
+  };
+
+  beforeEach(async () => {
+    await env.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), goalPath), goal);
+      await setDoc(doc(context.firestore(), statsPath), { totalSeconds: 100, participants: 2, actualSeconds: 120 });
+    });
+  });
+
+  test("anyone reads a goal, and no client creates or deletes one", async () => {
+    for (const db of [asGuest(), asUser("user-1"), asUser("admin-1")]) {
+      await assertSucceeds(getDoc(doc(db, goalPath)));
+      await assertSucceeds(getDocs(collection(db, "community_goals")));
+      await assertFails(setDoc(doc(db, "community_goals/h144808"), goal));
+      await assertFails(deleteDoc(doc(db, goalPath)));
+    }
+  });
+
+  test("admins change only the portal's fields; nobody else changes anything", async () => {
+    const admin = asUser("admin-1");
+    await assertSucceeds(
+      updateDoc(doc(admin, goalPath), {
+        firstDay: 20796,
+        lastDay: 20827,
+        targetHours: 5000,
+        dailyCapSeconds: 7200,
+        closeAfterDays: 4,
+        "show.participants": true,
+        auto: false,
+        participants: 2,
+        recount: { requestedAt: serverTimestamp(), requestedBy: "admin-1" },
+        updatedAt: serverTimestamp(),
+        updatedBy: "admin-1",
+      }),
+    );
+    for (const field of ["totalSeconds", "totalUpdatedAt", "status", "closedAt", "hijriYear", "hijriMonth", "extra"]) {
+      await assertFails(updateDoc(doc(admin, goalPath), { [field]: 1 }));
+    }
+    for (const db of [asUser("dev-1"), asUser("user-1"), asGuest()]) {
+      await assertFails(updateDoc(doc(db, goalPath), { targetHours: 1 }));
+    }
+  });
+
+  test("a closed month keeps its dates and cap; its switches can still change", async () => {
+    await env.withSecurityRulesDisabled(async (context) => {
+      await updateDoc(doc(context.firestore(), goalPath), { status: "closed" });
+    });
+    const admin = asUser("admin-1");
+    for (const field of ["firstDay", "lastDay", "dailyCapSeconds"]) {
+      await assertFails(updateDoc(doc(admin, goalPath), { [field]: 1 }));
+    }
+    await assertSucceeds(updateDoc(doc(admin, goalPath), { "show.history": false, updatedBy: "admin-1" }));
+  });
+
+  test("admins read the goal stats, nobody writes them", async () => {
+    await assertSucceeds(getDoc(doc(asUser("admin-1"), statsPath)));
+    await assertSucceeds(getDocs(collection(asUser("admin-1"), "community_goal_stats")));
+    for (const db of [asUser("dev-1"), asUser("user-1"), asGuest()]) {
+      await assertFails(getDoc(doc(db, statsPath)));
+    }
+    for (const db of [asUser("admin-1"), asUser("user-1"), asGuest()]) {
+      await assertFails(setDoc(doc(db, statsPath), { totalSeconds: 1 }));
+      await assertFails(updateDoc(doc(db, statsPath), { totalSeconds: 1 }));
+      await assertFails(deleteDoc(doc(db, statsPath)));
+    }
+  });
+
+  test("user totals with months stay closed to every client", async () => {
+    await env.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "listener_totals/user-1"), { months: { h144807: { c: 1, a: 1 } } });
+    });
+    for (const db of [asUser("user-1"), asUser("admin-1")]) {
+      await assertFails(getDoc(doc(db, "listener_totals/user-1")));
+      await assertFails(updateDoc(doc(db, "listener_totals/user-1"), { "months.h144807.c": 999 }));
+    }
+  });
+});
+
 describe("content_reports", () => {
   const podcastReport = (overrides = {}) => ({
     uid: "user-1",

@@ -1,6 +1,6 @@
 # Listening competitions: server-side design (draft)
 
-Status: draft for discussion, 2026-11-10. Nothing here is built.
+Status: draft for discussion, 2026-11-10. Nothing here is built as written. What was built instead is the monthly community goal, with no ranks: see [community-goal.md](community-goal.md). The two app gaps listed below were closed in the 90.7 app (unknown fields are kept; day rows carry `z` and `v`). This draft is kept for its ideas on ranked seasons and validation.
 
 Goal: a base for app-wide competitions and user comparisons that counts real listening time, is dated, and cannot be inflated by playback speed or by editing old days. The lifetime totals in `listener_totals` are not that base: before app 90.7 they count audio covered (2x speed counts double), they carry no dates, and they stay as the public "hours of audio played" figure only. See [listening-stats.md](listening-stats.md).
 

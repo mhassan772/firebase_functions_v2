@@ -41,3 +41,6 @@ export { requestVerificationEmail } from "./functions/authEmails/requestVerifica
 export { requestEmailChange } from "./functions/authEmails/requestEmailChange";
 export { refreshPublicStats } from "./functions/publicStats/refreshPublicStats";
 export { checkPublicListeners } from "./functions/publicStats/checkPublicListeners";
+export { listeningDaysMonthTrigger } from "./functions/communityGoals/listeningDaysMonthTrigger";
+export { refreshCommunityGoals } from "./functions/communityGoals/refreshCommunityGoals";
+export { communityGoalRecountTrigger } from "./functions/communityGoals/communityGoalRecountTrigger";
