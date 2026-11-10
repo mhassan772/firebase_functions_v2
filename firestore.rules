@@ -88,6 +88,39 @@ service cloud.firestore {
     match /book_listeners/{lineId} {
       allow read, write, delete, create: if false;
     }
+    // Each user's listening time per podcast and in all, kept by the same triggers through the
+    // Admin SDK. See docs/listening-stats.md.
+    match /podcast_listeners/{lineId} {
+      allow read, write, delete, create: if false;
+    }
+    match /listener_totals/{userId} {
+      allow read, write, delete, create: if false;
+    }
+    // Totals the donation site shows to everyone (listeners, hours listened, audiobooks, donors).
+    // Numbers only, no user data; written by the Admin SDK.
+    match /public_stats/{statsId} {
+      allow read: if true;
+      allow write, delete, create: if false;
+    }
+    // The monthly community listening goal: settings and totals, no user data. The hourly job
+    // creates each month and writes its totals; admins edit the settings, and once a month is
+    // closed its dates and cap stay. See docs/community-goal.md.
+    match /community_goals/{key} {
+      allow read: if true;
+      allow create, delete: if false;
+      allow update: if isPortalAdmin()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'firstDay', 'lastDay', 'targetHours', 'dailyCapSeconds', 'closeAfterDays', 'show', 'auto',
+          'recount', 'participants', 'updatedAt', 'updatedBy'
+        ])
+        && (resource.data.get('status', 'open') != 'closed'
+          || !request.resource.data.diff(resource.data).affectedKeys().hasAny(['firstDay', 'lastDay', 'dailyCapSeconds']));
+    }
+    // Each month's numbers for admins, and the recount's progress; written by the Admin SDK.
+    match /community_goal_stats/{key} {
+      allow read: if isPortalAdmin();
+      allow write: if false;
+    }
     match /admin/{adminuid} {
       allow read:if request.auth != null 
       // && get(/databases/$(database)/documents/admin/$(request.auth.uid)).data.isAdmin == true;

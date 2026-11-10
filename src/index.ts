@@ -39,3 +39,8 @@ export { reportIssue } from "./functions/issues/reportIssue";
 export { requestPasswordResetEmail } from "./functions/authEmails/requestPasswordResetEmail";
 export { requestVerificationEmail } from "./functions/authEmails/requestVerificationEmail";
 export { requestEmailChange } from "./functions/authEmails/requestEmailChange";
+export { refreshPublicStats } from "./functions/publicStats/refreshPublicStats";
+export { checkPublicListeners } from "./functions/publicStats/checkPublicListeners";
+export { listeningDaysMonthTrigger } from "./functions/communityGoals/listeningDaysMonthTrigger";
+export { refreshCommunityGoals } from "./functions/communityGoals/refreshCommunityGoals";
+export { communityGoalRecountTrigger } from "./functions/communityGoals/communityGoalRecountTrigger";

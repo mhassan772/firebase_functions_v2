@@ -100,9 +100,18 @@ export function isBookContentId(contentId: unknown): contentId is string {
  * Each play source keeps its own counter from 0, so adding them never counts time twice.
  */
 export function secondsByBook(data: unknown): Map<string, BookSeconds> {
+  return secondsByContent(data, (contentId) => (isBookContentId(contentId) ? contentId : null));
+}
+
+/**
+ * Total listening per content in one user's session document, for the entries `keyOf` gives a
+ * key to. Entries that map to the same key are added together.
+ */
+export function secondsByContent(data: unknown, keyOf: (contentId: unknown) => string | null): Map<string, BookSeconds> {
   const totals = new Map<string, BookSeconds>();
   const add = (contentId: unknown, seconds: unknown, lastListenAt: unknown): void => {
-    if (!isBookContentId(contentId)) {
+    const key = keyOf(contentId);
+    if (key === null) {
       return;
     }
     const value = Number(seconds);
@@ -110,12 +119,12 @@ export function secondsByBook(data: unknown): Map<string, BookSeconds> {
       return;
     }
     const date = parseDate(lastListenAt);
-    const current = totals.get(contentId) ?? { seconds: 0, lastListenAt: null };
+    const current = totals.get(key) ?? { seconds: 0, lastListenAt: null };
     current.seconds += value;
     if (date && (!current.lastListenAt || date > current.lastListenAt)) {
       current.lastListenAt = date;
     }
-    totals.set(contentId, current);
+    totals.set(key, current);
   };
 
   const record = asRecord(data);
