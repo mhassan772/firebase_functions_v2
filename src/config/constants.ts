@@ -49,3 +49,17 @@ export const WEB_CORS_ALLOWED_ORIGINS = [
   "http://localhost:5000",
   "https://mantooq-web.onrender.com",
 ];
+
+// Account emails (password reset, verification, email change) are sent by our own callables,
+// because Firebase refuses edits to this project's Auth templates and action URL. Their links
+// open this page instead of Firebase's, which reads only `mode`, `oobCode` and `lang`.
+export const ACCOUNTS_ACTION_URL = "https://accounts.mantooq.com/action";
+export const AUTH_EMAIL_FROM_ADDRESS = "noreply@mantooq.com";
+// mantooq.com receives no mail, so replies go to a mailbox someone reads.
+export const AUTH_EMAIL_REPLY_TO_ADDRESS = "mantooq@basira.ca";
+export const AUTH_EMAIL_SES_REGION = "eu-west-1";
+// Secret Manager names; the donation codebase reads the same two.
+export const AUTH_EMAIL_SECRETS = {
+  sesAccessKeyId: "AWS_SES_ACCESS_KEY_ID",
+  sesSecretAccessKey: "AWS_SES_SECRET_ACCESS_KEY",
+} as const;

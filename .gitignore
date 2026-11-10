@@ -73,3 +73,6 @@ migration-reports/
 
 # Functions emulator secrets (local lab only)
 .secret.local
+
+# Accounts page build output
+accounts-page/dist/
