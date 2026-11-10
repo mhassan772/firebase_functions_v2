@@ -36,3 +36,6 @@ export { popularPodcastsV1 } from "./functions/podcasts/popularPodcastsV1";
 export { podcastFollowAuditTrigger } from "./functions/podcasts/podcastFollowAuditTrigger";
 export { podcastConvertAuditTrigger } from "./functions/podcasts/podcastConvertAuditTrigger";
 export { reportIssue } from "./functions/issues/reportIssue";
+export { requestPasswordResetEmail } from "./functions/authEmails/requestPasswordResetEmail";
+export { requestVerificationEmail } from "./functions/authEmails/requestVerificationEmail";
+export { requestEmailChange } from "./functions/authEmails/requestEmailChange";
