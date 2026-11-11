@@ -4,9 +4,17 @@ import { ActionLinkError, ActionMode, AuthEmailLang, readLang, rewriteActionLink
 import { AuthEmailKind, renderAuthEmail, senderName } from "../services/email/authEmailTemplates";
 import { Mailer } from "../services/email/sesMailer";
 import { AuthEmailThrottle, AuthEmailThrottledError, normalizeAddress } from "../services/authEmailThrottle";
+import {
+  CallerContext,
+  errorCodeOf,
+  hasAppCheck,
+  reasonOf,
+  refusal,
+  requireCaller,
+  requireRecentLogin,
+} from "../utils/callableAuth";
 
-/** How recent a sign-in must be before the address on the account may change. */
-export const RECENT_LOGIN_MS = 5 * 60 * 1000;
+export { RECENT_LOGIN_MS } from "../utils/callableAuth";
 
 export interface AuthEmailUser {
   uid: string;
@@ -32,13 +40,7 @@ export interface AuthEmailDeps {
 }
 
 /** The parts of a callable context these handlers read; a real CallableContext fits it. */
-export interface AuthEmailCallContext {
-  auth?: {
-    uid: string;
-    token: { auth_time?: number; firebase?: { sign_in_provider?: string } };
-  };
-  app?: unknown;
-}
+export type AuthEmailCallContext = CallerContext;
 
 type Ok = { ok: true };
 const OK: Ok = { ok: true };
@@ -161,7 +163,7 @@ export async function handleRequestEmailChange(
     const lang = readLang(input.lang);
     const newEmail = readEmail(input.newEmail, "newEmail");
     logInfo(`${event}_start`, operationId, { uid, lang, appCheck: hasAppCheck(context) });
-    requireRecentLogin(context, deps.now());
+    requireRecentLogin(context, deps.now(), "Sign in again before changing the email.");
 
     state.stage = "lookup";
     const user = await deps.auth.getUser(uid);
@@ -209,25 +211,6 @@ async function sendAuthEmail(
   await deps.mailer.send({ ...rendered, to, fromName: senderName(lang) });
 }
 
-function requireCaller(context: AuthEmailCallContext, options: { allowAnonymous: boolean }): string {
-  const auth = context.auth;
-  if (!auth?.uid) {
-    throw new functions.https.HttpsError("unauthenticated", "Firebase Authentication is required.");
-  }
-  if (!options.allowAnonymous && auth.token?.firebase?.sign_in_provider === "anonymous") {
-    throw new functions.https.HttpsError("unauthenticated", "A signed-in account is required.");
-  }
-  return auth.uid;
-}
-
-function requireRecentLogin(context: AuthEmailCallContext, nowMs: number): void {
-  const authTime = context.auth?.token?.auth_time;
-  const authTimeMs = typeof authTime === "number" ? authTime * 1000 : NaN;
-  if (!Number.isFinite(authTimeMs) || nowMs - authTimeMs > RECENT_LOGIN_MS) {
-    throw refusal("permission-denied", "Sign in again before changing the email.", "recent_login_required");
-  }
-}
-
 function readEmail(value: unknown, field: string): string {
   const email = typeof value === "string" ? value.trim() : "";
   if (!email || email.length > MAX_EMAIL_LENGTH || !EMAIL_PATTERN.test(email)) {
@@ -238,10 +221,6 @@ function readEmail(value: unknown, field: string): string {
 
 function asRecord(data: unknown): Record<string, unknown> {
   return data && typeof data === "object" && !Array.isArray(data) ? (data as Record<string, unknown>) : {};
-}
-
-function hasAppCheck(context: AuthEmailCallContext): boolean {
-  return context.app !== undefined && context.app !== null;
 }
 
 async function findUserByEmail(auth: AuthEmailAdmin, email: string): Promise<AuthEmailUser | undefined> {
@@ -257,10 +236,6 @@ async function findUserByEmail(auth: AuthEmailAdmin, email: string): Promise<Aut
 function isAuthCode(error: unknown, ...codes: string[]): boolean {
   const code = (error as { code?: unknown } | null)?.code;
   return typeof code === "string" && codes.includes(code);
-}
-
-function refusal(code: functions.https.FunctionsErrorCode, message: string, reason: string) {
-  return new functions.https.HttpsError(code, message, { reason });
 }
 
 function emailInUse() {
@@ -300,17 +275,6 @@ function toCallableError(
     ...(errorCodeOf(error) ? { errorCode: errorCodeOf(error) } : {}),
   });
   return new functions.https.HttpsError("internal", "The email could not be sent.");
-}
-
-/** A short machine code such as "auth/internal-error"; never the message. */
-function errorCodeOf(error: unknown): string | undefined {
-  const code = (error as { code?: unknown } | null)?.code;
-  return typeof code === "string" && /^[\w/.-]{1,64}$/.test(code) ? code : undefined;
-}
-
-function reasonOf(error: functions.https.HttpsError): string | undefined {
-  const details = error.details as { reason?: unknown } | undefined;
-  return typeof details?.reason === "string" ? details.reason : undefined;
 }
 
 function logInfo(event: string, operationId: string, fields: Record<string, unknown> = {}): void {

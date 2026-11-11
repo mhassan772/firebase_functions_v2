@@ -250,6 +250,62 @@ token chain, and then resolves ownership. Invalid permanent messages are
 acknowledged; transient API/configuration failures throw so the function's
 retry policy can redeliver.
 
+### `reportStoreCountry`
+
+Callable for signed-in, non-anonymous accounts that records which country the
+app's store (or, on the Direct build, the SIM) reports, as evidence for web
+pricing. Request, exactly these keys:
+
+```json
+{ "country": "SAU", "source": "apple_storefront" }
+```
+
+`country` is a two- or three-letter ISO 3166-1 code in any case (iOS sends the
+three-letter storefront, Android a two-letter code). `source` is
+`apple_storefront`, `play_billing` or `sim`. Response:
+
+```json
+{ "country": "SA", "counted": true }
+```
+
+`country` is the two-letter code stored for this report. `counted` says whether
+the account's app report now counts as pricing evidence for exactly that
+country; the app re-sends a report that does not count on its next launch.
+
+App Check is recorded as `attested`, not enforced. Refusals carry
+`details.reason`: `unauthenticated` with `signed_out` or `anonymous`, and
+`invalid-argument` with `invalid_request` (not exactly two string keys),
+`country_unknown` or `source_unknown`. Anything else is `internal` with no
+reason. Logs (`store_country_report_*`) carry the uid, the two-letter country,
+the source and error codes, never error messages.
+
+The report is written in one transaction to the server-only
+`user_store_country/{uid}`, which has no rules entry:
+
+- `country`, `raw` (as sent, upper-cased), `source`, `attested`: the current
+  evidence.
+- `firstReportedAt` (set once), `updatedAt` (evidence last changed),
+  `lastReportAt` (last accepted call).
+- `history`: the last five `{ country, source, attested, at }`, newest last.
+
+An attested report always becomes the evidence; an unattested one only when the
+evidence is unattested or absent, and is otherwise only added to `history`. A
+report that would change nothing but `lastReportAt` writes it at most once a
+day.
+
+`knownCountries(uid)` in `src/services/storeCountry` is the one reader for
+pricing and the portal. It returns `appReport` (the evidence's country, when it
+is attested, or an unattested `sim` report while
+`web_pricing/config.allowUnattestedSim` is `true`; a missing document or field
+is `false`) and `storePurchase` (the distinct `storeCountry` values on the
+account's `apple/production` and `google/production` slots).
+
+`verifySubscription` and both store notification paths save that
+`storeCountry` on the slot document: Apple's transaction `storefront` and Play's
+`regionCode`, converted to two letters. An absent or unknown code leaves it
+unset and never fails a verification, and a later state without it keeps the
+stored value. It is not copied into `subscription_master`.
+
 ## Manual grants
 
 Admin grants live in a fifth projection slot and are managed through the
@@ -286,6 +342,11 @@ record in the verified chain before writing anything. Unclaimed records are
 assigned to the authenticated UID. Repeats by the same UID are idempotent. Any
 different UID or conflicting linked-token owner aborts all writes. Purchases
 are never transferred automatically.
+
+The same transaction reads `deleted_accounts/{uid}`. For a deleted account it
+refuses before writing anything, with safe code `account-deleted`. Deleting an
+account removes its ownership records, slots and master; see
+`docs/account_deletion.md`.
 
 The master projection chooses an active production state before an active
 sandbox/test state, then the furthest expiry. When no state is active, it uses

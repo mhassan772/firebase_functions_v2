@@ -32,6 +32,7 @@ import {
   sha256Reference,
   timingSafeEqualText,
 } from "./crypto";
+import { DELETED_ACCOUNTS_COLLECTION } from "../accountDeletion/tombstone";
 import { DeviceLimits, devicesBlockFromMaster } from "./devices";
 import { SubscriptionError } from "./errors";
 import {
@@ -231,6 +232,7 @@ export async function persistVerifiedSubscription(
       .doc(eventDocumentId(event))
     : undefined;
   const acknowledgementRef = acknowledgementRefFor(verified);
+  const tombstoneRef = firestore.collection(DELETED_ACCOUNTS_COLLECTION).doc(uid);
 
   // Set by the last transaction attempt and logged once it has committed, so a
   // retried attempt never counts twice.
@@ -242,8 +244,18 @@ export async function persistVerifiedSubscription(
         ...ownershipRefs,
         ...(eventRef ? [eventRef] : []),
         ...(acknowledgementRef ? [acknowledgementRef] : []),
+        tombstoneRef,
       ],
     });
+    // A deleted account's session can still be signed in for a while; it must not claim a
+    // store purchase again. Refused before anything is written, in either tombstone state.
+    if (state.extraSnapshots[state.extraSnapshots.length - 1].exists) {
+      throw new SubscriptionError(
+        "forbidden",
+        "account-deleted",
+        "This account was deleted."
+      );
+    }
     const ownershipSnapshots = state.extraSnapshots.slice(
       0,
       ownershipRefs.length
@@ -348,7 +360,8 @@ export async function persistVerifiedSubscription(
           uid,
           verified.subscription,
           existingIncoming.exists ? existingIncoming.get("createdAt") : now,
-          now
+          now,
+          existingIncoming.data()
         )
       );
     }
@@ -815,11 +828,17 @@ function ownershipData(
   return data;
 }
 
+/**
+ * The slot document for a state. The slot is replaced, not merged, so `replaced` (the document
+ * being overwritten) supplies the fields a verification may not carry: a notification whose
+ * payload lacks the store country must not erase the one an earlier verification saved.
+ */
 export function stateData(
   uid: string,
   state: NormalizedSubscription,
   createdAt: unknown,
-  updatedAt: Timestamp
+  updatedAt: Timestamp,
+  replaced?: DocumentData
 ): DocumentData {
   const data: DocumentData = {
     uid,
@@ -846,6 +865,12 @@ export function stateData(
   }
   if (state.manual) {
     data.manual = withoutUndefined({ ...state.manual });
+  }
+  const storeCountry =
+    state.storeCountry ??
+    (typeof replaced?.storeCountry === "string" ? replaced.storeCountry : undefined);
+  if (storeCountry) {
+    data.storeCountry = storeCountry;
   }
   return data;
 }
