@@ -408,7 +408,19 @@ export async function applyAppleNotification(
   operationId: string,
   logEvent: string
 ): Promise<AppleNotificationOutcome> {
-  const result = await verifyAppleNotification(signedPayload);
+  return applyVerifiedAppleNotification(
+    await verifyAppleNotification(signedPayload),
+    operationId,
+    logEvent
+  );
+}
+
+/** The part of `applyAppleNotification` after Apple's signature check, separate so tests can reach it. */
+export async function applyVerifiedAppleNotification(
+  result: Awaited<ReturnType<typeof verifyAppleNotification>>,
+  operationId: string,
+  logEvent: string
+): Promise<AppleNotificationOutcome> {
   const ownerUid =
     "verified" in result
       ? await resolveVerifiedOwner(result.verified.ownership)
@@ -424,11 +436,23 @@ export async function applyAppleNotification(
     return { claimed: false, duplicate: !recorded, stateApplied: false };
   }
 
-  const persisted = await persistVerifiedSubscription(
-    ownerUid,
-    result.verified,
-    result.event
-  );
+  let persisted;
+  try {
+    persisted = await persistVerifiedSubscription(
+      ownerUid,
+      result.verified,
+      result.event
+    );
+  } catch (error) {
+    if (!isAccountDeleted(error)) throw error;
+    const recorded = await recordUnclaimedStoreEvent(result.event);
+    logOwnerDeleted(logEvent, operationId, {
+      eventType: result.event.eventType,
+      environment: result.event.environment,
+      duplicate: !recorded,
+    });
+    return { claimed: false, duplicate: !recorded, stateApplied: false };
+  }
   logInfo(logEvent, operationId, {
     eventType: result.event.eventType,
     environment: result.event.environment,
@@ -518,7 +542,20 @@ export async function applyGoogleStoreEvent(
     return { claimed: false, duplicate: !recorded, stateApplied: false };
   }
 
-  const persisted = await persistVerifiedSubscription(ownerUid, verified, event);
+  let persisted;
+  try {
+    persisted = await persistVerifiedSubscription(ownerUid, verified, event);
+  } catch (error) {
+    if (!isAccountDeleted(error)) throw error;
+    const recorded = await recordUnclaimedStoreEvent(event, verified);
+    logOwnerDeleted(input.logEvent, input.operationId, {
+      eventType: input.eventType,
+      environment: event.environment,
+      ...googleStateLogFields(verified, input.refundType),
+      duplicate: !recorded,
+    });
+    return { claimed: false, duplicate: !recorded, stateApplied: false };
+  }
   if (persisted.acknowledgementPending && verified.subscription.purchaseReference) {
     await acknowledgeNow(verified.subscription.purchaseReference);
   }
@@ -537,6 +574,23 @@ export async function applyGoogleStoreEvent(
     duplicate: persisted.duplicate,
     stateApplied: persisted.stateApplied,
   };
+}
+
+/**
+ * The purchase's owner deleted their account. The event is kept as unclaimed, as for a purchase
+ * nobody owns, so the store gets its success answer instead of retrying for days.
+ */
+function isAccountDeleted(error: unknown): boolean {
+  return error instanceof SubscriptionError && error.safeCode === "account-deleted";
+}
+
+/** The path's usual outcome log, marked unclaimed because the owner's account was deleted. */
+function logOwnerDeleted(
+  logEvent: string,
+  operationId: string,
+  fields: Record<string, unknown>
+): void {
+  logInfo(logEvent, operationId, { ...fields, claimed: false, ownerDeleted: true });
 }
 
 /** Read on demand: only a resubscription whose expired purchase carried a binding needs it. */

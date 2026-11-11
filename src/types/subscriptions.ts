@@ -100,6 +100,11 @@ export interface NormalizedSubscription {
   lastStoreEventAt: Date;
   lastVerifiedAt: Date;
   manual?: ManualProjectionSummary;
+  /**
+   * Two-letter country of the store account that made the purchase, when the store reported a
+   * known one. Kept on the slot only, as pricing evidence; never copied to the master.
+   */
+  storeCountry?: string;
 }
 
 /** The operating system a registered device reported. The app never sends another value. */

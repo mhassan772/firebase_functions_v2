@@ -24,6 +24,7 @@ import {
   StoreEvent,
   VerifiedSubscription,
 } from "../../types/subscriptions";
+import { toAlpha2 } from "../../utils/countryCodes";
 import { timingSafeEqualText } from "./crypto";
 import { SubscriptionError } from "./errors";
 import { normalizeAppleSubscription } from "./normalization";
@@ -241,6 +242,11 @@ export async function verifyAppleSubscription(
 
     if (normalized.status === "unknown") {
       throw invalidStoreData("apple-status-unknown");
+    }
+    // Pricing evidence only: an absent or unknown storefront never fails a verification.
+    const storeCountry = toAlpha2(selected.transaction.storefront ?? "");
+    if (storeCountry) {
+      normalized.storeCountry = storeCountry;
     }
     if (
       notificationEventAt &&

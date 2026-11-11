@@ -14,6 +14,7 @@ import {
   sha256Reference,
   timingSafeEqualText,
 } from "./crypto";
+import { toAlpha2 } from "../../utils/countryCodes";
 import { SubscriptionError } from "./errors";
 import { normalizeGoogleSubscription } from "./normalization";
 
@@ -182,6 +183,11 @@ export async function verifyGoogleSubscription(
     });
     if (normalized.status === "unknown") {
       throw invalidStoreData("google-subscription-state-unknown");
+    }
+    // Pricing evidence only: an absent or unknown region never fails a verification.
+    const storeCountry = toAlpha2(current.data.regionCode ?? "");
+    if (storeCountry) {
+      normalized.storeCountry = storeCountry;
     }
 
     const ownership: GoogleOwnershipIdentity[] = statuses.map(
