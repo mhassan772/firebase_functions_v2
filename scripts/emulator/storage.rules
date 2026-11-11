@@ -1,0 +1,11 @@
+rules_version = '2';
+
+// Storage rules for the local accounts-page test stack only (firebase.accounts-test.json). The
+// emulator needs a rules file to start; clients get no access, the Admin SDK ignores rules.
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

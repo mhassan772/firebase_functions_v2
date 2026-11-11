@@ -14,6 +14,8 @@
     "test:rules": "bash scripts/emulator/with-java.sh firebase emulators:exec --config firebase.rules-test.json --only firestore --project demo-mantooq 'node --test test/rules/*.test.js'",
     "emulators": "bash scripts/emulator/start.sh",
     "emulators:seed": "node scripts/emulator/seed.mjs",
+    "emulators:accounts": "npm run build && bash scripts/emulator/start-accounts.sh",
+    "emulators:accounts:seed": "node scripts/emulator/seed-accounts.mjs",
     "backfill:podcast-audit": "node scripts/backfill/podcast-audit.mjs",
     "backfill:book-listeners": "TZ=UTC node scripts/backfill/book-listeners.mjs",
     "backfill:listen-stats": "TZ=UTC node scripts/backfill/listen-stats.mjs",
