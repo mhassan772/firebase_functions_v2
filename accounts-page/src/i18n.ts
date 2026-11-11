@@ -61,9 +61,97 @@ const ar = {
 
   openApp: "افتح منطوق",
   backToAppOnPhone: "عد إلى تطبيق منطوق على هاتفك.",
+
+  // Product names, the same in both languages.
+  googleName: "Google",
+  appleName: "Apple",
+  appStoreName: "App Store",
+  playStoreName: "Google Play",
+
+  notFoundTitle: "الصفحة غير موجودة",
+  notFoundBody: "تأكد من الرابط وحاول مرة أخرى.",
+  goHome: "الذهاب إلى mantooq.com",
+
+  // Sign-in view, shared by every page that needs an account.
+  signInTitle: "سجّل الدخول للمتابعة",
+  signInIntro: "سجّل الدخول بالطريقة نفسها التي تستخدمها في التطبيق.",
+  continueWithGoogle: "المتابعة باستخدام Google",
+  continueWithApple: "المتابعة باستخدام Apple",
+  or: "أو",
+  email: "البريد الإلكتروني",
+  password: "كلمة المرور",
+  showPassword: "إظهار كلمة المرور",
+  hidePassword: "إخفاء كلمة المرور",
+  signIn: "تسجيل الدخول",
+  signingIn: "جارٍ تسجيل الدخول…",
+  forgotPasswordHint: "نسيت كلمة المرور؟ يمكنك تغييرها من شاشة تسجيل الدخول في التطبيق.",
+  errorEmailMissing: "أدخل بريدك الإلكتروني.",
+  errorPasswordMissing: "أدخل كلمة المرور.",
+  errorWrongCredentials: "البريد الإلكتروني أو كلمة المرور غير صحيحة.",
+  errorTooMany: "محاولات كثيرة. انتظر قليلًا ثم حاول مرة أخرى.",
+  errorNetwork: "تعذّر الاتصال. تحقق من اتصالك بالإنترنت ثم حاول مرة أخرى.",
+  errorPopupBlocked: "منع المتصفح فتح نافذة تسجيل الدخول. اسمح بالنوافذ المنبثقة لهذا الموقع ثم حاول مرة أخرى.",
+  errorProviderDisabled: "طريقة الدخول هذه غير متاحة الآن. جرّب طريقة أخرى.",
+  errorOtherMethod: "هذا البريد مسجّل بطريقة دخول أخرى. استخدم الطريقة التي سجّلت بها في التطبيق.",
+  errorWrongPassword: "كلمة المرور غير صحيحة.",
+  errorDifferentAccount: "هذا حساب آخر. أكّد هويتك بالحساب نفسه الذي سجّلت الدخول به.",
+  errorDisabled: "هذا الحساب موقوف. تواصل معنا من التطبيق.",
+  errorSignInGeneric: "تعذّر تسجيل الدخول. حاول مرة أخرى.",
+  signedInAnnouncement: "تم تسجيل الدخول.",
+
+  // Re-authentication before a sensitive step.
+  reauthTitle: "تأكيد هويتك",
+  reauthBody: "مضى وقت على تسجيل دخولك. للحماية، أكّد هويتك قبل حذف الحساب.",
+  confirmWithGoogle: "التأكيد باستخدام Google",
+  confirmWithApple: "التأكيد باستخدام Apple",
+  confirmWithPassword: "تأكيد",
+  confirming: "جارٍ التأكيد…",
+  cancel: "إلغاء",
+  reauthSignInAgain: "لا يمكن تأكيد طريقة الدخول هذه هنا. سجّل الدخول من جديد للمتابعة.",
+
+  // /delete
+  deleteTitle: "حذف حساب منطوق",
+  deleteIntro: "من هذه الصفحة تحذف حسابك في تطبيق منطوق (Mantooq) للكتب الصوتية والبودكاست، والبيانات المحفوظة معه.",
+  deletedHeading: "ما الذي يُحذف",
+  deletedBody:
+    "الحساب وطريقة الدخول إليه، وكل البيانات المحفوظة معه: مكتبتك، وتقدّم الاستماع، والمفضلة، والقوائم، وسجل الاستماع، والإعدادات، وسجلات الاشتراك.",
+  keptHeading: "ما الذي يبقى",
+  keptPayments: "سجلات المدفوعات التي تمت من قبل، دون أي شيء يدل على حسابك.",
+  keptLateWrites: "إن بقي جهاز مسجّل الدخول، فما يحفظه بعد الحذف يُزال خلال ٧ أيام.",
+  storeNotice:
+    "حذف الحساب لا يلغي اشتراكًا اشتريته من App Store أو Google Play. ألغِه من المتجر حتى لا يُجدَّد ويُخصم منك.",
+  appStoreLink: "اشتراكات App Store",
+  playStoreLink: "اشتراكات Google Play",
+  opensInNewTab: "(يفتح في نافذة جديدة)",
+  cannotUndo: "لا يمكن التراجع عن الحذف ولا استعادة الحساب بعده.",
+  inAppPath: "يمكنك أيضًا حذف الحساب من التطبيق: الإعدادات ← الحساب ← مسح الحساب.",
+  checkingSignIn: "جارٍ التحقق من تسجيل الدخول…",
+  signInFailedTitle: "تعذّر تجهيز تسجيل الدخول",
+
+  confirmTitle: "تأكيد الحذف",
+  signedInAs: "الحساب:",
+  signedInWith: (provider: string) => `حساب مسجّل عبر ${provider}`,
+  notYou: "لست أنت؟ سجّل الخروج",
+  signedOutAnnouncement: "تم تسجيل الخروج.",
+  activeStoreWarning: (store: string) =>
+    `لديك اشتراك في ${store} يتجدد تلقائيًا. حذف الحساب لا يلغيه، وسيستمر الخصم حتى تلغيه من ${store}.`,
+  cancelInStore: (store: string) => `إلغاء الاشتراك في ${store}`,
+  understand: "أفهم أن حسابي وبياناته ستُحذف نهائيًا، وأن الحذف لا يمكن التراجع عنه.",
+  tickFirst: "حدّد مربع التأكيد أولًا.",
+  deleteButton: "احذف حسابي نهائيًا",
+  deleting: "جارٍ حذف الحساب…",
+  retryDelete: "حاول حذف الحساب مرة أخرى",
+  deleteFailed: "تعذّر إكمال حذف الحساب. لم يُسجَّل خروجك، حاول مرة أخرى بعد قليل.",
+  deleteNoAnswer: "لم يصل رد، وحسابك ما زال موجودًا. تحقق من اتصالك بالإنترنت ثم حاول مرة أخرى.",
+  deleteUnknown: "لم يصل رد، ولم نتمكن من التأكد من حذف الحساب. تحقق من اتصالك بالإنترنت ثم حاول مرة أخرى.",
+
+  doneTitle: "حُذف حسابك",
+  doneBody: "حُذف حسابك وبياناته من منطوق، وتم تسجيل خروجك.",
+  doneEmail: "أرسلنا رسالة تأكيد إلى بريدك الإلكتروني، وقد تصل خلال دقائق.",
+  doneStore: "إن كان لديك اشتراك من App Store أو Google Play، فألغِه من المتجر نفسه، فحذف الحساب لا يلغيه.",
 };
 
-type Strings = typeof ar;
+export type Strings = typeof ar;
 
 const en: Strings = {
   brand: "Mantooq",
@@ -125,6 +213,93 @@ const en: Strings = {
 
   openApp: "Open Mantooq",
   backToAppOnPhone: "Go back to the Mantooq app on your phone.",
+
+  googleName: "Google",
+  appleName: "Apple",
+  appStoreName: "App Store",
+  playStoreName: "Google Play",
+
+  notFoundTitle: "Page not found",
+  notFoundBody: "Check the link and try again.",
+  goHome: "Go to mantooq.com",
+
+  signInTitle: "Sign in to continue",
+  signInIntro: "Sign in the same way you do in the app.",
+  continueWithGoogle: "Continue with Google",
+  continueWithApple: "Continue with Apple",
+  or: "or",
+  email: "Email",
+  password: "Password",
+  showPassword: "Show password",
+  hidePassword: "Hide password",
+  signIn: "Sign in",
+  signingIn: "Signing in…",
+  forgotPasswordHint: "Forgot your password? You can change it from the app's sign-in screen.",
+  errorEmailMissing: "Enter your email.",
+  errorPasswordMissing: "Enter your password.",
+  errorWrongCredentials: "The email or password is incorrect.",
+  errorTooMany: "Too many attempts. Wait a moment, then try again.",
+  errorNetwork: "Couldn't connect. Check your internet connection and try again.",
+  errorPopupBlocked: "Your browser blocked the sign-in window. Allow pop-ups for this site, then try again.",
+  errorProviderDisabled: "This sign-in method isn't available right now. Try another one.",
+  errorOtherMethod: "This email uses a different sign-in method. Use the one you signed up with in the app.",
+  errorWrongPassword: "The password is incorrect.",
+  errorDifferentAccount: "That's a different account. Confirm with the account you signed in with.",
+  errorDisabled: "This account is disabled. Contact us from the app.",
+  errorSignInGeneric: "Couldn't sign in. Try again.",
+  signedInAnnouncement: "Signed in.",
+
+  reauthTitle: "Confirm it's you",
+  reauthBody: "It's been a while since you signed in. To keep your account safe, confirm it's you before deleting it.",
+  confirmWithGoogle: "Confirm with Google",
+  confirmWithApple: "Confirm with Apple",
+  confirmWithPassword: "Confirm",
+  confirming: "Confirming…",
+  cancel: "Cancel",
+  reauthSignInAgain: "This sign-in method can't be confirmed here. Sign in again to continue.",
+
+  deleteTitle: "Delete your Mantooq account",
+  deleteIntro:
+    "Use this page to delete your account in Mantooq (منطوق), the audiobooks and podcasts app, and the data stored with it.",
+  deletedHeading: "What is deleted",
+  deletedBody:
+    "Your account and its sign-in, and all the data stored with it: your library, listening progress, favourites, lists, listening history, settings and subscription records.",
+  keptHeading: "What is kept",
+  keptPayments: "Records of payments already made, without anything that identifies your account.",
+  keptLateWrites: "If a device is still signed in, anything it saves after the deletion is removed within 7 days.",
+  storeNotice:
+    "Deleting your account doesn't cancel a subscription bought in the App Store or Google Play. Cancel it in the store so it doesn't renew and charge you.",
+  appStoreLink: "App Store subscriptions",
+  playStoreLink: "Google Play subscriptions",
+  opensInNewTab: "(opens in a new tab)",
+  cannotUndo: "Deletion can't be undone, and the account can't be recovered afterwards.",
+  inAppPath: "You can also delete your account in the app: Settings → Account → Delete My Account.",
+  checkingSignIn: "Checking your sign-in…",
+  signInFailedTitle: "Couldn't prepare sign-in",
+
+  confirmTitle: "Confirm deletion",
+  signedInAs: "Account:",
+  signedInWith: (provider: string) => `Account signed in with ${provider}`,
+  notYou: "Not you? Sign out",
+  signedOutAnnouncement: "Signed out.",
+  activeStoreWarning: (store: string) =>
+    `You have a ${store} subscription that renews automatically. Deleting your account doesn't cancel it: you'll keep being charged until you cancel it in ${store}.`,
+  cancelInStore: (store: string) => `Cancel the subscription in ${store}`,
+  understand: "I understand that my account and its data will be deleted permanently, and that this can't be undone.",
+  tickFirst: "Tick the confirmation box first.",
+  deleteButton: "Delete my account permanently",
+  deleting: "Deleting your account…",
+  retryDelete: "Try deleting my account again",
+  deleteFailed: "We couldn't finish deleting your account. You're still signed in; try again in a moment.",
+  deleteNoAnswer: "We didn't get an answer, and your account still exists. Check your internet connection and try again.",
+  deleteUnknown:
+    "We didn't get an answer and couldn't check whether your account was deleted. Check your internet connection and try again.",
+
+  doneTitle: "Your account has been deleted",
+  doneBody: "Your account and its data have been deleted from Mantooq, and you've been signed out.",
+  doneEmail: "We've sent a confirmation to your email. It may take a few minutes to arrive.",
+  doneStore:
+    "If you have a subscription from the App Store or Google Play, cancel it in that store: deleting your account doesn't cancel it.",
 };
 
 export const STRINGS: Record<Lang, Strings> = { ar, en };

@@ -1,8 +1,13 @@
 # Accounts page (accounts.mantooq.com)
 
-Mantooq's own handler for Firebase Auth email links: password reset, email verification, email change and email-change undo, in Arabic or English (`lang=en`). It replaces Google's page at `/__/auth/action`.
+Mantooq's own account pages, in Arabic or English (`lang=en`), served from Hosting site `mantooq-accounts`. The root redirects to `mantooq.com`.
 
-Served from Hosting site `mantooq-accounts` at `https://accounts.mantooq.com/action`. The root redirects to `mantooq.com`.
+| Path | Page |
+|---|---|
+| `/action` | Handler for Firebase Auth email links: password reset, email verification, email change and email-change undo. It replaces Google's page at `/__/auth/action`. |
+| `/delete` | Account deletion: what is deleted and kept (shown before any sign-in, as Google Play requires), sign-in, confirmation, then the `deleteAccount` callable. Contract: `docs/ai/plans/26-11-10/web-accounts-stage-c-spec.md` in the app repository. |
+
+`src/main.ts` routes on the path (`src/router.ts`) and loads each page as its own chunk, so `/action` downloads no sign-in, popup or functions code. The sign-in view (`src/auth/signIn.ts`) renders into a container and resolves with the signed-in user; it also has the "confirm it's you" re-authentication, for later pages to reuse. `vite.config.ts` gives `/action` its own copy of the Auth SDK in the build, because a shared copy would carry the popup code into its download.
 
 ## Deploy
 
@@ -27,11 +32,44 @@ If Firebase ever allows the edit again, Authentication → Templates → Customi
 ## Design notes
 
 - The Firebase web config comes from Hosting's `/__/firebase/init.json`, so no key is committed. The `apiKey` in the link is ignored.
-- Auth runs with in-memory persistence: nothing is stored in the browser.
-- No third-party requests. Fonts are self-hosted, and `firebase.json` sets a strict CSP, `no-referrer`, `no-store` and `noindex`, because the link's one-time code is effectively a credential.
+- `/action` runs Auth with in-memory persistence: nothing is stored in the browser. `/delete` uses session persistence, so a reload keeps the sign-in and closing the tab ends it. A guest (anonymous) session never counts as signed in.
+- On `accounts.mantooq.com`, `/delete` sets `authDomain` to the page's own host, so the Google and Apple windows name that host and Firebase's `/__/auth/` helper pages are same-origin. Elsewhere the configured domain stays.
+- Fonts are self-hosted. `firebase.json` sets `no-referrer`, `no-store`, `nosniff`, HSTS and `noindex` on every path, and a Content-Security-Policy, `X-Frame-Options: DENY` and a `Permissions-Policy` per page (`/action`, `/delete`, and `/index.html` when opened directly). They are not on `**`, where they would also cover Firebase's `/__/auth/` pages and break the sign-in popup and its helper frame.
+- `/action`'s policy allows only this site and the two Auth hosts, because the link's one-time code is effectively a credential. `/delete`'s adds the Google API script host for the popup helper, frames from this site for Firebase's helper frame, the europe-west2 functions host and the Firestore REST host.
+- `/delete` reads `subscription_master/{uid}` once through the Firestore REST API with the user's ID token, to name a store whose subscription still renews. A failed read leaves the general store notice. There is no Firestore SDK in the page.
+- Before deleting, `/delete` asks the user to confirm it is still them when the sign-in is over four minutes old (the backend allows five), and revokes the Apple token when the sign-in in this tab came from Apple. The token is kept in memory only, so after a reload it is not revoked.
 - "Open Mantooq" buttons use `go.mantooq.com` app links and appear only on phones. After an email change the page shows text only, because the app confirms the change when it resumes, and a deep link would navigate away from that screen.
 - Passwords need at least 8 characters, matching the app's sign-up rule.
 
 ## Local runs
 
-`npm run dev` with an `.env.development.local` that sets `VITE_AUTH_EMULATOR` (for example `http://127.0.0.1:9199`) and `VITE_PROJECT_ID=demo-mantooq`. The page then talks to an Auth emulator, which lists generated codes at `/emulator/v1/projects/demo-mantooq/oobCodes`.
+`npm run dev` reads these from `.env.development.local` (copy `.env.development.local.example`). A production build ignores them.
+
+| Setting | Meaning |
+|---|---|
+| `VITE_AUTH_EMULATOR` | Auth emulator URL. Turns the emulators on; without it the page fetches `/__/firebase/init.json` like production. |
+| `VITE_FIRESTORE_EMULATOR` | Firestore emulator URL, for the `subscription_master` read on `/delete`. |
+| `VITE_FUNCTIONS_EMULATOR` | Functions emulator URL, for `deleteAccount`. |
+| `VITE_PROJECT_ID` | Emulator project id, `demo-mantooq`. |
+
+The Auth emulator lists generated email-link codes at `/emulator/v1/projects/demo-mantooq/oobCodes`, for trying `/action`.
+
+### Local stack for `/delete`
+
+From the repository root, `npm run emulators:accounts` builds the functions, starts Auth (9096), Firestore (8089), Functions (5004) and Storage (9196) from `firebase.accounts-test.json` on project `demo-mantooq`, seeds them, and runs until Ctrl+C. Its ports differ from the other emulator configs, so it runs alongside them. The functions emulator loads the real `deleteAccount`, and the Auth trigger `accountDeletedCleanup` runs after it. The confirmation email fails without the SES secrets; that failure is logged and does not fail the deletion. `npm run emulators:accounts:seed` resets the data while the stack runs. The start script hides this machine's Google credentials from the emulators, because a few functions in the bundle name the production project directly.
+
+Then `npm --prefix accounts-page run dev` and open `http://localhost:5173/delete`.
+
+Seeded accounts (`scripts/emulator/seed-accounts.mjs`), all with the password `mantooq-accounts-test`:
+
+| Email | What it has |
+|---|---|
+| `plain@example.com` | Only a `users` document |
+| `apple-renewing@example.com` | A renewing App Store row in `subscription_master`, so `/delete` names the App Store |
+| `with-data@example.com` | Documents in several collections, a payment request (anonymised on deletion) and an upload in Storage |
+
+Google and Apple sign-in work through the Auth emulator's own sign-in window, which creates a test user.
+
+## Tests
+
+`npm test` runs the unit tests in `test/` (Vitest): routing, the `subscription_master` parsing, error mapping, the sign-in age check and the deletion failure handling.

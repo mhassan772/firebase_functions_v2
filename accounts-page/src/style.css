@@ -11,6 +11,7 @@
   --warn-bg: #fff4db;
   --warn: #8a5f00;
   --danger: #b42318;
+  --danger-bg: #fdecea;
   --focus: #0b6bcb;
   color-scheme: light;
 }
@@ -278,6 +279,223 @@ label {
   .spinner {
     animation: none;
   }
+}
+
+h2 {
+  font-size: 1.1rem;
+  line-height: 1.5;
+  margin: 20px 0 6px;
+}
+
+h2:focus {
+  outline: none;
+}
+
+.step > .slot > h2:first-child,
+.step > h2:first-child {
+  margin-top: 0;
+}
+
+.strong {
+  font-weight: 700;
+}
+
+.small {
+  font-size: 0.875rem;
+}
+
+ul.plain,
+ul.links {
+  margin: 0 0 16px;
+  padding-inline-start: 20px;
+}
+
+ul.links {
+  margin-bottom: 0;
+}
+
+ul.plain li,
+ul.links li {
+  margin-bottom: 6px;
+}
+
+a {
+  color: var(--deep);
+  font-weight: 700;
+  text-underline-offset: 3px;
+}
+
+ul.links a {
+  display: inline-block;
+  min-height: 48px;
+  padding: 12px 0;
+}
+
+/* A notice always pairs its colour with an icon and its own text, so it never relies on colour. */
+.notice {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  border-radius: 14px;
+  padding: 14px;
+  margin: 0 0 16px;
+  border-inline-start: 4px solid var(--line);
+  background: var(--surface);
+}
+
+.notice p {
+  margin: 0 0 6px;
+}
+
+.notice p:last-child {
+  margin-bottom: 0;
+}
+
+.notice.warn {
+  background: var(--warn-bg);
+  border-inline-start-color: var(--warn);
+}
+
+.notice.danger {
+  background: var(--danger-bg);
+  border-inline-start-color: var(--danger);
+}
+
+.notice-icon {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  color: #ffffff;
+  background: var(--muted);
+}
+
+.notice.warn .notice-icon {
+  background: var(--warn);
+}
+
+.notice.danger .notice-icon {
+  background: var(--danger);
+}
+
+.notice-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.divider-line {
+  border: 0;
+  border-top: 1.5px solid var(--line);
+  margin: 24px 0;
+}
+
+.divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 16px 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.divider::before,
+.divider::after {
+  content: "";
+  flex: 1;
+  border-top: 1.5px solid var(--line);
+}
+
+.btn.provider {
+  gap: 10px;
+  background: var(--card);
+  color: var(--ink);
+  border: 1.5px solid var(--line);
+  margin-bottom: 4px;
+}
+
+.btn.provider.apple {
+  background: #000000;
+  color: #ffffff;
+  border-color: #000000;
+}
+
+.glyph {
+  width: 20px;
+  height: 20px;
+  flex: none;
+}
+
+.btn.danger {
+  background: var(--danger);
+}
+
+.btn[aria-disabled="true"]:not([aria-busy="true"]) {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.account.row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px 12px;
+  text-align: start;
+  margin-bottom: 16px;
+}
+
+.link-button {
+  min-height: 48px;
+  padding: 0 4px;
+  border: 0;
+  background: transparent;
+  color: var(--deep);
+  font: inherit;
+  font-weight: 700;
+  font-size: 0.9rem;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+/* The whole row is the label, so the target is at least 48 points tall whatever the text size. */
+.check {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  min-height: 48px;
+  font-weight: 400;
+  font-size: 1rem;
+  cursor: pointer;
+  margin: 8px 0;
+  padding: 10px 12px;
+  border: 1.5px solid var(--line);
+  border-radius: 14px;
+}
+
+.check.invalid {
+  border-color: var(--danger);
+}
+
+.check input {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  margin: 2px 0 0;
+  accent-color: var(--danger);
+  cursor: pointer;
+}
+
+.check span {
+  flex: 1;
+}
+
+.check:focus-within {
+  border-color: var(--focus);
 }
 
 .foot {

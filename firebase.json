@@ -19,17 +19,44 @@
       {
         "source": "**",
         "headers": [
+          { "key": "Referrer-Policy", "value": "no-referrer" },
+          { "key": "X-Content-Type-Options", "value": "nosniff" },
+          { "key": "X-Robots-Tag", "value": "noindex, nofollow" },
+          { "key": "Strict-Transport-Security", "value": "max-age=31536000" },
+          { "key": "Cache-Control", "value": "no-store" }
+        ]
+      },
+      {
+        "source": "/action",
+        "headers": [
           {
             "key": "Content-Security-Policy",
             "value": "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self'; connect-src 'self' https://identitytoolkit.googleapis.com https://securetoken.googleapis.com; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
           },
-          { "key": "Referrer-Policy", "value": "no-referrer" },
-          { "key": "X-Content-Type-Options", "value": "nosniff" },
           { "key": "X-Frame-Options", "value": "DENY" },
-          { "key": "X-Robots-Tag", "value": "noindex, nofollow" },
-          { "key": "Permissions-Policy", "value": "camera=(), microphone=(), geolocation=(), payment=()" },
-          { "key": "Strict-Transport-Security", "value": "max-age=31536000" },
-          { "key": "Cache-Control", "value": "no-store" }
+          { "key": "Permissions-Policy", "value": "camera=(), microphone=(), geolocation=(), payment=()" }
+        ]
+      },
+      {
+        "source": "/index.html",
+        "headers": [
+          {
+            "key": "Content-Security-Policy",
+            "value": "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self'; connect-src 'self' https://identitytoolkit.googleapis.com https://securetoken.googleapis.com; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+          },
+          { "key": "X-Frame-Options", "value": "DENY" },
+          { "key": "Permissions-Policy", "value": "camera=(), microphone=(), geolocation=(), payment=()" }
+        ]
+      },
+      {
+        "source": "/delete",
+        "headers": [
+          {
+            "key": "Content-Security-Policy",
+            "value": "default-src 'none'; script-src 'self' https://apis.google.com; style-src 'self'; font-src 'self'; img-src 'self'; connect-src 'self' https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://europe-west2-mantooq-test.cloudfunctions.net https://firestore.googleapis.com; frame-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+          },
+          { "key": "X-Frame-Options", "value": "DENY" },
+          { "key": "Permissions-Policy", "value": "camera=(), microphone=(), geolocation=(), payment=()" }
         ]
       },
       {
@@ -38,7 +65,10 @@
       }
     ],
     "redirects": [{ "source": "/", "destination": "https://mantooq.com", "type": 301 }],
-    "rewrites": [{ "source": "/action", "destination": "/index.html" }]
+    "rewrites": [
+      { "source": "/action", "destination": "/index.html" },
+      { "source": "/delete", "destination": "/index.html" }
+    ]
   },
   "emulators": {
     "auth": {
