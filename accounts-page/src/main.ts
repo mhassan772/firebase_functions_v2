@@ -9,10 +9,13 @@ import { STRINGS, langFromParam, type Lang } from "./i18n";
 import { routeFor, type Route } from "./router";
 import { focusLanguageToggle, heading, renderShell } from "./shell";
 
-/// Each route is its own chunk, so `/action` never downloads the sign-in, popup or functions code.
+/// Each route is its own chunk, so `/action` never downloads the sign-in, popup or functions code,
+/// and only `/subscribe` and `/manage` carry the Stripe.js loader.
 const ROUTES: Record<Route, () => Promise<{ mount: () => void }>> = {
   action: () => import("./routes/action"),
   delete: () => import("./routes/delete"),
+  subscribe: () => import("./routes/subscribe"),
+  manage: () => import("./routes/manage"),
   notFound: () => import("./routes/notFound"),
 };
 

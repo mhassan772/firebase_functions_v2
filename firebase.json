@@ -60,6 +60,28 @@
         ]
       },
       {
+        "source": "/subscribe",
+        "headers": [
+          {
+            "key": "Content-Security-Policy",
+            "value": "default-src 'none'; script-src 'self' https://apis.google.com https://js.stripe.com; style-src 'self'; font-src 'self'; img-src 'self'; connect-src 'self' https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://europe-west2-mantooq-test.cloudfunctions.net https://api.stripe.com https://fonts.googleapis.com; frame-src 'self' https://js.stripe.com https://hooks.stripe.com; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+          },
+          { "key": "X-Frame-Options", "value": "DENY" },
+          { "key": "Permissions-Policy", "value": "camera=(), microphone=(), geolocation=()" }
+        ]
+      },
+      {
+        "source": "/manage",
+        "headers": [
+          {
+            "key": "Content-Security-Policy",
+            "value": "default-src 'none'; script-src 'self' https://apis.google.com https://js.stripe.com; style-src 'self'; font-src 'self'; img-src 'self'; connect-src 'self' https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://europe-west2-mantooq-test.cloudfunctions.net https://api.stripe.com https://fonts.googleapis.com; frame-src 'self' https://js.stripe.com https://hooks.stripe.com; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+          },
+          { "key": "X-Frame-Options", "value": "DENY" },
+          { "key": "Permissions-Policy", "value": "camera=(), microphone=(), geolocation=()" }
+        ]
+      },
+      {
         "source": "/assets/**",
         "headers": [{ "key": "Cache-Control", "value": "public, max-age=31536000, immutable" }]
       }
@@ -67,7 +89,9 @@
     "redirects": [{ "source": "/", "destination": "https://mantooq.com", "type": 301 }],
     "rewrites": [
       { "source": "/action", "destination": "/index.html" },
-      { "source": "/delete", "destination": "/index.html" }
+      { "source": "/delete", "destination": "/index.html" },
+      { "source": "/subscribe", "destination": "/index.html" },
+      { "source": "/manage", "destination": "/index.html" }
     ]
   },
   "emulators": {

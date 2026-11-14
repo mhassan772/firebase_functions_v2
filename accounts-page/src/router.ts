@@ -1,10 +1,12 @@
 /// Which page a path shows, kept apart from the DOM so it can be tested.
 
-export type Route = "action" | "delete" | "notFound";
+export type Route = "action" | "delete" | "subscribe" | "manage" | "notFound";
 
 const ROUTES: Readonly<Record<string, Route>> = {
   "/action": "action",
   "/delete": "delete",
+  "/subscribe": "subscribe",
+  "/manage": "manage",
 };
 
 /// Matches the paths Hosting rewrites to this page; a trailing slash is tolerated, case is not.
