@@ -287,6 +287,9 @@ describe("the whole pass", () => {
     assert.equal(summary.googleVoided.pages, 0);
     assert.equal(summary.appleHistoryProduction.completed, false);
     assert.equal(summary.appleHistorySandbox.completed, false);
+    // No Stripe key in the options: the web phases are skipped, not failed.
+    assert.deepEqual(summary.stripeEvents, { skipped: "stripe_not_configured" });
+    assert.deepEqual(summary.webPending, { skipped: "stripe_not_configured" });
     assert.ok(summary.durationMs >= 0);
     assert.ok(typeof summary.operationId === "string");
   });

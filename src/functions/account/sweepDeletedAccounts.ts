@@ -1,5 +1,5 @@
 import * as functions from "firebase-functions";
-import { REGION } from "../../config/constants";
+import { REGION, STRIPE_WEB_SECRETS } from "../../config/constants";
 import { handleSweepDeletedAccounts } from "../../handlers/accountDeletionHandlers";
 import { accountDeletionDeps } from "./accountDeletionDeps";
 
@@ -9,7 +9,7 @@ import { accountDeletionDeps } from "./accountDeletionDeps";
  */
 export const sweepDeletedAccounts = functions
   .region(REGION)
-  .runWith({ timeoutSeconds: 540, memory: "512MB" })
+  .runWith({ secrets: [STRIPE_WEB_SECRETS.secretKey], timeoutSeconds: 540, memory: "512MB" })
   .pubsub.schedule("every monday 03:00")
   .timeZone("UTC")
   .onRun(async () => {

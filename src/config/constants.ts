@@ -24,6 +24,10 @@ export const MANUAL_GRANT_PRODUCT_ID = "manual_grant";
 // Rollback path, not a second code path.
 export const MANUAL_SLOT_ENABLED = true;
 
+// Kill switch for the two web slots, read like MANUAL_SLOT_ENABLED: when false the projection
+// ignores them, so a fault in web purchases can be taken out of everyone's entitlement at once.
+export const WEB_SLOT_ENABLED = true;
+
 // While old app versions (before ~90.4) still read `subscriptions_manual`, every
 // manual mutation also mirrors the replayed expiry there. Flip off once those
 // versions are negligible.
@@ -43,6 +47,14 @@ export const SUBSCRIPTION_SECRETS = {
   appleKeyId: "APPLE_APP_STORE_KEY_ID",
   applePrivateKey: "APPLE_APP_STORE_PRIVATE_KEY",
   accountBindingHmacKey: "SUBSCRIPTION_ACCOUNT_BINDING_HMAC_KEY",
+} as const;
+
+// Secret Manager names for the Stripe account that sells web subscriptions. The key's prefix
+// decides the mode: a sandbox key writes the web test slot, a live key the production one.
+export const STRIPE_WEB_SECRETS = {
+  secretKey: "STRIPE_WEB_SECRET_KEY",
+  webhookSecret: "STRIPE_WEB_WEBHOOK_SECRET",
+  publishableKey: "STRIPE_WEB_PUBLISHABLE_KEY",
 } as const;
 
 export const WEB_CORS_ALLOWED_ORIGINS = [

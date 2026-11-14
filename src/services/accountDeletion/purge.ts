@@ -29,7 +29,13 @@ import {
   UID_KEYED_COLLECTIONS,
   URL_GRANTS_COLLECTION,
   URL_GRANTS_DEVICES_COLLECTION,
+  WEB_CUSTOMERS_COLLECTION,
+  WEB_PURCHASE_STRIPPED_FIELDS,
+  WEB_PURCHASE_THROTTLE_COLLECTION,
+  WEB_PURCHASE_UID_FIELD,
+  WEB_PURCHASES_COLLECTION,
 } from "./inventory";
+import { throttleUidDocId } from "../webSubscriptions/purchaseThrottle";
 import { openTombstone, recordTombstoneRun, TombstoneState } from "./tombstone";
 
 /** A Firebase Auth uid as this project issues them. Storage deletion by prefix depends on it. */
@@ -48,7 +54,7 @@ export interface PurgeDeps {
   firestore: Firestore;
   storage: PurgeStorage;
   now: () => number;
-  /** Ends a web subscription at its payment provider. Stage D supplies it; until then it does nothing. */
+  /** Ends the account's web subscriptions at Stripe. Must return without a Stripe call when the account has no customer. */
   cancelWebSubscription: (uid: string) => Promise<void>;
 }
 
@@ -142,8 +148,10 @@ export async function purgeAccount(uid: string, deps: PurgeDeps, options: PurgeO
     return collected.deviceIds.length;
   });
 
+  let webDone = false;
   await run("web_subscription", async () => {
     await deps.cancelWebSubscription(uid);
+    webDone = true;
     return 0;
   });
 
@@ -189,6 +197,16 @@ export async function purgeAccount(uid: string, deps: PurgeDeps, options: PurgeO
       } catch (error) {
         fail(root.parent.id, error);
       }
+    }
+    const webCustomer = db.collection(WEB_CUSTOMERS_COLLECTION).doc(uid);
+    if (webDone) {
+      try {
+        count += await deleteDocuments(db, [webCustomer, db.collection(WEB_PURCHASE_THROTTLE_COLLECTION).doc(throttleUidDocId(uid))]);
+      } catch (error) {
+        fail(WEB_CUSTOMERS_COLLECTION, error);
+      }
+    } else {
+      fail(WEB_CUSTOMERS_COLLECTION, new Error("web_customers kept for the next run"));
     }
     const throttle = db.collection(AUTH_EMAIL_THROTTLE_COLLECTION);
     const throttleRefs = [throttle.doc(uidDocId(uid)), ...(options.email ? [throttle.doc(addressDocId(options.email))] : [])];
@@ -237,10 +255,15 @@ export async function purgeAccount(uid: string, deps: PurgeDeps, options: PurgeO
     let count = 0;
     for (const collection of PAYMENT_REQUEST_COLLECTIONS) {
       try {
-        count += await anonymiseWhere(db, collection, uid, now);
+        count += await anonymiseWhere(db, collection, PAYMENT_REQUEST_UID_FIELD, PAYMENT_REQUEST_STRIPPED_FIELDS, uid, now);
       } catch (error) {
         fail(collection, error);
       }
+    }
+    try {
+      count += await anonymiseWhere(db, WEB_PURCHASES_COLLECTION, WEB_PURCHASE_UID_FIELD, WEB_PURCHASE_STRIPPED_FIELDS, uid, now);
+    } catch (error) {
+      fail(WEB_PURCHASES_COLLECTION, error);
     }
     return count;
   });
@@ -339,11 +362,18 @@ async function deleteWhere(db: Firestore, collection: string, field: string, uid
   });
 }
 
-/** Strips the payer's identity from each payment request of `uid` and stamps when. */
-async function anonymiseWhere(db: Firestore, collection: string, uid: string, now: Timestamp): Promise<number> {
+/** Strips the payer's identity from each payment record of `uid` and stamps when. */
+async function anonymiseWhere(
+  db: Firestore,
+  collection: string,
+  uidField: string,
+  strippedFields: readonly string[],
+  uid: string,
+  now: Timestamp
+): Promise<number> {
   const update: Record<string, unknown> = { [PAYMENT_REQUEST_ANONYMISED_FIELD]: now };
-  for (const field of PAYMENT_REQUEST_STRIPPED_FIELDS) update[field] = FieldValue.delete();
-  return forEachPage(db, collection, PAYMENT_REQUEST_UID_FIELD, uid, async (docs) => {
+  for (const field of strippedFields) update[field] = FieldValue.delete();
+  return forEachPage(db, collection, uidField, uid, async (docs) => {
     const batch = db.batch();
     docs.forEach((doc) => batch.update(doc.ref, update));
     await batch.commit();

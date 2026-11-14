@@ -678,6 +678,19 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    // Web subscriptions (docs/web_subscriptions.md). No client writes the pricing config (it is
+    // set in the console) or the purchase ledger (the functions write it); admins read both.
+    // web_customers, web_stripe_events and web_purchase_throttle fall to the catch-all deny.
+    match /web_pricing/{id} {
+      allow read: if isPortalAdmin();
+      allow write: if false;
+    }
+
+    match /web_purchases/{id} {
+      allow read: if isPortalAdmin();
+      allow write: if false;
+    }
+
 		
     // DONATION PAGE (mantooq-donation). Cloud Functions and scripts use the
     // Admin SDK and bypass these rules.

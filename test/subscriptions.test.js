@@ -1475,7 +1475,9 @@ test("a manual slot reads back with activity derived from the date, never the st
 });
 
 test("the manual slot is the fifth slot and its document id follows the slot scheme", () => {
-  assert.equal(STATE_SLOTS.length, 5);
+  // The two web slots were appended after it, so its index did not move.
+  assert.equal(STATE_SLOTS.length, 7);
+  assert.equal(MANUAL_SLOT_INDEX, 4);
   assert.deepEqual(STATE_SLOTS[MANUAL_SLOT_INDEX], { platform: "manual", environment: "production" });
   assert.equal(
     legacyManualDocumentId("hi3CmRh1nudfKVNjCDoXK8yH4Tl2"),
@@ -1564,8 +1566,11 @@ test("master projection carries the manual summary and one source row per slot",
     "environment",
     "expiresAt",
     "platform",
+    "productId",
     "status",
   ]);
+  assert.equal(projection.sources[0].productId, "monthly_sub");
+  assert.equal(projection.sources[1].productId, "manual_grant");
   assert.equal(projection.sources[0].platform, "apple");
   assert.equal(projection.sources[0].status, "expired");
   assert.equal(projection.sources[1].autoRenewing, false);
@@ -1723,7 +1728,7 @@ test("stats: an empty database gives a full, zeroed document", () => {
   assert.equal(document.monthly[0].month, "2024-11");
   assert.equal(document.monthly.at(-1).month, "2026-10");
   assert.deepEqual(document.summary.active, {
-    total: 0, apple: 0, google: 0, manual: 0,
+    total: 0, apple: 0, google: 0, manual: 0, web: 0,
     manualBySource: { egypt_request: 0, migration_restoration: 0, admin_manual_add: 0, legacy_import: 0, unknown: 0 },
   });
   assert.equal(document.summary.activeChange30d, null);
@@ -1761,7 +1766,7 @@ test("stats: active counts production masters that have not expired, whatever th
   );
   assert.equal(active.manualBySource.egypt_request, 1);
   assert.equal(active.manualBySource.unknown, 1);
-  assert.deepEqual(document.daily.at(-1).active, { total: 4, apple: 1, google: 1, manual: 2 });
+  assert.deepEqual(document.daily.at(-1).active, { total: 4, apple: 1, google: 1, manual: 2, web: 0 });
   assert.equal(document.summary.expiring7d, 1);
   assert.equal(document.summary.expiring7dNotRenewing, 1);
   assert.equal(document.summary.expiring30d, 2);
@@ -1795,8 +1800,8 @@ test("stats: a user with a store and a manual source is one subscriber, new once
   assert.equal(dayOf(document, "2026-10-02").new, 1);
   assert.equal(dayOf(document, "2026-10-05").new, 0);
   // Estimated: manual only on the 3rd, the store slot is the longer source from the 5th.
-  assert.deepEqual(dayOf(document, "2026-10-03").active, { total: 1, apple: 0, google: 0, manual: 1 });
-  assert.deepEqual(dayOf(document, "2026-10-06").active, { total: 1, apple: 1, google: 0, manual: 0 });
+  assert.deepEqual(dayOf(document, "2026-10-03").active, { total: 1, apple: 0, google: 0, manual: 1, web: 0 });
+  assert.deepEqual(dayOf(document, "2026-10-06").active, { total: 1, apple: 1, google: 0, manual: 0, web: 0 });
 });
 
 test("stats: a reversed grant is neither a start nor a grant, and an undated legacy baseline is never new", () => {
@@ -1988,7 +1993,8 @@ test("stats: recorded days replace estimates, and only today, yesterday and miss
     statsInput({ archive, masters: [masterRow("apple-1", { platform: "apple" })] }),
     STATS_NOW
   );
-  assert.deepEqual(dayOf(document, "2026-10-19").active, { total: 5, apple: 5, google: 0, manual: 0 });
+  // An archived row from before web purchases has no web count and still counts as recorded.
+  assert.deepEqual(dayOf(document, "2026-10-19").active, { total: 5, apple: 5, google: 0, manual: 0, web: 0 });
   assert.equal(dayOf(document, "2026-10-19").estimated, false);
   assert.equal(dayOf(document, "2026-10-10").estimated, true);
   // An estimated archive row is estimated again, not trusted as recorded.
