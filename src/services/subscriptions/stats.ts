@@ -14,6 +14,7 @@ import {
 import {
   MANUAL_SLOT,
   STATE_SLOTS,
+  WEB_PRODUCTION_SLOT,
   SUBSCRIPTION_EVENT_COLLECTION,
   SUBSCRIPTION_MASTER_COLLECTION,
   SUBSCRIPTION_STATE_COLLECTION,
@@ -45,6 +46,7 @@ export interface ActiveBySource {
   apple: number;
   google: number;
   manual: number;
+  web: number;
 }
 
 export interface SubscriptionStatsSummary {
@@ -141,7 +143,7 @@ export interface StatsResult {
   archiveRows: DailyStatsPoint[];
 }
 
-type Platform = "apple" | "google" | "manual";
+type Platform = "apple" | "google" | "manual" | "web";
 
 /** One production source of one user, as far back as the records reach. */
 interface SourceSpan {
@@ -209,6 +211,9 @@ interface QueueRequest {
  *   amount from before the baseline is that same payment and is not counted
  *   again. A legacy amount with no date is left out rather than dated at the
  *   import.
+ * - Web purchases: a production web slot counts like a store slot for starts,
+ *   spans and coverage, under its own `web` key; it is not a store, and its
+ *   renewals and refunds are not counted, since they are not store events.
  * - Past active points come from the daily archive when a run recorded them.
  *   Otherwise they are estimated (`estimated: true`): a user counts on day D
  *   when one of their sources started on or before D and its last known
@@ -226,7 +231,8 @@ export function computeStats(input: StatsInput, now: Date): StatsResult {
   const counts = new PeriodTally(calendar);
 
   const manualSlots = new Map<string, { grants: ManualGrant[]; createdAt?: Date }>();
-  const storeSlots: Array<{ uid: string; platform: Platform; createdAt?: Date; expiresAt: Date }> = [];
+  // Store and web slots alike: each is a paid source with a start and an expiry.
+  const paidSlots: Array<{ uid: string; platform: Platform; createdAt?: Date; expiresAt: Date }> = [];
   for (const slot of input.slots) {
     const data = slot.data;
     const uid = typeof data.uid === "string" ? data.uid : undefined;
@@ -241,8 +247,8 @@ export function computeStats(input: StatsInput, now: Date): StatsResult {
       continue;
     }
     const expiresAt = timestampDate(data.expiresAt);
-    if (isProductionStoreSlot(data) && expiresAt) {
-      storeSlots.push({
+    if ((isProductionStoreSlot(data) || isProductionWebSlot(data)) && expiresAt) {
+      paidSlots.push({
         uid,
         platform: data.platform,
         createdAt: timestampDate(data.createdAt),
@@ -387,7 +393,7 @@ export function computeStats(input: StatsInput, now: Date): StatsResult {
     }
   }
 
-  for (const slot of storeSlots) {
+  for (const slot of paidSlots) {
     // A slot always carries `createdAt`; one without it has no date to start from.
     addStart(slot.uid, slot.createdAt);
     timeline(slot.uid).spans.push({
@@ -399,9 +405,9 @@ export function computeStats(input: StatsInput, now: Date): StatsResult {
 
   // Manual access that ran out with nothing to continue it.
   for (const [uid, slot] of manualSlots) {
-    const storeSpans = (timelines.get(uid)?.spans ?? []).filter((span) => span.platform !== "manual");
+    const paidSpans = (timelines.get(uid)?.spans ?? []).filter((span) => span.platform !== "manual");
     for (const lapse of manualLapses(slot.grants, now)) {
-      const covered = storeSpans.some(
+      const covered = paidSpans.some(
         (span) =>
           (!span.start || span.start.getTime() <= lapse.getTime()) &&
           span.expiresAt.getTime() > lapse.getTime()
@@ -554,18 +560,27 @@ export function computeStats(input: StatsInput, now: Date): StatsResult {
   };
 }
 
+/** A production Apple or Google slot. Neither the manual nor the web slot is a store. */
 function isProductionStoreSlot(data: DocumentData): boolean {
   return STATE_SLOTS.some(
     (slot) =>
       slot.platform !== MANUAL_SLOT.platform &&
+      slot.platform !== WEB_PRODUCTION_SLOT.platform &&
       slot.environment === "production" &&
       slot.platform === data.platform &&
       slot.environment === data.environment
   );
 }
 
+function isProductionWebSlot(data: DocumentData): boolean {
+  return (
+    data.platform === WEB_PRODUCTION_SLOT.platform &&
+    data.environment === WEB_PRODUCTION_SLOT.environment
+  );
+}
+
 function isPlatform(value: unknown): value is Platform {
-  return value === "apple" || value === "google" || value === "manual";
+  return value === "apple" || value === "google" || value === "manual" || value === "web";
 }
 
 function isManualSourceKey(value: unknown): value is ManualGrantSourceKey {
@@ -745,11 +760,13 @@ function readActive(value: unknown): ActiveBySource | undefined {
     apple: record.apple as number,
     google: record.google as number,
     manual: record.manual as number,
+    // Rows recorded before web purchases existed have no web count, and had none to count.
+    web: typeof record.web === "number" ? record.web : 0,
   };
 }
 
 function emptyActive(): ActiveBySource {
-  return { total: 0, apple: 0, google: 0, manual: 0 };
+  return { total: 0, apple: 0, google: 0, manual: 0, web: 0 };
 }
 
 function emptyCounts(): PeriodCounts {

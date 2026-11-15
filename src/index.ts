@@ -14,6 +14,13 @@ export { appleSubscriptionNotifications } from "./functions/subscriptions/appleS
 export { googleSubscriptionNotifications } from "./functions/subscriptions/googleSubscriptionNotifications";
 export { reconcileSubscriptions } from "./functions/subscriptions/reconcileSubscriptions";
 export { refreshSubscriptionStats } from "./functions/subscriptions/refreshSubscriptionStats";
+export { stripeWebEvents } from "./functions/webSubscriptions/stripeWebEvents";
+export { getWebPlans } from "./functions/webSubscriptions/getWebPlans";
+export { startWebPurchase } from "./functions/webSubscriptions/startWebPurchase";
+export { finishWebPurchase } from "./functions/webSubscriptions/finishWebPurchase";
+export { getWebSubscription } from "./functions/webSubscriptions/getWebSubscription";
+export { manageWebSubscription } from "./functions/webSubscriptions/manageWebSubscription";
+export { sendWebBillingEmail } from "./functions/webSubscriptions/sendWebBillingEmail";
 export { urlPolicyDigest } from "./functions/urlPolicy/urlPolicyDigest";
 export { admin_upload_to_S3 } from "./functions/admin/uploadToS3";
 export { adminBlurCover } from "./functions/admin/adminBlurCover";

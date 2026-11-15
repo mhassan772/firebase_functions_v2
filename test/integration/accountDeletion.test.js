@@ -142,6 +142,7 @@ async function seedAccount(uid, email, sharedDevice) {
   await set(`subscriptions_manual/${uid}`, { expiry: at });
   await set(`subscription_acknowledgements/ack-${uid}`, { uid, status: "pending" });
   await set(`subscription_purchase_ownership/apple_owner-${uid}`, { uid, platform: "apple" });
+  await set(`web_email_outbox/confirmed_${uid}`, { uid, kind: "purchase_confirmed", status: "sent" });
 
   const payments = [];
   for (const collection of inventory.PAYMENT_REQUEST_COLLECTIONS) {

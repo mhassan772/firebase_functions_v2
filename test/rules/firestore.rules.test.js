@@ -219,6 +219,40 @@ describe("admin-only data", () => {
     }
   });
 
+  test("web pricing and the web purchase ledger: admins read them, nobody writes them", async () => {
+    await env.withSecurityRulesDisabled(async (context) => {
+      const db = context.firestore();
+      await setDoc(doc(db, "web_pricing/config"), { salesEnabled: false });
+      await setDoc(doc(db, "web_purchases/p1"), { uid: "user-1", status: "paid" });
+    });
+    for (const path of ["web_pricing/config", "web_purchases/p1"]) {
+      const name = path.split("/")[0];
+      await assertSucceeds(getDoc(doc(asUser("admin-1"), path)));
+      await assertSucceeds(getDocs(collection(asUser("admin-1"), name)));
+      for (const db of [asUser("dev-1"), asUser("user-1"), asGuest()]) {
+        await assertFails(getDoc(doc(db, path)));
+        await assertFails(getDocs(collection(db, name)));
+      }
+      for (const db of [asUser("admin-1"), asUser("user-1"), asGuest()]) {
+        await assertFails(setDoc(doc(db, path), { salesEnabled: true }));
+        await assertFails(updateDoc(doc(db, path), { status: "refunded" }));
+        await assertFails(deleteDoc(doc(db, path)));
+      }
+    }
+    // The buyer cannot read their own ledger entry either: it is the record of money taken.
+    await assertFails(getDocs(query(collection(asUser("user-1"), "web_purchases"), where("uid", "==", "user-1"))));
+  });
+
+  test("web customers, Stripe events and the purchase throttle: no client at all", async () => {
+    for (const path of ["web_customers/user-1", "web_stripe_events/evt_1", "web_purchase_throttle/uid_user-1", "web_email_outbox/confirmed_1"]) {
+      for (const db of [asUser("user-1"), asUser("admin-1"), asGuest()]) {
+        await assertFails(getDoc(doc(db, path)));
+        await assertFails(setDoc(doc(db, path), { value: 1 }));
+        await assertFails(getDocs(collection(db, path.split("/")[0])));
+      }
+    }
+  });
+
   test("users_adminv2: nobody writes a role from the client", async () => {
     await assertFails(setDoc(doc(asUser("user-1"), "users_adminv2/user-1"), { role: "admin" }));
     await assertFails(setDoc(doc(asUser("admin-1"), "users_adminv2/user-1"), { role: "admin" }));

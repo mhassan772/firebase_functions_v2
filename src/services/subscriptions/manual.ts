@@ -870,6 +870,9 @@ function sourceSummariesResponse(
     if (source.autoRenewing !== undefined) {
       row.autoRenewing = source.autoRenewing;
     }
+    if (source.productId) {
+      row.productId = source.productId;
+    }
     return row;
   });
 }

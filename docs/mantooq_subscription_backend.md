@@ -311,6 +311,12 @@ stored value. It is not copied into `subscription_master`.
 Admin grants live in a fifth projection slot and are managed through the
 `adminManageSubscription` callable. See `docs/admin_manage_subscription.md`.
 
+## Web purchases
+
+Stripe purchases live in two more slots, `web/production` and `web/test`,
+appended after the manual slot and written only by `syncWebEntitlement`. See
+`docs/web_subscriptions.md`.
+
 ## Firestore
 
 `subscription_master/{firebaseUid}` is overwritten as an exact projection.
@@ -319,7 +325,10 @@ It contains only:
 - `active`, `status`, `platform`, `productId`
 - `expiresAt`, optional `autoRenewing`, `inGracePeriod`, `environment`
 - Apple-only `originalTransactionId`
-- Google-only `purchaseReference` (SHA-256, never a token)
+- `purchaseReference`: Google's (SHA-256, never a token), or the web
+  subscription or lifetime invoice id
+- `sources`: one row per existing slot, `{platform, environment, status,
+  expiresAt, autoRenewing?, productId}`
 - `lastStoreEventAt`, `lastVerifiedAt`, `createdAt`, `updatedAt`
 - Device-management fields owned by `manageSubscriptionDevice` and the admin
   device actions, preserved across store-driven rebuilds and manual grants:

@@ -8,9 +8,9 @@ What is deleted is listed in one place, `src/services/accountDeletion/inventory.
 
 | Function | Kind | What it does |
 |---|---|---|
-| `deleteAccount` | Callable, europe-west2 | The app's delete. Purges, deletes the Auth user, sends the confirmation. 540 s, 512 MB, with the SES secrets. |
-| `accountDeletedCleanup` | Auth `onDelete` | Runs the same purge whenever an Auth user is deleted by any route, including app versions that delete the sign-in themselves and deletions in the console. No retry, no email. 540 s, 512 MB, at most 5 instances. |
-| `sweepDeletedAccounts` | Scheduled, every Monday 03:00 UTC | Purges every open deletion again and closes the clean ones. 540 s, 512 MB. |
+| `deleteAccount` | Callable, europe-west2 | The app's delete. Purges, deletes the Auth user, sends the confirmation. 540 s, 512 MB, with the SES secrets and `STRIPE_WEB_SECRET_KEY`. |
+| `accountDeletedCleanup` | Auth `onDelete` | Runs the same purge whenever an Auth user is deleted by any route, including app versions that delete the sign-in themselves and deletions in the console. No retry, no email. 540 s, 512 MB, at most 5 instances, with `STRIPE_WEB_SECRET_KEY`. |
+| `sweepDeletedAccounts` | Scheduled, every Monday 03:00 UTC | Purges every open deletion again and closes the clean ones. 540 s, 512 MB, with `STRIPE_WEB_SECRET_KEY`. |
 
 None of them runs as a custom service account.
 
@@ -64,17 +64,19 @@ Order:
 
 1. Open the tombstone.
 2. Read the device ids in `url_grants/{uid}.devices`.
-3. Cancel a web subscription. Nothing to cancel until stage D adds web purchases.
+3. Delete the account's Stripe customer for the key's mode, named in `web_customers/{uid}`, which cancels its web subscriptions at once with no refund. No mapping means no Stripe call, so an account that never bought on the web needs no key. A customer already deleted is not an error. A mapping with no key configured fails the step, and so does a Stripe error; `web_customers/{uid}` is then kept for the next run (see step 6).
 4. Delete `listener_totals/{uid}`. First, because deleting a `listening_history` chunk fires `listeningDaysMonthTrigger`, which writes a month's value back into this document while it still holds an entry for that month.
 5. Remove the uid from `guestUids` on each `url_grants_devices` document read in step 2 and set `guestUidsCount` to what remains, in a transaction. The documents themselves stay.
-6. Delete the documents keyed by uid, each with all of its subcollections: `users`, `favourites`, `favorites_v2`, `playback_progress`, `playback_progress_v2`, `episode_progress`, `converted_podcasts`, `podcast_subscriptions`, `episodes_lists`, `pdf_progress`, `completed_book`, `completed_books_v2`, `archived_episodes`, `blocked_content`, `playlists`, `playlists_v2`, `routines`, `routine_activity`, `listen_times`, `device_sessions`, `device_sessions_v2`, `user_settings`, `listening_history`, `bookmarks`, `user_books`, `subscription_master`, `url_grants`, `users_my_mantooq`, `user_store_country`, `re_banned_users`, and `re_user_liked_comments` and `re_user_flagged_comments` for their older shape nested under the uid; and the two `auth_email_throttle` counters, the address one only when the email is known. `url_grants/{uid}` holds the device ids, so it is deleted only when steps 2 and 5 both went through in this run; otherwise it is left for the next run and the step counts as failed.
+6. Delete the documents keyed by uid, each with all of its subcollections: `users`, `favourites`, `favorites_v2`, `playback_progress`, `playback_progress_v2`, `episode_progress`, `converted_podcasts`, `podcast_subscriptions`, `episodes_lists`, `pdf_progress`, `completed_book`, `completed_books_v2`, `archived_episodes`, `blocked_content`, `playlists`, `playlists_v2`, `routines`, `routine_activity`, `listen_times`, `device_sessions`, `device_sessions_v2`, `user_settings`, `listening_history`, `bookmarks`, `user_books`, `subscription_master`, `url_grants`, `users_my_mantooq`, `user_store_country`, `re_banned_users`, and `re_user_liked_comments` and `re_user_flagged_comments` for their older shape nested under the uid; and the two `auth_email_throttle` counters, the address one only when the email is known. `web_customers/{uid}` and the purchase throttle's `web_purchase_throttle/uid_<uid>` are deleted only when step 3 went through in this run, since the mapping is the only way back to the Stripe customer; otherwise they are left and the step counts as failed. `url_grants/{uid}` holds the device ids, so it is deleted only when steps 2 and 5 both went through in this run; otherwise it is left for the next run and the step counts as failed.
 7. Delete the documents found by a field holding the uid: `user_guid` on `book_listeners`, `podcast_listeners`, `podcast_audit`, `converted_podcast_audit`, `re_review_content`, `re_user_liked_comments`, `re_user_flagged_comments` and `reporting_issues`; `userId` on `auto_reported_issues`; `ownerUid` on `shared_collections`; `uid` on `content_reports`; and `id` on `users`, for older user documents whose id is not the uid.
 8. Delete the subscription records: every slot document in `subscription_store_state`, the hashed and the raw-uid documents in `subscriptions_manual`, and `subscription_acknowledgements` and `subscription_purchase_ownership` where `uid` is the account.
-9. Anonymise the payment requests in `subscriptions_to_be_approved` and `subscription_migration_restoration`.
+9. Anonymise the payment requests in `subscriptions_to_be_approved` and `subscription_migration_restoration`, and remove `uid` from the account's `web_purchases` entries, setting `anonymised_at`.
 10. Delete every Storage object in bucket `mantooq-images-p` whose name starts with `<folder>/<uid>_` under `subscriptions/`, `restoreSubscriptionMigration/`, `reportingIssues/` and `logFiles/`. Paths stored on documents are not followed: every upload handler names its file with that prefix, and a stored path could name another account's file.
 11. Record `lastRunOk` on the tombstone.
 
 ## What is anonymised
+
+The web purchase ledger is kept for the same reason: it holds no email, name, card number or address line, and only `uid` is removed. Its Stripe customer id points at a customer that step 3 deleted.
 
 The manual payment requests are the record of money received, so they stay. `user_guid`, `subscription_id` (a hash of the uid), `phone_number_sent_from`, `notes`, `admin_notes` and `photo_link` are removed and `anonymised_at` is set; amount, method, duration, status, dates and country stay. The portal cannot approve an anonymised request, since it no longer names an account.
 

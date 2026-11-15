@@ -11,6 +11,7 @@ import { admin } from "../../config/admin";
 import {
   MANUAL_GRANT_PRODUCT_ID,
   MANUAL_SLOT_ENABLED,
+  WEB_SLOT_ENABLED,
 } from "../../config/constants";
 import {
   ManualProjectionSummary,
@@ -69,16 +70,46 @@ export const MANUAL_SLOT: StateSlot = {
   environment: "production",
 };
 
-/** Every projection slot, in a fixed order; snapshot arrays are indexed by it. */
+/** Written for a live Stripe key. */
+export const WEB_PRODUCTION_SLOT: StateSlot = {
+  platform: "web",
+  environment: "production",
+};
+
+/** Written for a sandbox Stripe key, so test cards never reach the production slot. */
+export const WEB_TEST_SLOT: StateSlot = {
+  platform: "web",
+  environment: "test",
+};
+
+/**
+ * Every projection slot, in a fixed order; snapshot arrays are indexed by it.
+ *
+ * New slots are appended, never inserted, so the indexes older code relies on
+ * (the manual slot's above all) stay where they were.
+ */
 export const STATE_SLOTS: StateSlot[] = [
   { platform: "apple", environment: "production" },
   { platform: "apple", environment: "sandbox" },
   { platform: "google", environment: "production" },
   { platform: "google", environment: "test" },
   MANUAL_SLOT,
+  WEB_PRODUCTION_SLOT,
+  WEB_TEST_SLOT,
 ];
 
 export const MANUAL_SLOT_INDEX = STATE_SLOTS.indexOf(MANUAL_SLOT);
+
+/** The web slots; only `syncWebEntitlement` writes them. */
+export const WEB_SLOT_INDEXES: readonly number[] = [
+  STATE_SLOTS.indexOf(WEB_PRODUCTION_SLOT),
+  STATE_SLOTS.indexOf(WEB_TEST_SLOT),
+];
+
+/** The web slot a Stripe key in this mode writes. */
+export function webSlotIndex(livemode: boolean): number {
+  return STATE_SLOTS.indexOf(livemode ? WEB_PRODUCTION_SLOT : WEB_TEST_SLOT);
+}
 
 /**
  * Everything a projection decision reads, fetched in one `getAll` so that the
@@ -148,6 +179,9 @@ export function slotStates(
     if (index === MANUAL_SLOT_INDEX && !MANUAL_SLOT_ENABLED) {
       return undefined;
     }
+    if (WEB_SLOT_INDEXES.includes(index) && !WEB_SLOT_ENABLED) {
+      return undefined;
+    }
     return snapshot.exists ? stateDataToNormalized(snapshot.data()!, now) : undefined;
   });
 }
@@ -173,9 +207,11 @@ export function projectMaster(
   const present = proposedStates.filter(
     (candidate): candidate is NormalizedSubscription => candidate !== undefined
   );
-  const considered = MANUAL_SLOT_ENABLED
-    ? present
-    : present.filter((candidate) => candidate.platform !== "manual");
+  const considered = present.filter(
+    (candidate) =>
+      (MANUAL_SLOT_ENABLED || candidate.platform !== "manual") &&
+      (WEB_SLOT_ENABLED || candidate.platform !== "web")
+  );
   const masterState = selectMasterState(considered);
   if (!masterState) {
     throw new SubscriptionError(
@@ -310,7 +346,12 @@ export async function persistVerifiedSubscription(
         slot.platform === verified.subscription.platform &&
         slot.environment === verified.subscription.environment
     );
-    if (incomingStateIndex < 0 || incomingStateIndex === MANUAL_SLOT_INDEX) {
+    // The manual and web slots have their own single writers.
+    if (
+      incomingStateIndex < 0 ||
+      incomingStateIndex === MANUAL_SLOT_INDEX ||
+      WEB_SLOT_INDEXES.includes(incomingStateIndex)
+    ) {
       throw new SubscriptionError(
         "invalid-store-data",
         "store-environment-unsupported",
@@ -910,7 +951,10 @@ export function buildMasterProjection(
   if (state.platform === "apple" && state.originalTransactionId) {
     data.originalTransactionId = state.originalTransactionId;
   }
-  if (state.platform === "google" && state.purchaseReference) {
+  if (
+    (state.platform === "google" || state.platform === "web") &&
+    state.purchaseReference
+  ) {
     data.purchaseReference = state.purchaseReference;
   }
   if (state.platform === "manual" && state.manual) {
@@ -926,6 +970,9 @@ export function buildMasterProjection(
       };
       if (source.autoRenewing !== undefined) {
         row.autoRenewing = source.autoRenewing;
+      }
+      if (source.productId) {
+        row.productId = source.productId;
       }
       return row;
     });
@@ -947,6 +994,7 @@ export function buildSourceSummaries(
     status: state.status,
     expiresAt: state.expiresAt,
     autoRenewing: state.autoRenewing,
+    productId: state.productId || undefined,
   }));
 }
 
@@ -954,7 +1002,8 @@ export function buildSourceSummaries(
  * The fields `buildMasterProjection` writes only for some states.
  *
  * Every other field it writes is always present. Keep this in step with that
- * function: a field missing here would outlive the state that set it.
+ * function: a field missing here would outlive the state that set it. A row's
+ * `productId` inside `sources` needs no entry: the list is replaced whole.
  */
 export const MASTER_PROJECTION_OPTIONAL_FIELDS = [
   "autoRenewing",
@@ -993,12 +1042,18 @@ export function masterAfterProjection(
   return { ...merged, ...projection };
 }
 
+/** Statuses that still give access until `expiresAt`. */
+const ENTITLED_STATUSES = new Set(["active", "canceled", "grace_period"]);
+
 /**
  * Reads a slot document back into a normalized state.
  *
  * A manual slot has no store event to re-verify it, so its `active` flag is
  * never trusted from the document: it is derived here from the status and the
  * expiry, and a lapsed grant reads as `expired`.
+ *
+ * A web slot keeps its stored flag but only until its date: a missed Stripe
+ * webhook can then never leave access on past the paid period.
  */
 export function stateDataToNormalized(
   data: DocumentData,
@@ -1015,13 +1070,23 @@ export function stateDataToNormalized(
     );
   }
   const isManual = data.platform === "manual";
+  const isWeb = data.platform === "web";
   let active = data.active === true;
   let status = data.status;
+  let inGracePeriod = !isManual && data.inGracePeriod === true;
   if (isManual) {
     const revoked = status === "revoked";
     const inFuture = expiresAt.getTime() > now.getTime();
     active = !revoked && inFuture;
     status = revoked ? "revoked" : inFuture ? "active" : "expired";
+  }
+  if (isWeb) {
+    const inFuture = expiresAt.getTime() > now.getTime();
+    active = active && inFuture;
+    if (!inFuture && ENTITLED_STATUSES.has(status)) {
+      status = "expired";
+    }
+    inGracePeriod = inGracePeriod && active;
   }
   const normalized: NormalizedSubscription = {
     active,
@@ -1034,7 +1099,7 @@ export function stateDataToNormalized(
       : typeof data.autoRenewing === "boolean"
         ? data.autoRenewing
         : undefined,
-    inGracePeriod: !isManual && data.inGracePeriod === true,
+    inGracePeriod,
     environment: data.environment,
     originalTransactionId:
       typeof data.originalTransactionId === "string"
@@ -1136,6 +1201,9 @@ export function masterDataToResponse(
         };
         if (typeof row.autoRenewing === "boolean") {
           summary.autoRenewing = row.autoRenewing;
+        }
+        if (typeof row.productId === "string" && row.productId) {
+          summary.productId = row.productId;
         }
         return summary;
       })

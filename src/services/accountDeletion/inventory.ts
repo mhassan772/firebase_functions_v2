@@ -87,6 +87,8 @@ export const URL_GRANTS_DEVICES_COLLECTION = "url_grants_devices";
 export const SUBSCRIPTION_UID_FIELD_COLLECTIONS: readonly { collection: string; field: string }[] = [
   { collection: "subscription_acknowledgements", field: "uid" },
   { collection: "subscription_purchase_ownership", field: "uid" },
+  // Billing emails waiting or sent; they name the account and nothing else needs them.
+  { collection: "web_email_outbox", field: "uid" },
 ];
 
 /**
@@ -107,6 +109,23 @@ export const PAYMENT_REQUEST_STRIPPED_FIELDS = [
   "photo_link",
 ] as const;
 export const PAYMENT_REQUEST_ANONYMISED_FIELD = "anonymised_at";
+
+/**
+ * Web purchases, kept with the uid removed: like the manual requests, they are the record of
+ * money received. They hold no email, name, card number or address line to begin with.
+ */
+export const WEB_PURCHASES_COLLECTION = "web_purchases";
+export const WEB_PURCHASE_UID_FIELD = "uid";
+export const WEB_PURCHASE_STRIPPED_FIELDS = ["uid"] as const;
+
+/**
+ * The account's Stripe customer ids, keyed by uid. Deleted only once the web subscription step
+ * went through in the same run: without it a later run could not find the customer to cancel.
+ */
+export const WEB_CUSTOMERS_COLLECTION = "web_customers";
+
+/** The purchase throttle's uid counter; the IP counters are shared and hold no uid. */
+export const WEB_PURCHASE_THROTTLE_COLLECTION = "web_purchase_throttle";
 
 /**
  * Storage folders whose uploads are named `<folder>/<uid>_<time>_<file>`.

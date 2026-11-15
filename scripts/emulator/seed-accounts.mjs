@@ -1,6 +1,6 @@
 /**
- * Wipes the LOCAL accounts-page test stack (firebase.accounts-test.json) and seeds three
- * accounts for trying /delete. Run through `npm run emulators:accounts`, or on its own with
+ * Wipes the LOCAL accounts-page test stack (firebase.accounts-test.json) and seeds the accounts
+ * for trying /delete, /subscribe and /manage. Run through `npm run emulators:accounts`, or on its own with
  * `npm run emulators:accounts:seed` while that stack is running.
  *
  * Only the `demo-mantooq` project and the stack's own ports are ever used. A demo project id
@@ -20,7 +20,7 @@ const STORAGE_HOST = '127.0.0.1:9196'
 // The bucket the backend's purge deletes uploads from (STORAGE_BUCKET in src/config/constants.ts).
 const STORAGE_BUCKET = 'mantooq-images-p'
 
-// Test-only password, shared by the three accounts. It exists only in the local Auth emulator.
+// Test-only password, shared by every seeded account. It exists only in the local Auth emulator.
 export const TEST_PASSWORD = 'mantooq-accounts-test'
 
 // Uids shaped like real ones (letters and digits, 20 to 40 long): the purge refuses any other shape.
@@ -28,6 +28,35 @@ export const ACCOUNTS = {
   plain: { uid: 'AccountsTestPlainUser00000001', email: 'plain@example.com', displayName: 'Plain tester' },
   apple: { uid: 'AccountsTestAppleRenewing0001', email: 'apple-renewing@example.com', displayName: 'Apple subscriber' },
   data: { uid: 'AccountsTestWithData000000001', email: 'with-data@example.com', displayName: 'Tester with data' },
+  // Known countries for the price tiers on /subscribe (see WEB_PRICING below).
+  lowTier: { uid: 'AccountsTestKnownSaudi000001', email: 'sa-buyer@example.com', displayName: 'Saudi buyer' },
+  reducedTier: { uid: 'AccountsTestKnownEmirati0001', email: 'ae-buyer@example.com', displayName: 'Emirati buyer' },
+}
+
+/**
+ * `web_pricing/config` for buying with Stripe's sandbox. Every seeded account is a tester, since a
+ * sandbox key sells only to testers. Stripe has no Egyptian or Turkish test card, so Saudi Arabia
+ * stands in for the low tier and the United Arab Emirates for the reduced one; the rest of the
+ * country table is the backend's default (DEFAULT_WEB_PRICING in src/services/webSubscriptions/pricing.ts).
+ */
+const WEB_PRICING = {
+  salesEnabled: true,
+  taxEnabled: false,
+  testers: Object.values(ACCOUNTS).map((account) => account.uid),
+  countries: {
+    DZ: 'reduced',
+    IQ: 'reduced',
+    JO: 'reduced',
+    LB: 'reduced',
+    LY: 'reduced',
+    MA: 'reduced',
+    TN: 'reduced',
+    YE: 'reduced',
+    EG: 'low',
+    TR: 'low',
+    SA: 'low',
+    AE: 'reduced',
+  },
 }
 
 if (!PROJECT_ID.startsWith('demo-')) throw new Error('This seed only ever runs against a demo- project.')
@@ -99,6 +128,23 @@ async function seedData(db, uid, now) {
     .save('seeded log file', { contentType: 'text/plain' })
 }
 
+/**
+ * An attested App Store storefront report, the shape store country stores
+ * (storeCountryToData in src/services/storeCountry/index.ts), so `knownCountries` reads `country`.
+ */
+async function seedKnownCountry(db, uid, country, now) {
+  await db.doc(`user_store_country/${uid}`).set({
+    country,
+    raw: country,
+    source: 'apple_storefront',
+    attested: true,
+    firstReportedAt: now,
+    updatedAt: now,
+    lastReportAt: now,
+    history: [{ country, source: 'apple_storefront', attested: true, at: now }],
+  })
+}
+
 async function seed() {
   // Only after the wipe has proven the emulators are the ones answering.
   initializeApp({ projectId: PROJECT_ID, storageBucket: STORAGE_BUCKET })
@@ -119,6 +165,9 @@ async function seed() {
   }
   await seedAppleSubscription(db, ACCOUNTS.apple.uid, now, inOneMonth)
   await seedData(db, ACCOUNTS.data.uid, now)
+  await seedKnownCountry(db, ACCOUNTS.lowTier.uid, 'SA', now)
+  await seedKnownCountry(db, ACCOUNTS.reducedTier.uid, 'AE', now)
+  await db.doc('web_pricing/config').set(WEB_PRICING)
 }
 
 await wipe()

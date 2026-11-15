@@ -524,3 +524,161 @@ ul.links a {
   padding: 0 16px;
   text-align: center;
 }
+
+/* /subscribe and /manage */
+
+.plans {
+  border: 0;
+  margin: 0 0 16px;
+  padding: 0;
+  min-width: 0;
+}
+
+.plans legend {
+  font-weight: 700;
+  font-size: 1.1rem;
+  padding: 0;
+  margin-bottom: 8px;
+}
+
+/* The whole row is the radio's label, so the target is large; the choice shows as a filled
+   radio and a thicker border, never by colour alone. */
+.plan {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  min-height: 56px;
+  margin: 0 0 8px;
+  padding: 12px 14px;
+  border: 1.5px solid var(--line);
+  border-radius: 14px;
+  font-weight: 400;
+  font-size: 1rem;
+  cursor: pointer;
+}
+
+.plan:has(input:checked) {
+  border: 3px solid var(--green-text);
+  padding: 10.5px 12.5px;
+  background: var(--surface);
+}
+
+.plan:focus-within {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.plan input {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  margin: 2px 0 0;
+  accent-color: var(--green-text);
+  cursor: pointer;
+}
+
+.plan input:focus-visible {
+  outline: none;
+}
+
+.plan-text {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.plan-name {
+  font-weight: 700;
+}
+
+.plan-hint {
+  color: var(--muted);
+  font-size: 0.875rem;
+}
+
+.pay-card {
+  margin: 8px 0 16px;
+}
+
+.payment-host {
+  margin: 8px 0 16px;
+  min-height: 48px;
+}
+
+.terms ul {
+  margin-bottom: 8px;
+}
+
+.quote h2 {
+  margin-top: 0;
+}
+
+.breakdown {
+  margin-bottom: 8px;
+}
+
+.field.select {
+  padding-inline-start: 0;
+}
+
+.field select {
+  flex: 1;
+  min-width: 0;
+  min-height: 48px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 14px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 1rem;
+}
+
+.field select:focus-visible {
+  outline: none;
+}
+
+.status {
+  border-inline-start: 4px solid var(--green-text);
+  padding-inline-start: 14px;
+  margin-bottom: 16px;
+}
+
+.status.warn {
+  border-inline-start-color: var(--warn);
+}
+
+.status h2 {
+  margin-top: 0;
+}
+
+.details li {
+  margin-bottom: 2px;
+}
+
+.btn.secondary.danger-text {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.dialog {
+  max-width: min(420px, calc(100vw - 32px));
+  border: 0;
+  border-radius: 20px;
+  padding: 24px 20px 12px;
+  color: var(--ink);
+  background: var(--card);
+}
+
+.dialog::backdrop {
+  background: rgba(16, 36, 28, 0.55);
+}
+
+.dialog h2 {
+  margin-top: 0;
+}
+
+.dialog-actions {
+  display: flex;
+  flex-direction: column;
+}

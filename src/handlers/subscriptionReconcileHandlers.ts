@@ -26,9 +26,22 @@ import {
 } from "../services/subscriptions/google";
 import { storeEventExists } from "../services/subscriptions/persistence";
 import {
+  HANDLED_WEB_EVENT_TYPES,
+  WebEventRef,
+  webEventRef,
+  webEventRefFromData,
+} from "../services/webSubscriptions/events";
+import {
+  PendingSweepSummary,
+  sweepPendingWebPurchases,
+} from "../services/webSubscriptions/pendingSweep";
+import { WebSyncDeps } from "../services/webSubscriptions/sync";
+import { FinalWarningSummary, sweepFinalPaymentWarnings } from "../services/webSubscriptions/billingEmails";
+import {
   applyAppleNotification,
   applyGoogleStoreEvent,
 } from "./verifiedSubscriptionHandlers";
+import { handleWebEvent } from "./webSubscriptionEventHandlers";
 
 export const SUBSCRIPTION_RECONCILE_COLLECTION = "subscription_reconcile_state";
 /** The Voided Purchases API refuses a start time older than 30 days, measured when the request lands; one day of margin. */
@@ -39,6 +52,8 @@ export const APPLE_HISTORY_LOOKBACK_MS = 179 * 24 * 60 * 60 * 1000;
 export const APPLE_HISTORY_FALLBACK_LOOKBACKS_MS = [90, 30, 7].map(
   (days) => days * 24 * 60 * 60 * 1000
 );
+/** Stripe serves 30 days of events; one day of margin. */
+export const STRIPE_EVENTS_LOOKBACK_MS = 29 * 24 * 60 * 60 * 1000;
 /** Failed items kept for the next run; past this the checkpoint stops instead. */
 export const MAX_RETAINED_FAILURES = 100;
 /** Apple payloads are a few kilobytes each, so fewer fit one state document. */
@@ -52,6 +67,9 @@ const PHASE_BUDGETS_MS = {
   googleVoided: 120_000,
   appleHistoryProduction: 100_000,
   appleHistorySandbox: 100_000,
+  stripeEvents: 60_000,
+  webPending: 30_000,
+  webFinalWarnings: 20_000,
 };
 
 export interface ReconcileWindow {
@@ -524,6 +542,45 @@ export function appleHistoryPhase(
   };
 }
 
+/**
+ * Replays Stripe's event history for the web subscriptions account through the webhook's own
+ * handler, so an event the webhook never received still syncs its account. Each mode keeps its
+ * own checkpoint. Stripe lists events newest first; a window's pages are walked with
+ * `starting_after`, and the window is fixed by its `created` range, so the order does not matter.
+ */
+export function stripeEventsPhase(deps: WebSyncDeps, operationId: string): FeedPhase<WebEventRef> {
+  return {
+    source: `stripe-events-${deps.gateway.livemode ? "live" : "test"}`,
+    lookbackMs: STRIPE_EVENTS_LOOKBACK_MS,
+    maxRetained: MAX_RETAINED_FAILURES,
+    async fetchPage(window) {
+      const page = await deps.gateway.listEvents({
+        types: [...HANDLED_WEB_EVENT_TYPES],
+        created: {
+          gte: Math.floor(window.startAt.getTime() / 1000),
+          lte: Math.floor(window.endAt.getTime() / 1000),
+        },
+        limit: 100,
+        ...(window.pageToken ? { starting_after: window.pageToken } : {}),
+      });
+      const items = page.data.map(webEventRef);
+      return {
+        items,
+        nextPageToken: page.hasMore && items.length > 0 ? items[items.length - 1].id : undefined,
+      };
+    },
+    itemKey: (item) => item.id,
+    toData: (item) => ({ ...item, object: { ...item.object } }),
+    fromData: (data) => webEventRefFromData(data),
+    async apply(item) {
+      const outcome = await handleWebEvent(item, "reconcile", deps, operationId);
+      return outcome === "synced" ? "applied" : "skipped";
+    },
+  };
+}
+
+type NotConfigured = { skipped: "stripe_not_configured" };
+
 export interface ReconcileRunSummary {
   operationId: string;
   durationMs: number;
@@ -531,6 +588,9 @@ export interface ReconcileRunSummary {
   googleVoided: FeedPhaseSummary | { error: string };
   appleHistoryProduction: FeedPhaseSummary | { error: string };
   appleHistorySandbox: FeedPhaseSummary | { error: string };
+  stripeEvents: FeedPhaseSummary | { error: string } | NotConfigured;
+  webPending: PendingSweepSummary | { error: string } | NotConfigured;
+  webFinalWarnings: FinalWarningSummary | { error: string } | NotConfigured;
 }
 
 export interface ReconcileOptions {
@@ -538,6 +598,13 @@ export interface ReconcileOptions {
   /** Shrinks every budget, for tests. */
   budgetScale?: number;
   appleApply?: Parameters<typeof appleHistoryPhase>[2];
+  /** Firestore and Stripe for the web phases; absent when no Stripe key is configured, which skips them. */
+  web?: WebSyncDeps;
+  /**
+   * Builds `web` when the run starts; used when `web` is not given. A throw (a malformed key)
+   * fails only the web phases: the store phases still run.
+   */
+  webDeps?: () => WebSyncDeps | undefined;
 }
 
 /**
@@ -600,7 +667,43 @@ export async function handleReconcileSubscriptions(
         deadlineFor(PHASE_BUDGETS_MS.appleHistorySandbox)
       )
     ),
+    stripeEvents: { skipped: "stripe_not_configured" },
+    webPending: { skipped: "stripe_not_configured" },
+    webFinalWarnings: { skipped: "stripe_not_configured" },
   };
+  let web = options.web;
+  if (!web && options.webDeps) {
+    try {
+      web = options.webDeps();
+    } catch (error) {
+      const code = safeErrorCode(error);
+      functions.logger.error("subscription_reconcile_web_config_failure", { operationId, code });
+      summary.stripeEvents = { error: code };
+      summary.webPending = { error: code };
+      summary.webFinalWarnings = { error: code };
+    }
+  }
+  if (web) {
+    summary.stripeEvents = await runPhase("stripeEvents", () =>
+      runFeedPhase(stripeEventsPhase(web, operationId), now, deadlineFor(PHASE_BUDGETS_MS.stripeEvents))
+    );
+    // After the replay, so an entry whose payment event was just replayed is no longer pending.
+    summary.webPending = await runPhase("webPending", () =>
+      sweepPendingWebPurchases(web, {
+        now,
+        deadline: deadlineFor(PHASE_BUDGETS_MS.webPending),
+        operationId,
+      })
+    );
+    // After the pending sweep: the last warning before a failed renewal stops access.
+    summary.webFinalWarnings = await runPhase("webFinalWarnings", () =>
+      sweepFinalPaymentWarnings(web!, {
+        now,
+        deadline: deadlineFor(PHASE_BUDGETS_MS.webFinalWarnings),
+        operationId,
+      })
+    );
+  }
   summary.durationMs = Date.now() - started;
   functions.logger.info("subscription_reconcile_finished", summary);
   return summary;

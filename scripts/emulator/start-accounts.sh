@@ -11,6 +11,18 @@ cd "$(dirname "$0")/../.."
 
 PROJECT_ID="demo-mantooq"
 
+# The web purchase callables read the Stripe keys as secrets, which the functions emulator takes
+# from the gitignored .secret.local at the repository root. Only sandbox keys may be there: the
+# seed makes every account a tester, so a live key would sell real premium for a test card.
+if [ -f .secret.local ]; then
+  if grep -qE '^STRIPE_WEB_SECRET_KEY=' .secret.local && ! grep -qE '^STRIPE_WEB_SECRET_KEY=sk_test_' .secret.local; then
+    echo ".secret.local holds a Stripe key that is not a sandbox key (sk_test_). Refusing to start." >&2
+    exit 1
+  fi
+else
+  echo "No .secret.local: /subscribe and /manage will answer that sales are off (see accounts-page/README.md)."
+fi
+
 # Hide this machine's Google credentials from the emulators. Some functions in src/index.ts name
 # the production project directly (getSecret in src/utils/secrets.ts uses its number), and the
 # functions emulator hands its runtime the gcloud credentials or the `firebase login` account, so
@@ -57,5 +69,5 @@ node scripts/emulator/seed-accounts.mjs
 
 echo
 echo "Accounts test stack ready (project $PROJECT_ID)."
-echo "Run the page against it: npm --prefix accounts-page run dev, then open http://localhost:5173/delete"
+echo "Run the page against it: npm --prefix accounts-page run dev, then open http://localhost:5173/delete, /subscribe or /manage"
 wait "$EMULATORS_PID"

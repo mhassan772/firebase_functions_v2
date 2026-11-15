@@ -4,8 +4,8 @@ export type StorePlatform = "apple" | "google";
 /** @deprecated Alias kept for the store-only call sites; new code names `StorePlatform` or `SubscriptionSource`. */
 export type SubscriptionPlatform = StorePlatform;
 
-/** Where an entitlement slot comes from: a store, or an admin grant. */
-export type SubscriptionSource = StorePlatform | "manual";
+/** Where an entitlement slot comes from: a store, an admin grant, or a purchase on the web. */
+export type SubscriptionSource = StorePlatform | "manual" | "web";
 
 export type ManualGrantSource =
   | "egypt_request"
@@ -62,6 +62,7 @@ export interface SourceSummary {
   status: NormalizedSubscriptionStatus;
   expiresAt: Date;
   autoRenewing?: boolean;
+  productId?: string;
 }
 
 export interface SourceSummaryResponse {
@@ -70,6 +71,7 @@ export interface SourceSummaryResponse {
   status: NormalizedSubscriptionStatus;
   expiresAt: string;
   autoRenewing?: boolean;
+  productId?: string;
 }
 
 export type StoreEnvironment = "production" | "sandbox" | "test";
