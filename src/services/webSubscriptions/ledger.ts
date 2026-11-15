@@ -242,6 +242,11 @@ export interface InvoiceFacts {
   /** The latest `lines.data[].period.end`: the end of the service the invoice paid for. */
   periodEnd?: Date;
   charge?: ChargeFacts;
+  /** `subscription_create`, `subscription_cycle`, `manual` and the like; for the billing emails. */
+  billingReason?: string;
+  /** Integer cents paid, for the renewal receipt. */
+  amountPaid?: number;
+  currency?: string;
 }
 
 /**

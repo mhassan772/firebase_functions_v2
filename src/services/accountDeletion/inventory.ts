@@ -87,6 +87,8 @@ export const URL_GRANTS_DEVICES_COLLECTION = "url_grants_devices";
 export const SUBSCRIPTION_UID_FIELD_COLLECTIONS: readonly { collection: string; field: string }[] = [
   { collection: "subscription_acknowledgements", field: "uid" },
   { collection: "subscription_purchase_ownership", field: "uid" },
+  // Billing emails waiting or sent; they name the account and nothing else needs them.
+  { collection: "web_email_outbox", field: "uid" },
 ];
 
 /**

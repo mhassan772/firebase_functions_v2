@@ -25,6 +25,8 @@ export interface WebPricingConfig {
   countries: Record<string, string>;
   fullPriceTier: string;
   allowUnattestedSim: boolean;
+  /** When false the billing email sender marks every queued email `skipped`. */
+  emailsEnabled: boolean;
 }
 
 const tierPrices = (tier: string, plans: WebPlan[]): Partial<Record<WebPlan, string>> =>
@@ -54,6 +56,7 @@ export const DEFAULT_WEB_PRICING: WebPricingConfig = {
   },
   fullPriceTier: "standard",
   allowUnattestedSim: false,
+  emailsEnabled: true,
 };
 
 /**
@@ -74,6 +77,7 @@ export function webPricingConfigFromData(data: DocumentData | undefined): WebPri
   if (typeof record.salesEnabled === "boolean") config.salesEnabled = record.salesEnabled;
   if (typeof record.taxEnabled === "boolean") config.taxEnabled = record.taxEnabled;
   if (typeof record.allowUnattestedSim === "boolean") config.allowUnattestedSim = record.allowUnattestedSim;
+  if (typeof record.emailsEnabled === "boolean") config.emailsEnabled = record.emailsEnabled;
   if (Array.isArray(record.testers)) {
     config.testers = record.testers.filter((uid: unknown): uid is string => typeof uid === "string" && uid.length > 0);
   }

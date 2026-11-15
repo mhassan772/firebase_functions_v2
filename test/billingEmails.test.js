@@ -1,0 +1,193 @@
+// Billing emails without Firestore: which emails a slot change calls for, the card expiry rule,
+// and every template in both languages. The outbox, the trigger points and the sender run
+// against the emulator in test/integration/billingEmails.test.js.
+const assert = require("node:assert/strict");
+const { describe, test } = require("node:test");
+const { Timestamp } = require("firebase-admin/firestore");
+const { cardExpiresBefore, decideSlotEmails, outboxData } = require("../lib/services/webSubscriptions/billingEmails");
+const {
+  BillingEmailIncompleteError,
+  formatDate,
+  formatMoney,
+  renderBillingEmail,
+} = require("../lib/services/email/billingEmailTemplates");
+
+const NOW = new Date(Date.UTC(2026, 10, 15, 12));
+const DAY = 24 * 60 * 60 * 1000;
+const at = (days) => Timestamp.fromMillis(NOW.getTime() + days * DAY);
+
+function slot(status, web = {}, extra = {}) {
+  return {
+    status,
+    active: !["expired", "revoked", "billing_retry"].includes(status),
+    productId: "web_yearly",
+    expiresAt: status === "grace_period" ? at(5) : at(300),
+    web: {
+      customerId: "cus_1",
+      subscriptionId: "sub_1",
+      purchaseId: "p1",
+      lastPaidInvoiceId: "in_1",
+      paidThrough: at(300),
+      cancelAtPeriodEnd: false,
+      needsAction: false,
+      paymentFailed: false,
+      ...web,
+    },
+    ...extra,
+  };
+}
+
+const entry = (purchaseId, plan, lang = "en", extra = {}) => ({
+  purchaseId, uid: "u1", plan, amount: 4999, tax: 0, total: 4999, currency: "usd", lang, status: "paid",
+  stripe: { customerId: "cus_1", subscriptionId: plan === "web_lifetime" ? undefined : "sub_1", invoiceId: "in_1" }, ...extra,
+});
+
+function notice({ previous, next, becamePaid = [], entries, subscription } = {}) {
+  return {
+    uid: "u1",
+    livemode: false,
+    operationId: "op",
+    now: NOW,
+    previous,
+    next,
+    becamePaid,
+    entries: entries ?? [entry("p1", "web_yearly", "en", { status: "paid" })],
+    subscription,
+  };
+}
+
+const kinds = (emails) => emails.map((email) => `${email.kind}:${email.id}`);
+
+describe("decideSlotEmails", () => {
+  test("a first payment queues purchase_confirmed with its breakdown, renewal date and language", () => {
+    const paid = entry("p1", "web_yearly", "en", { tax: 650, total: 5649 });
+    const emails = decideSlotEmails(notice({ next: slot("active"), becamePaid: [paid] }));
+    assert.deepEqual(kinds(emails), ["purchase_confirmed:confirmed_p1"]);
+    assert.equal(emails[0].lang, "en");
+    assert.deepEqual(emails[0].fields, {
+      plan: "web_yearly", amount: 4999, tax: 650, total: 5649, currency: "usd", renewsAt: at(300).toDate(),
+    });
+    const lifetime = decideSlotEmails(notice({ next: slot("active", { subscriptionId: undefined }, { productId: "web_lifetime" }), becamePaid: [entry("p2", "web_lifetime", "ar")] }));
+    assert.equal(lifetime[0].lang, "ar");
+    assert.equal(lifetime[0].fields.renewsAt, undefined);
+  });
+
+  test("renewed only for a subscription_cycle invoice on the same subscription", () => {
+    const previous = slot("active");
+    const next = slot("active", { lastPaidInvoiceId: "in_2", paidThrough: at(665) });
+    const renewal = { id: "sub_1", latestPaid: { id: "in_2", billingReason: "subscription_cycle", amountPaid: 4999, currency: "usd" } };
+    const emails = decideSlotEmails(notice({ previous, next, subscription: renewal }));
+    assert.deepEqual(kinds(emails), ["renewed:renewed_in_2"]);
+    assert.equal(emails[0].fields.amount, 4999);
+    assert.deepEqual(emails[0].fields.renewsAt, at(665).toDate());
+    const notCycle = { ...renewal, latestPaid: { ...renewal.latestPaid, billingReason: "subscription_update" } };
+    assert.deepEqual(decideSlotEmails(notice({ previous, next, subscription: notCycle })), []);
+    assert.deepEqual(decideSlotEmails(notice({ previous: slot("active", { subscriptionId: "sub_0" }), next, subscription: renewal })), [], "another subscription");
+  });
+
+  test("payment_failed when paymentFailed turns on, with the grace end; action_required instead when the bank wants confirmation", () => {
+    const previous = slot("active");
+    const failed = slot("grace_period", { paymentFailed: true });
+    const open = { id: "sub_1", latestOpen: { id: "in_9", billingReason: "subscription_cycle" } };
+    const emails = decideSlotEmails(notice({ previous, next: failed, subscription: open }));
+    assert.deepEqual(kinds(emails), ["payment_failed:failed_in_9"]);
+    assert.deepEqual(emails[0].fields.graceEndsAt, at(5).toDate());
+    const action = decideSlotEmails(notice({ previous, next: slot("grace_period", { paymentFailed: true, needsAction: true }), subscription: open }));
+    assert.deepEqual(kinds(action), ["action_required:action_in_9"]);
+    assert.deepEqual(decideSlotEmails(notice({ previous: failed, next: failed, subscription: open })), [], "no change, no email");
+    const past = slot("billing_retry", { paymentFailed: true }, { expiresAt: at(-1) });
+    assert.deepEqual(decideSlotEmails(notice({ previous, next: past, subscription: open })), [], "the grace is over");
+  });
+
+  test("no action_required for a first purchase (subscription_create)", () => {
+    const open = { id: "sub_1", latestOpen: { id: "in_1", billingReason: "subscription_create" } };
+    const next = slot("grace_period", { paymentFailed: true, needsAction: true });
+    assert.deepEqual(decideSlotEmails(notice({ previous: slot("active"), next, subscription: open })), []);
+  });
+
+  test("cancellation_confirmed when cancelAtPeriodEnd turns on", () => {
+    const emails = decideSlotEmails(notice({ previous: slot("active"), next: slot("canceled", { cancelAtPeriodEnd: true }) }));
+    assert.deepEqual(kinds(emails), [`cancellation_confirmed:cancelled_sub_1_${Math.floor(at(300).toMillis() / 1000)}`]);
+    assert.deepEqual(emails[0].fields.endsAt, at(300).toDate());
+  });
+
+  test("nothing for a refund or a dispute, or for a slot rebuilt without a previous one", () => {
+    assert.deepEqual(decideSlotEmails(notice({ previous: slot("active"), next: slot("revoked") })), []);
+    assert.deepEqual(decideSlotEmails(notice({ previous: undefined, next: slot("canceled", { cancelAtPeriodEnd: true }) })), []);
+  });
+
+  test("the outbox document holds dates as timestamps and no address", () => {
+    const data = outboxData({ id: "x", uid: "u1", kind: "renewed", lang: "ar", livemode: false, fields: { renewsAt: NOW, amount: 499 } }, NOW);
+    assert.ok(data.renewsAt instanceof Timestamp);
+    assert.equal(data.status, "queued");
+    assert.equal(data.attempts, 0);
+    assert.equal(data.expiresAt.toMillis(), NOW.getTime() + 90 * DAY);
+    assert.ok(!("email" in data));
+  });
+});
+
+describe("cardExpiresFirst", () => {
+  test("a card stops at the end of its expiry month", () => {
+    const renewal = new Date(Date.UTC(2027, 2, 10));
+    assert.equal(cardExpiresBefore(2, 2027, renewal), true, "expires end of February, renews 10 March");
+    assert.equal(cardExpiresBefore(3, 2027, renewal), false, "valid through 31 March");
+    assert.equal(cardExpiresBefore(12, 2030, renewal), false);
+    assert.equal(cardExpiresBefore(undefined, undefined, renewal), false);
+  });
+});
+
+describe("templates", () => {
+  const date = new Date(Date.UTC(2026, 11, 14));
+  const content = {
+    plan: "web_yearly", amount: 4999, tax: 650, total: 5649, currency: "usd",
+    renewsAt: date, endsAt: date, graceEndsAt: date, cardExpiresFirst: true, livemode: true,
+  };
+  const all = ["purchase_confirmed", "renewed", "payment_failed", "payment_failed_final", "action_required", "renewal_reminder", "cancellation_confirmed"];
+
+  test("every kind renders in both languages, with the manage button and no placeholder or raw cents", () => {
+    for (const kind of all) {
+      for (const lang of ["ar", "en"]) {
+        for (const plan of kind === "purchase_confirmed" ? ["web_monthly", "web_yearly", "web_lifetime"] : ["web_yearly"]) {
+          const email = renderBillingEmail(kind, lang, { ...content, plan });
+          for (const part of [email.subject, email.text, email.html]) {
+            assert.doesNotMatch(part, /undefined|NaN|null|\{|\$\{|\u0000/, `${kind}/${lang}`);
+            assert.doesNotMatch(part, /4999|5649|\b650\b/, `${kind}/${lang}: raw cents`);
+          }
+          assert.ok(email.text.includes(`https://accounts.mantooq.com/manage?lang=${lang}`), `${kind}/${lang}: button`);
+          assert.ok(!email.subject.startsWith("[TEST]"));
+        }
+      }
+    }
+  });
+
+  test("what each email must say", () => {
+    const en = (kind, extra = {}) => renderBillingEmail(kind, "en", { ...content, ...extra }).text;
+    const ar = (kind, extra = {}) => renderBillingEmail(kind, "ar", { ...content, ...extra }).text;
+    assert.match(en("purchase_confirmed"), /Plan: Yearly[\s\S]*Price: \$49\.99[\s\S]*Tax: \$6\.50[\s\S]*Total: \$56\.49[\s\S]*Next renewal: December 14, 2026/);
+    assert.match(en("purchase_confirmed"), /renews automatically until you cancel[\s\S]*version 90\.7[\s\S]*not refundable[\s\S]*cancel the renewal/);
+    assert.match(en("purchase_confirmed", { plan: "web_lifetime", tax: 0, total: 4999 }), /one payment[\s\S]*50 years/);
+    assert.doesNotMatch(en("purchase_confirmed", { tax: 0, total: 4999 }), /Tax:/, "no tax line when there is none");
+    assert.match(ar("purchase_confirmed", { plan: "web_lifetime" }), /الخطة: مدى الحياة[\s\S]*٥٠ سنة/);
+    assert.match(ar("purchase_confirmed"), /١٤ ديسمبر ٢٠٢٦/, "Arabic month name");
+    assert.match(en("renewed"), /Amount paid: \$49\.99[\s\S]*Next renewal: December 14, 2026/);
+    assert.match(en("payment_failed"), /didn't go through[\s\S]*until December 14, 2026[\s\S]*Replace the card[\s\S]*try your current card again/);
+    assert.match(en("payment_failed_final"), /stops on December 14, 2026 unless you replace the card/);
+    assert.match(en("action_required"), /bank[\s\S]*manage page[\s\S]*stops on December 14, 2026/);
+    assert.match(en("renewal_reminder"), /renews automatically on December 14, 2026 for \$56\.49[\s\S]*cancel it on the manage page before that date[\s\S]*expires before that date/);
+    assert.doesNotMatch(en("renewal_reminder", { cardExpiresFirst: false }), /expires/);
+    assert.match(en("cancellation_confirmed"), /won't renew[\s\S]*until December 14, 2026[\s\S]*resume/);
+  });
+
+  test("a sandbox email's subject starts with [TEST]; a missing field refuses to render", () => {
+    assert.ok(renderBillingEmail("renewed", "ar", { ...content, livemode: false }).subject.startsWith("[TEST] "));
+    assert.throws(() => renderBillingEmail("payment_failed", "en", { ...content, graceEndsAt: undefined }),
+      (error) => error instanceof BillingEmailIncompleteError && error.field === "graceEndsAt");
+  });
+
+  test("money and dates as the pages show them", () => {
+    assert.equal(formatMoney(499, "usd", "en"), "$4.99");
+    assert.equal(formatMoney(14999, "usd", "ar"), "\u200f\u0661\u0664\u0669\u066b\u0669\u0669\u00a0US$");
+    assert.equal(formatDate(date, "en"), "December 14, 2026");
+    assert.equal(formatDate(date, "ar"), "١٤ ديسمبر ٢٠٢٦");
+  });
+});

@@ -38,6 +38,8 @@ export const WEB_RENEWAL_SLACK_MS = 6 * HOUR_MS;
 export const WEB_GRACE_MS = 7 * 24 * HOUR_MS;
 
 const ENDED_SUBSCRIPTION_STATUSES = new Set(["canceled", "incomplete_expired"]);
+/** A ledger entry moving to `paid` from these was paid for the first time (not a won dispute). */
+const FIRST_PAYMENT_FROM = new Set(["pending", "failed", "abandoned"]);
 /** Statuses a subscription reaches only after its first invoice was paid, and leaves only by ending. */
 const STARTED_OPEN_SUBSCRIPTION_STATUSES = new Set(["active", "trialing", "past_due", "unpaid", "paused"]);
 
@@ -45,6 +47,29 @@ export interface WebSyncDeps {
   firestore: Firestore;
   gateway: StripeGateway;
   now?: () => Date;
+  /**
+   * Told about each committed change, to queue the billing emails. Called after the commit,
+   * never inside it; a failure is logged and never fails the sync.
+   */
+  notify?: (notice: WebSyncNotice) => Promise<void>;
+}
+
+/** What a committed sync changed, for `notify`. */
+export interface WebSyncNotice {
+  uid: string;
+  livemode: boolean;
+  operationId: string;
+  now: Date;
+  /** The slot document before the sync; undefined when there was none. */
+  previous?: DocumentData;
+  /** The slot document after it; the previous one when only the ledger changed. */
+  next?: DocumentData;
+  /** Entries this sync moved to `paid` from pending, failed or abandoned: first payments. */
+  becamePaid: WebPurchaseEntry[];
+  /** Every entry the sync read, for the purchase's language. */
+  entries: WebPurchaseEntry[];
+  /** The chosen subscription's facts, when there is one. */
+  subscription?: WebSubscriptionFacts;
 }
 
 /** The `web` map on a web slot. */
@@ -87,6 +112,8 @@ export interface WebSubscriptionFacts {
   latestPaid?: InvoiceFacts;
   /** The latest invoice is open and its payment waits for the customer to authenticate. */
   needsAction: boolean;
+  /** The latest invoice when it is open (a payment due): the billing emails' id and reason. */
+  latestOpen?: { id: string; billingReason?: string };
 }
 
 export interface WebLifetimeFacts {
@@ -331,6 +358,9 @@ async function readInvoiceFacts(gateway: StripeGateway, invoice: Stripe.Invoice)
   const paidAt = invoice.status_transitions?.paid_at;
   const facts: InvoiceFacts = { id: invoice.id!, status: invoice.status ?? null };
   if (typeof paidAt === "number") facts.paidAt = new Date(paidAt * 1000);
+  if (invoice.billing_reason) facts.billingReason = invoice.billing_reason;
+  if (typeof invoice.amount_paid === "number") facts.amountPaid = invoice.amount_paid;
+  if (invoice.currency) facts.currency = invoice.currency;
   if (ends.length > 0) facts.periodEnd = new Date(Math.max(...ends) * 1000);
   // Only a paid invoice's charge can carry a refund or a dispute.
   if (invoice.status === "paid") facts.charge = await chargeOfInvoice(gateway, invoice);
@@ -424,9 +454,11 @@ export async function readWebStripeFacts(
     }
     const latestInvoiceId = idOf(subscription.latest_invoice as string | { id: string } | null);
     let needsAction = false;
+    let latestOpen: WebSubscriptionFacts["latestOpen"];
     if (latestInvoiceId && latestInvoiceId !== latestPaid?.id) {
       const latest = await gateway.retrieveInvoice(latestInvoiceId, ["payments"]);
       if (latest.status === "open") {
+        latestOpen = { id: latestInvoiceId, ...(latest.billing_reason ? { billingReason: latest.billing_reason } : {}) };
         const payment = (latest.payments?.data ?? []).find((row) => row.status === "open" || row.is_default);
         const paymentIntentId = idOf(payment?.payment?.payment_intent ?? null);
         if (paymentIntentId) {
@@ -445,6 +477,7 @@ export async function readWebStripeFacts(
       tier: subscription.metadata?.tier || undefined,
       latestPaid,
       needsAction,
+      latestOpen,
     };
   }
   return facts;
@@ -627,11 +660,13 @@ export async function syncWebEntitlement(
       }
 
       const updates: Array<{ index: number; update: DocumentData }> = [];
+      const becamePaid: WebPurchaseEntry[] = [];
       ledgerSnapshots.forEach((snapshot, index) => {
         const entry = ledgerEntryFromData(snapshot.id, snapshot.data());
         if (!entry || entry.uid !== uid || !entry.stripe.invoiceId) return;
         const update = ledgerUpdate(entry, facts.invoices.get(entry.stripe.invoiceId), now);
         if (update) updates.push({ index, update });
+        if (update?.status === "paid" && FIRST_PAYMENT_FROM.has(entry.status)) becamePaid.push({ ...entry, status: "paid" });
       });
 
       if (slotChanged && next) {
@@ -645,8 +680,34 @@ export async function syncWebEntitlement(
         outcome: slotChanged ? ("written" as const) : ("unchanged" as const),
         ledgerUpdates: updates.length,
         slot: slotChanged ? next : stored,
+        previous: stored,
+        becamePaid,
       };
     });
+
+    // After the commit and before the cancellations, which can throw: the change is real now.
+    const becamePaid = ("becamePaid" in committed && committed.becamePaid) || [];
+    if (deps.notify && (committed.outcome === "written" || (committed.outcome === "unchanged" && becamePaid.length > 0))) {
+      try {
+        await deps.notify({
+          uid,
+          livemode: gateway.livemode,
+          operationId,
+          now,
+          previous: "previous" in committed ? committed.previous : undefined,
+          next: "slot" in committed ? committed.slot : undefined,
+          becamePaid,
+          entries,
+          subscription: facts.subscription,
+        });
+      } catch (error) {
+        functions.logger.error("web_sync_notify_failure", {
+          ...fields,
+          code: safeErrorCode(error),
+          errorName: error instanceof Error ? error.name : typeof error,
+        });
+      }
+    }
 
     const cancelled: string[] = [];
     if (committed.outcome === "written" || committed.outcome === "unchanged") {

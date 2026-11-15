@@ -81,7 +81,7 @@ export async function handleGetWebSubscription(
     const customerId = customerIdFor(await readCustomerMapping(deps.firestore, uid), gateway.livemode);
     if (customerId) {
       state.stage = "sync";
-      await syncWebEntitlement(uid, { firestore: deps.firestore, gateway, now: deps.now }, { operationId, trigger: "subscription_read" });
+      await syncWebEntitlement(uid, { firestore: deps.firestore, gateway, now: deps.now, notify: deps.notify }, { operationId, trigger: "subscription_read" });
     }
 
     state.stage = "read";
@@ -283,7 +283,7 @@ async function manageContext(uid: string, operationId: string, deps: WebCallable
   const { gateway } = gate;
   const customerId = customerIdFor(await readCustomerMapping(deps.firestore, uid), gateway.livemode);
   if (!customerId) throw noSubscription();
-  const syncDeps: WebSyncDeps = { firestore: deps.firestore, gateway, now: deps.now };
+  const syncDeps: WebSyncDeps = { firestore: deps.firestore, gateway, now: deps.now, notify: deps.notify };
   await syncWebEntitlement(uid, syncDeps, { operationId, trigger: "subscription_manage" });
   const slots = await readWebAccountSlots(deps.firestore, uid, gateway.livemode);
   const view = webSlotView(slots.web, deps.now());

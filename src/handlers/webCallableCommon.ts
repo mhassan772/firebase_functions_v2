@@ -3,6 +3,7 @@ import * as functions from "firebase-functions";
 import type Stripe from "stripe";
 import { DELETED_ACCOUNTS_COLLECTION } from "../services/accountDeletion/tombstone";
 import { StoreCountryStore } from "../services/storeCountry";
+import type { WebSyncNotice } from "../services/webSubscriptions/sync";
 import { accountDeleted } from "../services/webSubscriptions/customers";
 import { SubscriptionError } from "../services/subscriptions/errors";
 import { PriceLookup, priceLookupFor, readWebPricingConfig, WebPricingConfig } from "../services/webSubscriptions/pricing";
@@ -22,6 +23,8 @@ export interface WebCallableDeps {
   now: () => Date;
   /** Defaults to the shared ten-minute cache for the gateway. */
   prices?: PriceLookup;
+  /** Queues the billing emails after each sync; see `syncWebEntitlement`. */
+  notify?: (notice: WebSyncNotice) => Promise<void>;
   /** Waits between reads while Stripe settles a payment; tests replace it. */
   sleep?: (ms: number) => Promise<void>;
 }

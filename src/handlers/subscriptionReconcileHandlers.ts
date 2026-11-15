@@ -36,6 +36,7 @@ import {
   sweepPendingWebPurchases,
 } from "../services/webSubscriptions/pendingSweep";
 import { WebSyncDeps } from "../services/webSubscriptions/sync";
+import { FinalWarningSummary, sweepFinalPaymentWarnings } from "../services/webSubscriptions/billingEmails";
 import {
   applyAppleNotification,
   applyGoogleStoreEvent,
@@ -68,6 +69,7 @@ const PHASE_BUDGETS_MS = {
   appleHistorySandbox: 100_000,
   stripeEvents: 60_000,
   webPending: 30_000,
+  webFinalWarnings: 20_000,
 };
 
 export interface ReconcileWindow {
@@ -588,6 +590,7 @@ export interface ReconcileRunSummary {
   appleHistorySandbox: FeedPhaseSummary | { error: string };
   stripeEvents: FeedPhaseSummary | { error: string } | NotConfigured;
   webPending: PendingSweepSummary | { error: string } | NotConfigured;
+  webFinalWarnings: FinalWarningSummary | { error: string } | NotConfigured;
 }
 
 export interface ReconcileOptions {
@@ -666,6 +669,7 @@ export async function handleReconcileSubscriptions(
     ),
     stripeEvents: { skipped: "stripe_not_configured" },
     webPending: { skipped: "stripe_not_configured" },
+    webFinalWarnings: { skipped: "stripe_not_configured" },
   };
   let web = options.web;
   if (!web && options.webDeps) {
@@ -676,6 +680,7 @@ export async function handleReconcileSubscriptions(
       functions.logger.error("subscription_reconcile_web_config_failure", { operationId, code });
       summary.stripeEvents = { error: code };
       summary.webPending = { error: code };
+      summary.webFinalWarnings = { error: code };
     }
   }
   if (web) {
@@ -687,6 +692,14 @@ export async function handleReconcileSubscriptions(
       sweepPendingWebPurchases(web, {
         now,
         deadline: deadlineFor(PHASE_BUDGETS_MS.webPending),
+        operationId,
+      })
+    );
+    // After the pending sweep: the last warning before a failed renewal stops access.
+    summary.webFinalWarnings = await runPhase("webFinalWarnings", () =>
+      sweepFinalPaymentWarnings(web!, {
+        now,
+        deadline: deadlineFor(PHASE_BUDGETS_MS.webFinalWarnings),
         operationId,
       })
     );

@@ -5,11 +5,20 @@ import { WebSyncDeps } from "../../services/webSubscriptions/sync";
 import { WebCallableDeps } from "../../handlers/webCallableCommon";
 import { firestoreStoreCountry } from "../../services/storeCountry";
 import { firestoreWebPurchaseThrottle } from "../../services/webSubscriptions/purchaseThrottle";
+import { billingNotifier } from "../../services/webSubscriptions/billingEmails";
 
 /** The live Firestore and Stripe for web subscriptions, or undefined when no Stripe key is set. */
 export function webSyncDepsFromEnv(): WebSyncDeps | undefined {
   const gateway = stripeGatewayFromEnv();
-  return gateway ? { firestore: admin.firestore(), gateway } : undefined;
+  return gateway ? { firestore: admin.firestore(), gateway, notify: webBillingNotifier() } : undefined;
+}
+
+let notifier: WebSyncDeps["notify"];
+
+/** Queues the billing emails after every committed sync, for every live caller of the sync. */
+export function webBillingNotifier(): NonNullable<WebSyncDeps["notify"]> {
+  notifier ??= billingNotifier(admin.firestore());
+  return notifier!;
 }
 
 /** The live gateway, read when first needed so a function without the secret still loads. */
@@ -34,6 +43,7 @@ export function webCallableDeps(): WebCallableDeps {
     storeCountry: firestoreStoreCountry(() => admin.firestore()),
     throttle: firestoreWebPurchaseThrottle(() => admin.firestore()),
     now: () => new Date(),
+    notify: webBillingNotifier(),
   };
   return {
     ...callableDeps,

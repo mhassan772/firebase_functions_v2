@@ -208,7 +208,7 @@ function createFakeStripe(options = {}) {
       object: "payment_method",
       type: "card",
       customer: customer ?? null,
-      card: { country: card.country, brand: card.brand, last4: card.last4, funding: card.funding },
+      card: { country: card.country, brand: card.brand, last4: card.last4, funding: card.funding, exp_month: card.exp_month, exp_year: card.exp_year },
       failsCharges: token.failsCharges === true,
     });
     return id;
@@ -721,6 +721,8 @@ function createFakeStripe(options = {}) {
       declineCode,
       failsCharges = false,
       expiresInSec = 43200,
+      expMonth = 12,
+      expYear = 2040,
     } = {}) {
       const id = nextId("ctoken");
       state.tokens.set(id, {
@@ -739,7 +741,7 @@ function createFakeStripe(options = {}) {
             ? {
               type: "card",
               billing_details: { address: { city: null, line1: null, line2: null, postal_code: null, state: null, ...billing } },
-              card: { country, funding, brand, wallet: wallet ? { type: wallet } : null, last4: "4242" },
+              card: { country, funding, brand, wallet: wallet ? { type: wallet } : null, last4: "4242", exp_month: expMonth, exp_year: expYear },
             }
             : { type, billing_details: { address: { ...billing } }, link: { email: null } },
       });
@@ -820,6 +822,20 @@ function createFakeStripe(options = {}) {
       const intent = must(state.setupIntents, setupIntentId, "setup_intent");
       if (succeed) Object.assign(intent, { status: "succeeded" });
       else Object.assign(intent, { status: "requires_payment_method", last_setup_error: { code: "setup_intent_authentication_failure" } });
+    },
+
+    /** Stripe's `invoice.upcoming`: a preview of the next renewal invoice, with no id. */
+    upcoming(subscriptionId) {
+      const sub = must(state.subscriptions, subscriptionId, "subscription");
+      const price = priceById(sub.items.data[0].price.id);
+      return emit("invoice.upcoming", {
+        object: "invoice",
+        customer: sub.customer,
+        billing_reason: "upcoming",
+        currency: "usd",
+        total: price.unit_amount,
+        parent: { type: "subscription_details", subscription_details: { subscription: sub.id } },
+      });
     },
 
     setSubscription(subscriptionId, patch) {

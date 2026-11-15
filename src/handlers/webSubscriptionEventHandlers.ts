@@ -14,14 +14,15 @@ import {
   WebEventSource,
 } from "../services/webSubscriptions/events";
 import { stripeErrorCode, StripeGateway } from "../services/webSubscriptions/stripeGateway";
-import { syncWebEntitlement, WebSyncDeps, WebSyncResult } from "../services/webSubscriptions/sync";
+import { syncWebEntitlement, WebSyncDeps, WebSyncNotice, WebSyncResult } from "../services/webSubscriptions/sync";
+import { queueRenewalReminder } from "../services/webSubscriptions/billingEmails";
 
 export interface WebEventDeps extends WebSyncDeps {
   /** Replaced in tests to count or fail syncs. */
   sync?: (uid: string, deps: WebSyncDeps, options: { operationId?: string; trigger?: string }) => Promise<WebSyncResult>;
 }
 
-export type WebEventOutcome = "synced" | "duplicate" | "ignored" | "livemode_mismatch";
+export type WebEventOutcome = "synced" | "duplicate" | "ignored" | "livemode_mismatch" | "reminder";
 
 /** The customer an event is about: its own field, or for a refund or dispute, its charge's. */
 async function eventCustomer(gateway: StripeGateway, event: WebEventRef): Promise<string | undefined> {
@@ -68,6 +69,22 @@ export async function handleWebEvent(
       functions.logger.info("web_event_outcome", { ...fields, outcome: "ignored", reason: "no_uid", customerId: customerId ?? null });
       return "ignored";
     }
+    if (event.type === "invoice.upcoming") {
+      // A preview with no id: it only asks for the renewal reminder. A failure to queue is
+      // logged, not retried: the reminder is a courtesy, and the event is never lost money.
+      let reminder = "no_subscription";
+      if (event.object.subscription) {
+        try {
+          reminder = await queueRenewalReminder(deps, uid, event.object.subscription, event.object, operationId);
+        } catch (error) {
+          reminder = "failed";
+          functions.logger.error("web_email_reminder_failure", { ...fields, code: stripeErrorCode(error) ?? safeErrorCode(error) });
+        }
+      }
+      await recordWebEventOutcome(deps.firestore, event.id, `reminder_${reminder}`);
+      functions.logger.info("web_event_outcome", { ...fields, outcome: "reminder", uid, reminder });
+      return "reminder";
+    }
     const result = await (deps.sync ?? syncWebEntitlement)(uid, deps, { operationId, trigger: event.type });
     await recordWebEventOutcome(deps.firestore, event.id, `synced_${result.outcome}`);
     functions.logger.info("web_event_outcome", { ...fields, outcome: "synced", uid, sync: result.outcome });
@@ -102,6 +119,8 @@ export interface StripeWebhookDeps {
   webhookSecret: string | undefined;
   now?: () => Date;
   sync?: WebEventDeps["sync"];
+  /** Queues the billing emails; see `syncWebEntitlement`. */
+  notify?: (notice: WebSyncNotice) => Promise<void>;
 }
 
 export interface StripeWebhookResponse {
@@ -139,7 +158,7 @@ export async function handleStripeWebhook(
     const outcome = await handleWebEvent(
       webEventRef(event),
       "webhook",
-      { firestore: deps.firestore, gateway: deps.gateway, now: deps.now, sync: deps.sync },
+      { firestore: deps.firestore, gateway: deps.gateway, now: deps.now, sync: deps.sync, notify: deps.notify },
       operationId
     );
     return { status: 200, body: { received: true, outcome } };

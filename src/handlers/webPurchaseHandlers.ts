@@ -243,7 +243,7 @@ export async function handleStartWebPurchase(
       operationId,
       deps,
       gate,
-      syncDeps: { firestore: deps.firestore, gateway, now: deps.now },
+      syncDeps: { firestore: deps.firestore, gateway, now: deps.now, notify: deps.notify },
     };
     logWebInfo(`${event}_start`, operationId, {
       uid,
@@ -833,7 +833,7 @@ export async function handleFinishWebPurchase(
       operationId,
       deps,
       gate,
-      syncDeps: { firestore: deps.firestore, gateway: gate.gateway, now: deps.now },
+      syncDeps: { firestore: deps.firestore, gateway: gate.gateway, now: deps.now, notify: deps.notify },
     };
     state.stage = "read";
     const entry = ledgerEntryFromData(

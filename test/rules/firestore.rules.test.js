@@ -244,7 +244,7 @@ describe("admin-only data", () => {
   });
 
   test("web customers, Stripe events and the purchase throttle: no client at all", async () => {
-    for (const path of ["web_customers/user-1", "web_stripe_events/evt_1", "web_purchase_throttle/uid_user-1"]) {
+    for (const path of ["web_customers/user-1", "web_stripe_events/evt_1", "web_purchase_throttle/uid_user-1", "web_email_outbox/confirmed_1"]) {
       for (const db of [asUser("user-1"), asUser("admin-1"), asGuest()]) {
         await assertFails(getDoc(doc(db, path)));
         await assertFails(setDoc(doc(db, path), { value: 1 }));

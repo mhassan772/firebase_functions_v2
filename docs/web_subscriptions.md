@@ -22,6 +22,9 @@ Plans are `web_monthly`, `web_yearly` and `web_lifetime`, which are also the Str
 | `src/handlers/webCallableCommon.ts` | What the five callables share: dependencies, the sales gate, verified email, throttle, token checks, decline categories, error handling |
 | `src/handlers/webPurchaseHandlers.ts` | `getWebPlans`, `startWebPurchase`, `finishWebPurchase` |
 | `src/handlers/webManageHandlers.ts` | `getWebSubscription`, `manageWebSubscription` |
+| `src/services/webSubscriptions/billingEmails.ts` | The outbox, which emails a sync calls for, the renewal reminder, the last-warning sweep |
+| `src/services/email/billingEmailTemplates.ts` | The billing emails' words, `formatMoney`, `formatDate` |
+| `src/handlers/webBillingEmailHandlers.ts` | The sender behind `sendWebBillingEmail` |
 | `src/functions/webSubscriptions/` | `stripeWebEvents`, the five callables, and the lazy live dependencies |
 | `test/helpers/fakeStripeGateway.js` | The in-memory Stripe the tests use |
 | `test/webPurchase.test.js`, `test/integration/webPurchase.test.js` | The callables, without Firestore and against the emulator |
@@ -43,6 +46,7 @@ All server-only. `web_pricing` and `web_purchases` are readable by portal admins
 | `countries` | DZ, IQ, JO, LB, LY, MA, TN, YE → `reduced`; EG, TR → `low` |
 | `fullPriceTier` | `standard`, also the tier of an unknown country |
 | `allowUnattestedSim` | `false`, read by store country |
+| `emailsEnabled` | `true`; when `false` the billing email sender marks every queued email `skipped` |
 
 Amounts are never in the config: each is read from the Stripe price with that lookup key and cached for ten minutes per instance.
 
@@ -98,18 +102,56 @@ Cancellations happen after the commit. A failed cancel is thrown, so the webhook
 5. The uid: the event object's customer, or for a refund or dispute its charge's customer, then that customer's `metadata.uid`, then the mapping check. No uid is outcome `ignored`, 200.
 6. `syncWebEntitlement(uid)`. A failure deletes the event document and answers 500, so Stripe's retry handles it again.
 
-Handled types: `invoice.paid`, `invoice.payment_failed`, `invoice.payment_action_required`, `invoice.voided`, `customer.subscription.created`, `.updated`, `.deleted`, `charge.refunded`, `refund.created`, `refund.updated`, `charge.dispute.created`, `.updated`, `.closed`, `.funds_withdrawn`, `.funds_reinstated`. Register the endpoint in the Stripe Dashboard for these types only.
+Handled types: `invoice.paid`, `invoice.payment_failed`, `invoice.payment_action_required`, `invoice.voided`, `customer.subscription.created`, `.updated`, `.deleted`, `charge.refunded`, `refund.created`, `refund.updated`, `charge.dispute.created`, `.updated`, `.closed`, `.funds_withdrawn`, `.funds_reinstated`, and `invoice.upcoming` (which only queues the yearly renewal reminder; see "Billing emails"). Register the endpoint in the Stripe Dashboard for these types only.
 
 Logs: `web_event_outcome` and `web_event_failure` per event, `web_sync_success` and `web_sync_failure` per sync, `web_subscription_cancelled_at_stripe`. They carry ids and codes, never a key, a client secret, a full confirmation token id, an email or card details.
 
 ## Reconcile
 
-`reconcileSubscriptions` runs two more phases after the Apple ones when `STRIPE_WEB_SECRET_KEY` is set, and reports `{skipped: "stripe_not_configured"}` for both otherwise.
+`reconcileSubscriptions` runs three more phases after the Apple ones when `STRIPE_WEB_SECRET_KEY` is set, and reports `{skipped: "stripe_not_configured"}` for each otherwise.
 
-A malformed Stripe key fails only these two phases (`{error: "stripe-key-invalid"}`, logged as `subscription_reconcile_web_config_failure`); the Apple and Google phases run first and are unaffected.
+A malformed Stripe key fails only these three phases (`{error: "stripe-key-invalid"}`, logged as `subscription_reconcile_web_config_failure`); the Apple and Google phases run first and are unaffected.
 
 - **`stripeEvents`**: a feed phase over `events.list` for the handled types, from the checkpoint in `subscription_reconcile_state/stripe-events-{live|test}` (at most 29 days back; Stripe keeps 30), paged with `starting_after`. Each event goes through the webhook's handler with source `reconcile`, so an event already handled is skipped and one the webhook never received syncs its account.
 - **`webPending`**: every ledger entry `pending` for more than 15 minutes is synced (one sync per account). An entry still pending after 24 hours has its incomplete subscription cancelled, or its one-off invoice voided (a draft is deleted), and becomes `abandoned`. Its PaymentIntent is read first: `succeeded` or `processing` counts as paid, and the account is synced instead of anything being cancelled.
+- **`webFinalWarnings`**: the last warning before a failed renewal stops access. Slots with `platform == "web"` and `status == "grace_period"` (equality only, no composite index) of the key's mode, with `paymentFailed` and a grace ending within 48 hours, are synced and then, if still so, get `payment_failed_final` queued.
+
+## Billing emails
+
+Stripe's own customer emails are switched off (they have no Arabic), so these are the only messages a web subscriber gets. Contract: `docs/ai/plans/26-11-10/web-accounts-stage-e-spec.md` in Mantooq_Mobile.
+
+Nothing that talks to Stripe sends mail. Code that notices something worth an email writes a document to `web_email_outbox/{id}`, and the Firestore trigger `sendWebBillingEmail` sends it. Only that function holds the SES secrets, a slow or failed send never delays a purchase, a sync or a webhook answer, and a send can be retried. Each occurrence has a deterministic id and is written with `create()`; a second attempt to queue it fails quietly, so replays and retries never send twice.
+
+**`web_email_outbox/{id}`**: `{uid, kind, lang, livemode, plan?, amount?, tax?, total?, currency?, renewsAt?, endsAt?, graceEndsAt?, cardExpiresFirst?, status: "queued"|"sent"|"skipped"|"failed", reason?, attempts, createdAt, sentAt?, expiresAt}`, removed by a TTL policy on `expiresAt` 90 days after it was queued. Server-only; no address, name or card detail. `lang` is the purchase's (the ledger entry the slot names), Arabic when it cannot be read. Account deletion deletes the uid's documents.
+
+| `kind` | Queued when | Id |
+|---|---|---|
+| `purchase_confirmed` | A ledger entry becomes `paid` for the first time (from pending, failed or abandoned) | `confirmed_<purchaseId>` |
+| `renewed` | The slot's `lastPaidInvoiceId` changes on the same subscription and that invoice's billing reason is `subscription_cycle` | `renewed_<invoiceId>` |
+| `payment_failed` | `paymentFailed` turns on while the grace is still ahead, and the bank is not asking for confirmation | `failed_<open invoice id>` |
+| `action_required` | `needsAction` turns on, the open invoice is `subscription_cycle` (never a first purchase) and the grace is ahead | `action_<invoiceId>` |
+| `cancellation_confirmed` | `cancelAtPeriodEnd` turns on while the paid period is ahead | `cancelled_<subscriptionId>_<paidThrough s>` |
+| `renewal_reminder` | `invoice.upcoming` for an active yearly subscription that is not cancelling, renewal still ahead | `reminder_<subscriptionId>_<paidThrough s>` |
+| `payment_failed_final` | The recovery pass's `webFinalWarnings` phase | `failed_final_<subscriptionId>_<grace end s>` |
+
+The first five come from `syncWebEntitlement`: after its transaction commits (when it wrote the slot, or moved an entry to paid) it calls its optional `notify` dependency with the slot before and after, the entries that became paid and the subscription's facts (the latest paid invoice's billing reason and amount, and the latest open invoice's id and reason). The live deps of every caller (the webhook, the recovery pass, the five callables) carry `billingNotifier`; a failure there is logged (`web_sync_notify_failure`, `web_email_queue_failure`) and never fails the sync. `renewal_reminder` sets `cardExpiresFirst` when the default card's expiry month ends before the renewal date. Nothing is queued for an account with a tombstone, once access is revoked (a refund or a dispute), for a subscription that ends after the retries run out, or for a change on a different subscription than the slot named before (a rebuilt slot).
+
+**Sender `sendWebBillingEmail`** (`onCreate` on `web_email_outbox/{id}`, europe-west2, SES secrets, retries on): leaves a document that is not `queued` alone, and marks it `skipped` with a reason when `emailsEnabled` is false (`emails_disabled`), the account has a tombstone (`account_deleted`), the Auth user is gone (`no_user`) or has no address (`no_email`), or it was queued more than 24 hours ago (`stale`). Otherwise it renders with `billingEmailTemplates.ts` and sends through SES with the sender name of the language, then marks `sent`. A transient SES failure counts an attempt and throws so the platform retries; the fifth failed attempt, a permanent SES answer (`ses_<name>`) or a missing field (`incomplete_<field>`) marks `failed`. A send that succeeded but could not be marked may be sent again on the retry: a duplicate receipt is preferred over a lost one.
+
+**Templates** (`src/services/email/billingEmailTemplates.ts`): one copy record per language on the shared frame, with the plan names and terms of the accounts pages, and every email carries the manage button (`https://accounts.mantooq.com/manage?lang=<lang>`). `formatMoney` and `formatDate` format as the pages do (Arabic digits and month names for Arabic; dates in UTC). A sandbox email's subject starts with `[TEST] `.
+
+**Logs**: `web_email_queue` (kind, id, outcome), `web_email_send_outcome` (outcome, reason), `web_email_send_retry`, `web_email_reminder_failure`, `web_final_warning_item_failure`. Never an address.
+
+### Owner's steps in Stripe before live sales
+
+| Where | Setting | Value |
+|---|---|---|
+| Billing → Revenue recovery → Retries | Smart Retries | 8 within 2 weeks |
+| Same page | After the last retry | Cancel the subscription |
+| Billing settings → Upcoming renewal events | Lead time | 7 days |
+| Billing settings → Customer emails | Stripe's own emails | Off |
+| Radar | Rule | 3D Secure when risk is not normal |
+| Webhook endpoint | Events | the handled types above, including `invoice.upcoming` |
 
 ## Callables
 
@@ -241,11 +283,13 @@ It needs no Stripe key (Application Default Credentials, or the emulator with `F
 ## Before the first deploy
 
 - Create the three secrets.
-- Turn on TTL for `expiresAt` on the `web_stripe_events` and `web_purchase_throttle` collection groups (`gcloud firestore fields ttls update expiresAt --collection-group=<name> --enable-ttl`).
+- Turn on TTL for `expiresAt` on the `web_stripe_events`, `web_purchase_throttle` and `web_email_outbox` collection groups (`gcloud firestore fields ttls update expiresAt --collection-group=<name> --enable-ttl`).
 - Deploy the rules.
 - Deploy `stripeWebEvents` by name, register its URL in the Stripe Dashboard for the handled types, and store the signing secret as `STRIPE_WEB_WEBHOOK_SECRET`.
 - Redeploy `reconcileSubscriptions`, `deleteAccount`, `accountDeletedCleanup` and `sweepDeletedAccounts` by name, since each now mounts `STRIPE_WEB_SECRET_KEY`.
 - Deploy `getWebPlans`, `startWebPurchase`, `finishWebPurchase`, `getWebSubscription` and `manageWebSubscription` by name.
+- Deploy `sendWebBillingEmail` by name (it mounts the two SES secrets of the auth emails), and redeploy `stripeWebEvents` and `reconcileSubscriptions` with the billing emails. Deploy the sender before or with the queuing functions, so nothing waits in the outbox past its 24 hours.
+- Add `invoice.upcoming` to the webhook endpoint's events, and make the Stripe settings in "Owner's steps in Stripe before live sales".
 
 ## Sandbox check
 

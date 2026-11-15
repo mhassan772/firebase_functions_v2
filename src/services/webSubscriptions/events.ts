@@ -27,6 +27,8 @@ export const HANDLED_WEB_EVENT_TYPES = [
   "charge.dispute.closed",
   "charge.dispute.funds_withdrawn",
   "charge.dispute.funds_reinstated",
+  // Queues the yearly renewal reminder; no sync.
+  "invoice.upcoming",
 ] as const;
 
 export function isHandledWebEventType(type: string): boolean {
@@ -46,7 +48,16 @@ export interface WebEventRef {
   type: string;
   created: number;
   livemode: boolean;
-  object: { object?: string; id?: string; customer?: string; charge?: string };
+  object: {
+    object?: string;
+    id?: string;
+    customer?: string;
+    charge?: string;
+    /** An invoice's subscription, for `invoice.upcoming`, whose preview has no id of its own. */
+    subscription?: string;
+    total?: number;
+    currency?: string;
+  };
 }
 
 export function webEventRef(event: Stripe.Event): WebEventRef {
@@ -69,6 +80,13 @@ export function webEventRef(event: Stripe.Event): WebEventRef {
   if (customer) ref.object.customer = customer;
   const charge = idOf(object.charge);
   if (charge) ref.object.charge = charge;
+  if (object.object === "invoice") {
+    const parent = object.parent as { subscription_details?: { subscription?: unknown } } | null | undefined;
+    const subscription = idOf(parent?.subscription_details?.subscription) ?? idOf(object.subscription);
+    if (subscription) ref.object.subscription = subscription;
+    if (typeof object.total === "number") ref.object.total = object.total;
+    if (typeof object.currency === "string") ref.object.currency = object.currency;
+  }
   return ref;
 }
 

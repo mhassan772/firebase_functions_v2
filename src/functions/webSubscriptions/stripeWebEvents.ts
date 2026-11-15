@@ -2,7 +2,7 @@ import * as functions from "firebase-functions";
 import { admin } from "../../config/admin";
 import { REGION, STRIPE_WEB_SECRETS } from "../../config/constants";
 import { handleStripeWebhook } from "../../handlers/webSubscriptionEventHandlers";
-import { webGatewayFromEnv, webhookSecretFromEnv } from "./deps";
+import { webBillingNotifier, webGatewayFromEnv, webhookSecretFromEnv } from "./deps";
 
 /**
  * Stripe's webhook for the web subscriptions account. Every handled event syncs the account it
@@ -14,7 +14,12 @@ export const stripeWebEvents = functions
   .https.onRequest(async (req, res) => {
     const result = await handleStripeWebhook(
       { method: req.method, rawBody: req.rawBody, header: (name) => req.header(name) },
-      { firestore: admin.firestore(), gateway: webGatewayFromEnv(), webhookSecret: webhookSecretFromEnv() }
+      {
+        firestore: admin.firestore(),
+        gateway: webGatewayFromEnv(),
+        webhookSecret: webhookSecretFromEnv(),
+        notify: webBillingNotifier(),
+      }
     );
     res.status(result.status).json(result.body);
   });

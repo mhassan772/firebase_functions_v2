@@ -47,6 +47,7 @@ const { runFeedPhase, stripeEventsPhase } = require('../../lib/handlers/subscrip
 const { handleStartWebPurchase, handleFinishWebPurchase, handleGetWebPlans } = require('../../lib/handlers/webPurchaseHandlers');
 const { handleGetWebSubscription, handleManageWebSubscription } = require('../../lib/handlers/webManageHandlers');
 const { reasonOf } = require('../../lib/utils/callableAuth');
+const { billingNotifier, WEB_EMAIL_OUTBOX_COLLECTION } = require('../../lib/services/webSubscriptions/billingEmails');
 
 const stripe = new Stripe(key);
 const gateway = liveStripeGateway(key);
@@ -87,6 +88,8 @@ const deps = {
   storeCountry: firestoreStoreCountry(() => db),
   throttle: firestoreWebPurchaseThrottle(() => db, { uidPerWindow: 100, ipPerWindow: 1000, windowMs: 86_400_000 }),
   now: () => clockNow ?? new Date(),
+  // Billing emails are queued in the emulator's outbox; no sender runs here, so nothing is sent.
+  notify: billingNotifier(db),
 };
 const caller = (uid) => ({
   auth: { uid, token: { email: `${uid.toLowerCase()}@example.invalid`, email_verified: true, firebase: { sign_in_provider: 'password' } } },
@@ -317,6 +320,29 @@ try {
     lateSub.status === 'past_due' && retrySlot.status === 'billing_retry' && retrySlot.active === false && retrySlot.expiresAt.toMillis() === paidThrough.getTime() && (await masterOf(CLOCK)).active === false,
     `subscription ${lateSub.status}, slot ${retrySlot.status} active ${retrySlot.active} dated ${iso(retrySlot.expiresAt)}`);
   clockNow = undefined;
+
+  // Billing emails: the outbox documents these purchases, the failed renewal and the cancel left.
+  const outboxOf = async (uid) => (await db.collection(WEB_EMAIL_OUTBOX_COLLECTION).where('uid', '==', uid).get()).docs
+    .map((doc) => ({ id: doc.id, ...doc.data() }));
+  const aMail = await outboxOf(A);
+  const bMail = await outboxOf(B);
+  const clockMail = await outboxOf(CLOCK);
+  const lowMail = await outboxOf(LOW);
+  const declineMail = await outboxOf(DECLINE);
+  const describeMail = (rows) => rows.map((row) => `${row.kind}:${row.id.replace(/_[A-Za-z0-9]{24,}/g, '_…')}:${row.lang}:${row.status}`).join(' ');
+  check('outbox: each purchase queued one purchase_confirmed in its language, a decline none',
+    aMail.filter((row) => row.kind === 'purchase_confirmed').length === 1 && lowMail.length === 1 && lowMail[0].lang === 'ar' &&
+      lowMail[0].total === 4999 && declineMail.length === 0,
+    `A ${describeMail(aMail)}; LOW ${describeMail(lowMail)} total ${lowMail[0]?.total}; DECLINE ${declineMail.length}`);
+  const cancelMail = bMail.filter((row) => row.kind === 'cancellation_confirmed');
+  check('outbox: the cancel queued one cancellation_confirmed dated at the paid period end (a resume and the sync added none)',
+    cancelMail.length === 1 && cancelMail[0].endsAt.toMillis() === (await slotOf(B)).web.paidThrough.toMillis() && cancelMail[0].status === 'queued',
+    `B ${describeMail(bMail)} ends ${iso(cancelMail[0]?.endsAt)}`);
+  const failedMail = clockMail.filter((row) => row.kind === 'payment_failed');
+  check('outbox: the failed renewal on the clock queued one payment_failed with the grace end, nothing for billing_retry',
+    failedMail.length === 1 && failedMail[0].graceEndsAt.toMillis() === paidThrough.getTime() + WEB_GRACE_MS &&
+      clockMail.filter((row) => row.kind !== 'purchase_confirmed' && row.kind !== 'payment_failed').length === 0,
+    `CLOCK ${describeMail(clockMail)} grace ${iso(failedMail[0]?.graceEndsAt)}`);
 
   // 8. The reconcile phase alone rebuilds a deleted slot (no webhook is registered here).
   const before = await slotOf(B);
