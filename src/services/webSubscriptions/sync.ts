@@ -330,7 +330,7 @@ function disputeState(disputes: Stripe.Dispute[]): DisputeState {
 }
 
 /** The charge an invoice was paid with, through its paid invoice payment. */
-async function chargeOfInvoice(gateway: StripeGateway, invoice: Stripe.Invoice): Promise<ChargeFacts | undefined> {
+export async function chargeOfInvoice(gateway: StripeGateway, invoice: Stripe.Invoice): Promise<ChargeFacts | undefined> {
   const payments = invoice.payments?.data ?? [];
   const payment = payments.find((row) => row.status === "paid") ?? payments.find((row) => row.is_default);
   const paymentIntentId = idOf(payment?.payment?.payment_intent ?? null);
@@ -347,6 +347,7 @@ async function chargeOfInvoice(gateway: StripeGateway, invoice: Stripe.Invoice):
   };
   if (!charge) return facts;
   facts.chargeId = charge.id;
+  facts.amount = charge.amount;
   facts.fullyRefunded = charge.refunded === true;
   facts.amountRefunded = charge.amount_refunded ?? 0;
   if (charge.disputed) facts.dispute = disputeState(await gateway.listDisputes({ charge: charge.id }));
@@ -429,7 +430,9 @@ export async function readWebStripeFacts(
     }
     // A lifetime invoice is read whatever its entry says: a paid invoice at Stripe wins over a
     // ledger marked abandoned or failed, and the sync corrects the entry.
-    const checked = entry.plan === "web_lifetime" || LEDGER_STATUSES_TO_CHECK.includes(entry.status);
+    // A charge made from `/manage` is read whatever its entry says too: a decline racing a bank
+    // step completed in another tab marks it failed while its invoice is paid.
+    const checked = entry.plan === "web_lifetime" || entry.kind !== undefined || LEDGER_STATUSES_TO_CHECK.includes(entry.status);
     if (!entry.stripe.invoiceId || !checked) continue;
     const invoice = await invoiceById(entry.stripe.invoiceId);
     if (invoice && entry.plan === "web_lifetime") {

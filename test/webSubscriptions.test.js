@@ -26,6 +26,7 @@ const {
   knownTier,
   lookupKeyFor,
   quoteTotal,
+  unusedTimeCredit,
   webPricingConfigFromData,
 } = require("../lib/services/webSubscriptions/pricing");
 const { evaluatePurchaseThrottle, throttleIpDocId, throttleUidDocId } = require("../lib/services/webSubscriptions/purchaseThrottle");
@@ -582,6 +583,47 @@ describe("pricing", () => {
     assert.deepEqual(cardFromToken(wallet), { country: "EG", funding: "debit", wallet: "apple_pay", brand: "visa" });
     const noCountry = await fake.retrieveConfirmationToken(fake.addToken({ country: null }));
     assert.equal(cardFromToken(noCountry).country, null);
+  });
+});
+
+describe("unused time credit", () => {
+  const T = (iso) => Date.parse(iso) / 1000;
+  const line = (amount, start, end) => ({ amount, period: { start: T(start), end: T(end) } });
+  const invoice = (...lines) => ({ lines: { data: lines } });
+  const at = (iso) => new Date(iso);
+  const monthly = invoice(line(499, "2026-11-01T00:00:00Z", "2026-12-01T00:00:00Z"));
+
+  test("start, middle and end of a period, rounded down to a cent", () => {
+    assert.equal(unusedTimeCredit(monthly, at("2026-11-01T00:00:00Z"), 14999), 499);
+    assert.equal(unusedTimeCredit(monthly, at("2026-10-20T00:00:00Z"), 14999), 499, "before the period starts: all of it");
+    assert.equal(unusedTimeCredit(monthly, at("2026-11-16T00:00:00Z"), 14999), Math.floor(499 * 15 / 30));
+    assert.equal(unusedTimeCredit(monthly, at("2026-11-16T00:00:01Z"), 14999), 249, "249.49 → 249");
+    assert.equal(unusedTimeCredit(monthly, at("2026-12-01T00:00:00Z"), 14999), 0);
+    assert.equal(unusedTimeCredit(monthly, at("2026-12-09T00:00:00Z"), 14999), 0, "past the period: nothing, never negative");
+    assert.equal(unusedTimeCredit(undefined, at("2026-11-16T00:00:00Z"), 14999), 0, "no paid invoice");
+  });
+
+  test("a switch invoice: the yearly line, not the credit line listed before it", () => {
+    const switched = invoice(line(-333, "2026-11-26T00:00:00Z", "2026-12-16T00:00:00Z"), line(4999, "2026-11-26T00:00:00Z", "2027-11-26T00:00:00Z"));
+    const now = at("2027-05-27T12:00:00Z");
+    const expected = Math.floor(4999 * (Date.parse("2027-11-26T00:00:00Z") - now.getTime()) / (365 * 86400 * 1000));
+    assert.equal(unusedTimeCredit(switched, now, 14999), expected);
+  });
+
+  test("a cancelled subscription is credited for its paid period alike; tax is never part of the base", () => {
+    const taxed = { ...monthly, total: 564, total_taxes: [{ amount: 65 }] };
+    assert.equal(unusedTimeCredit(taxed, at("2026-11-16T00:00:00Z"), 14999), unusedTimeCredit(monthly, at("2026-11-16T00:00:00Z"), 14999));
+  });
+
+  test("a partial refund credits only what is still paid; a full refund credits nothing", () => {
+    const now = at("2026-11-16T00:00:00Z");
+    assert.equal(unusedTimeCredit(monthly, now, 14999, 0.5), Math.floor(499 * 0.5 * 15 / 30));
+    assert.equal(unusedTimeCredit(monthly, now, 14999, 0), 0);
+    assert.equal(unusedTimeCredit(monthly, now, 14999, 1), unusedTimeCredit(monthly, now, 14999));
+  });
+
+  test("never more than leaves Stripe's minimum charge", () => {
+    assert.equal(unusedTimeCredit(invoice(line(5000, "2026-11-01T00:00:00Z", "2027-11-01T00:00:00Z")), at("2026-11-01T00:00:00Z"), 5020), 4970);
   });
 });
 

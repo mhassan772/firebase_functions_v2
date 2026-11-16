@@ -65,11 +65,12 @@ export interface WebPurchaseEntry {
   failure?: string;
   /**
    * `switch` for a monthly subscription moved to yearly, which charges the subscription already
-   * held instead of starting one; absent for a purchase.
+   * held instead of starting one; `upgrade` for lifetime bought by a subscriber, with a credit for
+   * the subscription's unused time and the saved card; absent for a purchase.
    */
-  kind?: "switch";
+  kind?: "switch" | "upgrade";
   switchedFrom?: WebPlan;
-  /** Cents credited for the unused days of the plan switched from, a positive number; a switch only. */
+  /** Cents credited for the unused time of the plan switched from, a positive number. */
   credit?: number;
   /** Cents refunded when a refund did not cover the whole charge. */
   partialRefund?: number;
@@ -166,7 +167,7 @@ export function ledgerEntryFromData(purchaseId: string, data: DocumentData | und
   if (typeof data.uid === "string" && data.uid) entry.uid = data.uid;
   if (typeof data.failure === "string") entry.failure = data.failure;
   if (typeof data.partialRefund === "number") entry.partialRefund = data.partialRefund;
-  if (data.kind === "switch") entry.kind = "switch";
+  if (data.kind === "switch" || data.kind === "upgrade") entry.kind = data.kind;
   if (isWebPlan(data.switchedFrom)) entry.switchedFrom = data.switchedFrom;
   if (typeof data.credit === "number" && Number.isFinite(data.credit)) entry.credit = data.credit;
   return entry;
@@ -234,6 +235,8 @@ export interface ChargeFacts {
   chargeId?: string;
   paymentIntentId?: string;
   paymentIntentStatus?: string;
+  /** Integer cents charged, absent when no charge was read. */
+  amount?: number;
   /** Stripe's own `refunded`: true only once the whole charge is refunded. */
   fullyRefunded: boolean;
   amountRefunded: number;

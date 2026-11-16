@@ -78,6 +78,14 @@ export function announce(message: string): void {
   }, 50);
 }
 
+/// Empties the live region and drops what was waiting to be said, so a sentence in the previous
+/// language is never read again after a language switch.
+export function clearAnnouncements(): void {
+  pendingAnnouncements = [];
+  const announcer = document.getElementById("announcer");
+  if (announcer) announcer.textContent = "";
+}
+
 /// A heading that can take focus without joining the tab order.
 export function heading(text: string, level: "h1" | "h2" = "h1", id?: string): HTMLElement {
   return h(level, { tabindex: -1, id }, text);

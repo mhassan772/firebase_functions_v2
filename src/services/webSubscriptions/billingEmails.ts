@@ -43,8 +43,10 @@ export type BillingEmailLang = "ar" | "en";
 export interface BillingEmailFields {
   plan?: string;
   amount?: number;
-  /** The plan switch's credit for the unused monthly days, a positive number. */
+  /** The credit for unused time (a plan switch, an upgrade to lifetime), a positive number. */
   credit?: number;
+  /** An upgrade to lifetime: the plan whose unused time was credited and which has stopped. */
+  creditedPlan?: string;
   tax?: number;
   total?: number;
   currency?: string;
@@ -179,7 +181,9 @@ export function langOfEntry(entry: Pick<WebPurchaseEntry, "lang"> | undefined): 
  * A renewal that needs the bank's confirmation gets `action_required` instead of
  * `payment_failed`, and neither is sent once the grace has passed. A paid plan switch gets
  * `switched_yearly` in place of `purchase_confirmed`; the renewal it turns back on sends nothing
- * more, since the switch's own email says the plan renews.
+ * more, since the switch's own email says the plan renews. An upgrade to lifetime gets
+ * `purchase_confirmed` with its credit and the stopped plan; the subscription it stops sends
+ * nothing, since the slot moves to lifetime and no longer names it.
  */
 export function decideSlotEmails(notice: WebSyncNotice): BillingEmail[] {
   const previous = slotView(notice.previous);
@@ -224,6 +228,8 @@ export function decideSlotEmails(notice: WebSyncNotice): BillingEmail[] {
         total: entry.total,
         currency: entry.currency,
         ...(sameSubscription && next.paidThrough ? { renewsAt: next.paidThrough } : {}),
+        // An upgrade to lifetime says what was credited and that the subscription has stopped.
+        ...(entry.kind === "upgrade" ? { credit: entry.credit ?? 0, creditedPlan: entry.switchedFrom } : {}),
       },
     });
   }

@@ -52,8 +52,12 @@ const { billingNotifier, WEB_EMAIL_OUTBOX_COLLECTION } = require('../../lib/serv
 
 const stripe = new Stripe(key);
 const gateway = liveStripeGateway(key);
-/** `switch` runs only the plan switch scenarios, whose Stripe objects all live on test clocks. */
-const SWITCH_ONLY = process.argv.slice(2).includes('switch');
+/**
+ * `switch` and `lifetime` run only the plan switch or the lifetime upgrade scenarios (both may be
+ * given), whose Stripe objects all live on test clocks; no argument runs everything.
+ */
+const ONLY = process.argv.slice(2);
+const RUN = (name) => ONLY.length === 0 || ONLY.includes(name);
 const db = admin.firestore();
 const run = crypto.randomBytes(4).toString('hex');
 const uids = [];
@@ -153,6 +157,9 @@ try {
   const SWITCH = newUid('switch');
   const SWITCH_DECLINE = newUid('switchdecline');
   const SWITCH_CANCELLED = newUid('switchcancel');
+  const UPGRADE = newUid('upgrade');
+  const UPGRADE_YEARLY = newUid('upgradeyearly');
+  const UPGRADE_DECLINE = newUid('upgradedecline');
   await db.collection('web_pricing').doc('config').set({
     salesEnabled: true,
     taxEnabled: false,
@@ -164,7 +171,7 @@ try {
   await seedKnownCountry(LOW, 'SA');
   await seedKnownCountry(CARD, 'AE');
 
-  if (!SWITCH_ONLY) {
+  if (ONLY.length === 0) {
     // 0. The gate.
     check('a non-tester on the sandbox key is refused', (await refusalOf(handleGetWebPlans({}, caller('NotATester0000000000000x'), deps))) === 'failed-precondition/sales_disabled');
     const plans = await handleGetWebPlans({ lang: 'en' }, caller(A), deps);
@@ -392,13 +399,16 @@ try {
         concurrentSubs.length === 1 && concurrentCharges.data.length === 1 && concurrentLedger.length === 1,
       `answers ${outcomes.join(', ')}; subscriptions ${concurrentSubs.map((sub) => `${sub.items.data[0].price.lookup_key}:${sub.status}`).join(',')}; charges ${concurrentCharges.data.length}; ledger entries ${concurrentLedger.length}`);
 
-    // Lifetime over a live subscription (B's yearly): the subscription is cancelled once paid.
-    const { answer: upgrade } = await start(B, 'web_lifetime', 'tok_us', 14999);
+    // Lifetime over a live subscription (B's yearly): full price is refused, the upgrade with its
+    // credit goes through, and the subscription is cancelled once paid.
+    const fullPrice = await refusalOf(start(B, 'web_lifetime', 'tok_us', 14999));
+    const { quote: bQuote } = await handleManageWebSubscription({ action: 'quote_lifetime' }, caller(B), deps);
+    const upgrade = await handleManageWebSubscription({ action: 'buy_lifetime', acceptedTotal: bQuote.total, attemptId: crypto.randomUUID(), lang: 'en' }, caller(B), deps);
     const bYearly = (await db.collection(WEB_PURCHASES_COLLECTION).where('uid', '==', B).where('plan', '==', 'web_yearly').get()).docs[0].data();
     const bSub = await gateway.retrieveSubscription(bYearly.stripe.subscriptionId);
     const bSlot = await slotOf(B);
     check('lifetime bought over an active yearly: yearly cancelled at Stripe, slot lifetime',
-      upgrade.status === 'succeeded' && bSub.status === 'canceled' && bSlot.productId === 'web_lifetime',
+      fullPrice === 'failed-precondition/already_subscribed' && upgrade.status === 'succeeded' && bSub.status === 'canceled' && bSlot.productId === 'web_lifetime',
       `yearly ${bSub.status}, slot ${bSlot.productId} ${bSlot.status}`);
     check('guards: lifetime_active, then already_subscribed', (await refusalOf(start(B, 'web_monthly', 'tok_us', 499))) === 'failed-precondition/lifetime_active' &&
       (await refusalOf(start(LOW, 'web_monthly', 'tok_us', 499))) === 'failed-precondition/already_subscribed');
@@ -425,101 +435,190 @@ try {
     manageAs(uid, { action: 'switch_yearly', acceptedTotal: quote.total, attemptId, lang: 'en' });
   const DAY = 86400;
 
-  // 10a. End to end: quote, switch, a repeated attempt, and the renewal a year later.
-  {
-    const uid = SWITCH;
-    const clock = await clockCustomer(uid, 'good');
-    const { answer: bought } = await start(uid, 'web_monthly', 'tok_us', 499);
-    const subscriptionId = (await ledgerOf(bought.purchaseId)).stripe.subscriptionId;
-    await clock.advanceTo(clock.frozen + 10 * DAY);
-    const { quote } = await manageAs(uid, { action: 'quote_switch_yearly' });
-    const attemptId = crypto.randomUUID();
-    const answer = await switchAs(uid, quote, attemptId);
-    const sub = await stripe.subscriptions.retrieve(subscriptionId, { expand: ['latest_invoice'] });
-    const invoice = sub.latest_invoice;
-    const item = sub.items.data[0];
-    const now = Math.floor(clockNow.getTime() / 1000);
-    check('switch: quote = yearly price less the unused days; the invoice charged exactly the quote',
-      bought.status === 'succeeded' && quote.amount === 4999 && quote.credit > 0 && quote.total === quote.amount - quote.credit &&
-        answer.status === 'succeeded' && invoice.status === 'paid' && invoice.billing_reason === 'subscription_update' && invoice.total === quote.total,
-      `quote ${quote.amount} - ${quote.credit} = ${quote.total} (card ${quote.card?.brand}/${quote.card?.last4}); answer ${answer.status}; invoice ${invoice.billing_reason} ${invoice.status} ${invoice.total}`);
-    check('switch: Stripe holds yearly from now for a year, no pending update, the switch purchase in metadata',
-      item.price.lookup_key === 'web_yearly_standard' && sub.billing_cycle_anchor === now && item.current_period_start === now &&
-        Date.parse(quote.renewsAt) === item.current_period_end * 1000 && sub.pending_update === null && sub.metadata.purchaseId === answer.purchaseId &&
-        sub.metadata.plan === 'web_yearly' && sub.metadata.tier === 'standard',
-      `price ${item.price.lookup_key}, anchor ${iso(new Date(sub.billing_cycle_anchor * 1000))}, period ${iso(new Date(item.current_period_start * 1000))} → ${iso(new Date(item.current_period_end * 1000))}, quote renews ${quote.renewsAt}`);
-    const slot = await slotOf(uid);
-    const entry = await ledgerOf(answer.purchaseId);
-    const mail = (await db.collection(WEB_EMAIL_OUTBOX_COLLECTION).where('uid', '==', uid).get()).docs.map((doc) => doc.data());
-    const switched = mail.filter((row) => row.kind === 'switched_yearly');
-    check('switch: slot yearly to the year end, ledger paid with the invoice amounts, one switched_yearly email',
-      slot.productId === 'web_yearly' && slot.web.paidThrough.toMillis() === item.current_period_end * 1000 && slot.autoRenewing === true &&
-        entry.status === 'paid' && entry.kind === 'switch' && entry.total === invoice.total && entry.credit === quote.credit &&
-        switched.length === 1 && switched[0].credit === quote.credit && switched[0].total === invoice.total &&
-        mail.filter((row) => row.kind === 'purchase_confirmed').length === 1,
-      `slot ${slot.productId} ${slot.status} until ${iso(slot.web.paidThrough)}; ledger ${entry.status} ${entry.amount}/${entry.credit}/${entry.total}; outbox ${mail.map((row) => row.kind).join(',')}`);
-    const repeated = await switchAs(uid, quote, attemptId);
-    const updates = (await stripe.invoices.list({ subscription: subscriptionId, limit: 10 })).data.filter((row) => row.billing_reason === 'subscription_update');
-    check('switch: the same attempt again answers the same purchase, with no second invoice',
-      repeated.status === 'succeeded' && repeated.purchaseId === answer.purchaseId && updates.length === 1, `subscription_update invoices ${updates.length}`);
-    await clock.advanceTo(item.current_period_end + DAY);
-    const renewal = await until(
-      async () => (await stripe.invoices.list({ subscription: subscriptionId, limit: 5 })).data.find((row) => row.billing_reason === 'subscription_cycle' && row.status === 'paid'),
-      Boolean, 'the yearly renewal', 30, 2000);
-    await syncWebEntitlement(uid, deps, { trigger: 'e2e_switch' });
-    const renewedSlot = await slotOf(uid);
-    const renewalEnd = Math.max(...renewal.lines.data.map((line) => line.period.end));
-    check('switch: the renewal a year later is a plain yearly invoice, and the slot moves a year on',
-      renewal.total === 4999 && renewal.lines.data.length === 1 && renewal.lines.data[0].pricing?.price_details?.price === item.price.id &&
-        renewedSlot.web.paidThrough.toMillis() === renewalEnd * 1000,
-      `renewal ${renewal.total}, ${renewal.lines.data.length} line, period end ${iso(new Date(renewalEnd * 1000))}; slot until ${iso(renewedSlot.web.paidThrough)}`);
-    clockNow = undefined;
+  if (RUN('switch')) {
+    // 10a. End to end: quote, switch, a repeated attempt, and the renewal a year later.
+    {
+      const uid = SWITCH;
+      const clock = await clockCustomer(uid, 'good');
+      const { answer: bought } = await start(uid, 'web_monthly', 'tok_us', 499);
+      const subscriptionId = (await ledgerOf(bought.purchaseId)).stripe.subscriptionId;
+      await clock.advanceTo(clock.frozen + 10 * DAY);
+      const { quote } = await manageAs(uid, { action: 'quote_switch_yearly' });
+      const attemptId = crypto.randomUUID();
+      const answer = await switchAs(uid, quote, attemptId);
+      const sub = await stripe.subscriptions.retrieve(subscriptionId, { expand: ['latest_invoice'] });
+      const invoice = sub.latest_invoice;
+      const item = sub.items.data[0];
+      const now = Math.floor(clockNow.getTime() / 1000);
+      check('switch: quote = yearly price less the unused days; the invoice charged exactly the quote',
+        bought.status === 'succeeded' && quote.amount === 4999 && quote.credit > 0 && quote.total === quote.amount - quote.credit &&
+          answer.status === 'succeeded' && invoice.status === 'paid' && invoice.billing_reason === 'subscription_update' && invoice.total === quote.total,
+        `quote ${quote.amount} - ${quote.credit} = ${quote.total} (card ${quote.card?.brand}/${quote.card?.last4}); answer ${answer.status}; invoice ${invoice.billing_reason} ${invoice.status} ${invoice.total}`);
+      check('switch: Stripe holds yearly from now for a year, no pending update, the switch purchase in metadata',
+        item.price.lookup_key === 'web_yearly_standard' && sub.billing_cycle_anchor === now && item.current_period_start === now &&
+          Date.parse(quote.renewsAt) === item.current_period_end * 1000 && sub.pending_update === null && sub.metadata.purchaseId === answer.purchaseId &&
+          sub.metadata.plan === 'web_yearly' && sub.metadata.tier === 'standard',
+        `price ${item.price.lookup_key}, anchor ${iso(new Date(sub.billing_cycle_anchor * 1000))}, period ${iso(new Date(item.current_period_start * 1000))} → ${iso(new Date(item.current_period_end * 1000))}, quote renews ${quote.renewsAt}`);
+      const slot = await slotOf(uid);
+      const entry = await ledgerOf(answer.purchaseId);
+      const mail = (await db.collection(WEB_EMAIL_OUTBOX_COLLECTION).where('uid', '==', uid).get()).docs.map((doc) => doc.data());
+      const switched = mail.filter((row) => row.kind === 'switched_yearly');
+      check('switch: slot yearly to the year end, ledger paid with the invoice amounts, one switched_yearly email',
+        slot.productId === 'web_yearly' && slot.web.paidThrough.toMillis() === item.current_period_end * 1000 && slot.autoRenewing === true &&
+          entry.status === 'paid' && entry.kind === 'switch' && entry.total === invoice.total && entry.credit === quote.credit &&
+          switched.length === 1 && switched[0].credit === quote.credit && switched[0].total === invoice.total &&
+          mail.filter((row) => row.kind === 'purchase_confirmed').length === 1,
+        `slot ${slot.productId} ${slot.status} until ${iso(slot.web.paidThrough)}; ledger ${entry.status} ${entry.amount}/${entry.credit}/${entry.total}; outbox ${mail.map((row) => row.kind).join(',')}`);
+      const repeated = await switchAs(uid, quote, attemptId);
+      const updates = (await stripe.invoices.list({ subscription: subscriptionId, limit: 10 })).data.filter((row) => row.billing_reason === 'subscription_update');
+      check('switch: the same attempt again answers the same purchase, with no second invoice',
+        repeated.status === 'succeeded' && repeated.purchaseId === answer.purchaseId && updates.length === 1, `subscription_update invoices ${updates.length}`);
+      await clock.advanceTo(item.current_period_end + DAY);
+      const renewal = await until(
+        async () => (await stripe.invoices.list({ subscription: subscriptionId, limit: 5 })).data.find((row) => row.billing_reason === 'subscription_cycle' && row.status === 'paid'),
+        Boolean, 'the yearly renewal', 30, 2000);
+      await syncWebEntitlement(uid, deps, { trigger: 'e2e_switch' });
+      const renewedSlot = await slotOf(uid);
+      const renewalEnd = Math.max(...renewal.lines.data.map((line) => line.period.end));
+      check('switch: the renewal a year later is a plain yearly invoice, and the slot moves a year on',
+        renewal.total === 4999 && renewal.lines.data.length === 1 && renewal.lines.data[0].pricing?.price_details?.price === item.price.id &&
+          renewedSlot.web.paidThrough.toMillis() === renewalEnd * 1000,
+        `renewal ${renewal.total}, ${renewal.lines.data.length} line, period end ${iso(new Date(renewalEnd * 1000))}; slot until ${iso(renewedSlot.web.paidThrough)}`);
+      clockNow = undefined;
+    }
+
+    // 10b. A card that fails when charged: nothing changes, and the invoice is voided at once.
+    {
+      const uid = SWITCH_DECLINE;
+      const clock = await clockCustomer(uid, 'decline');
+      const { answer: bought } = await start(uid, 'web_monthly', 'tok_us', 499);
+      const subscriptionId = (await ledgerOf(bought.purchaseId)).stripe.subscriptionId;
+      const failing = await stripe.paymentMethods.attach('pm_card_chargeCustomerFail', { customer: clock.customer });
+      await stripe.subscriptions.update(subscriptionId, { default_payment_method: failing.id });
+      await clock.advanceTo(clock.frozen + 10 * DAY);
+      const before = await slotOf(uid);
+      const { quote } = await manageAs(uid, { action: 'quote_switch_yearly' });
+      const refused = await refusalOf(switchAs(uid, quote));
+      const sub = await stripe.subscriptions.retrieve(subscriptionId);
+      const switchInvoice = (await stripe.invoices.list({ subscription: subscriptionId, limit: 10 })).data.find((row) => row.billing_reason === 'subscription_update');
+      const after = await slotOf(uid);
+      const entry = (await db.collection(WEB_PURCHASES_COLLECTION).where('uid', '==', uid).where('kind', '==', 'switch').get()).docs[0]?.data();
+      check('switch decline: refused card_declined, still monthly with its dates, no pending update, invoice void, ledger failed',
+        refused.startsWith('failed-precondition/card_declined') && sub.items.data[0].price.lookup_key === 'web_monthly_standard' && sub.pending_update === null &&
+          switchInvoice?.status === 'void' && after.productId === 'web_monthly' && after.web.paidThrough.toMillis() === before.web.paidThrough.toMillis() &&
+          entry?.status === 'failed',
+        `${refused}; price ${sub.items.data[0].price.lookup_key}; invoice ${switchInvoice?.status}; slot ${after.productId} until ${iso(after.web.paidThrough)}; ledger ${entry?.status}/${entry?.failure}`);
+      clockNow = undefined;
+    }
+
+    // 10c. A cancelled subscription: the switch turns renewal back on.
+    {
+      const uid = SWITCH_CANCELLED;
+      const clock = await clockCustomer(uid, 'cancelled');
+      const { answer: bought } = await start(uid, 'web_monthly', 'tok_us', 499);
+      const subscriptionId = (await ledgerOf(bought.purchaseId)).stripe.subscriptionId;
+      await manageAs(uid, { action: 'cancel' });
+      await clock.advanceTo(clock.frozen + 10 * DAY);
+      const view = await handleGetWebSubscription({}, caller(uid), deps);
+      const { quote } = await manageAs(uid, { action: 'quote_switch_yearly' });
+      const answer = await switchAs(uid, quote);
+      const sub = await stripe.subscriptions.retrieve(subscriptionId);
+      const slot = await slotOf(uid);
+      check('switch from cancelled: yearly, renewal on again at Stripe and in the slot',
+        view.state === 'cancelling' && answer.status === 'succeeded' && sub.cancel_at_period_end === false && sub.cancel_at === null &&
+          sub.items.data[0].price.lookup_key === 'web_yearly_standard' && slot.status === 'active' && slot.autoRenewing === true && slot.web.cancelAtPeriodEnd === false,
+        `page ${view.state}; answer ${answer.status}; cancel_at_period_end ${sub.cancel_at_period_end}, cancel_at ${sub.cancel_at}; slot ${slot.status} renewing ${slot.autoRenewing}`);
+      clockNow = undefined;
+    }
   }
 
-  // 10b. A card that fails when charged: nothing changes, and the invoice is voided at once.
-  {
-    const uid = SWITCH_DECLINE;
-    const clock = await clockCustomer(uid, 'decline');
-    const { answer: bought } = await start(uid, 'web_monthly', 'tok_us', 499);
-    const subscriptionId = (await ledgerOf(bought.purchaseId)).stripe.subscriptionId;
-    const failing = await stripe.paymentMethods.attach('pm_card_chargeCustomerFail', { customer: clock.customer });
-    await stripe.subscriptions.update(subscriptionId, { default_payment_method: failing.id });
-    await clock.advanceTo(clock.frozen + 10 * DAY);
-    const before = await slotOf(uid);
-    const { quote } = await manageAs(uid, { action: 'quote_switch_yearly' });
-    const refused = await refusalOf(switchAs(uid, quote));
-    const sub = await stripe.subscriptions.retrieve(subscriptionId);
-    const switchInvoice = (await stripe.invoices.list({ subscription: subscriptionId, limit: 10 })).data.find((row) => row.billing_reason === 'subscription_update');
-    const after = await slotOf(uid);
-    const entry = (await db.collection(WEB_PURCHASES_COLLECTION).where('uid', '==', uid).where('kind', '==', 'switch').get()).docs[0]?.data();
-    check('switch decline: refused card_declined, still monthly with its dates, no pending update, invoice void, ledger failed',
-      refused.startsWith('failed-precondition/card_declined') && sub.items.data[0].price.lookup_key === 'web_monthly_standard' && sub.pending_update === null &&
-        switchInvoice?.status === 'void' && after.productId === 'web_monthly' && after.web.paidThrough.toMillis() === before.web.paidThrough.toMillis() &&
-        entry?.status === 'failed',
-      `${refused}; price ${sub.items.data[0].price.lookup_key}; invoice ${switchInvoice?.status}; slot ${after.productId} until ${iso(after.web.paidThrough)}; ledger ${entry?.status}/${entry?.failure}`);
-    clockNow = undefined;
-  }
+  // 11. Upgrading to lifetime (stage J), each scenario on its own test clock like section 10.
+  const lifetimeAs = async (uid, lang = 'en') => {
+    const { quote } = await manageAs(uid, { action: 'quote_lifetime' });
+    const answer = await manageAs(uid, { action: 'buy_lifetime', acceptedTotal: quote.total, attemptId: crypto.randomUUID(), lang });
+    return { quote, answer };
+  };
+  /** Stripe's own record of what followed: invoices, credit notes, the customer's balance. */
+  const afterwards = async (customer) => ({
+    invoices: (await stripe.invoices.list({ customer, limit: 20 })).data.map((row) => `${row.billing_reason}:${row.status}:${row.total}`),
+    creditNotes: (await stripe.creditNotes.list({ customer, limit: 10 })).data.length,
+    balance: (await stripe.customers.retrieve(customer)).balance,
+  });
+  if (RUN('lifetime')) {
+    // 11a. From monthly, ten days in; then nothing more is raised for the stopped subscription.
+    {
+      const uid = UPGRADE;
+      const clock = await clockCustomer(uid, 'upgrade');
+      const { answer: bought } = await start(uid, 'web_monthly', 'tok_us', 499);
+      const subscriptionId = (await ledgerOf(bought.purchaseId)).stripe.subscriptionId;
+      await clock.advanceTo(clock.frozen + 10 * DAY);
+      const { quote, answer } = await lifetimeAs(uid, 'ar');
+      const entry = await ledgerOf(answer.purchaseId);
+      const invoice = await stripe.invoices.retrieve(entry.stripe.invoiceId);
+      const lines = invoice.lines.data.map((line) => line.amount).sort((x, y) => x - y);
+      const sub = await stripe.subscriptions.retrieve(subscriptionId);
+      const slot = await slotOf(uid);
+      check('upgrade from monthly: quote = lifetime price less the unused time; the invoice charged exactly it, with a negative credit item',
+        answer.status === 'succeeded' && quote.amount === 14999 && quote.credit > 0 && quote.credit < 499 && invoice.status === 'paid' &&
+          invoice.total === quote.total && JSON.stringify(lines) === JSON.stringify([-quote.credit, 14999]),
+        `quote ${quote.amount} - ${quote.credit} = ${quote.total}; invoice ${invoice.status} ${invoice.total}, lines ${lines.join(',')}`);
+      check('upgrade from monthly: lifetime on, the subscription cancelled without proration, the ledger and email carry the credit',
+        sub.status === 'canceled' && slot.productId === 'web_lifetime' && slot.active === true && entry.status === 'paid' && entry.kind === 'upgrade' &&
+          entry.credit === quote.credit && entry.switchedFrom === 'web_monthly',
+        `subscription ${sub.status}; slot ${slot.productId}; ledger ${entry.status} ${entry.amount}/${entry.credit}/${entry.total}`);
+      const before = await afterwards(clock.customer);
+      await clock.advanceTo(clock.frozen + 45 * DAY);
+      const after = await afterwards(clock.customer);
+      const mail = (await db.collection(WEB_EMAIL_OUTBOX_COLLECTION).where('uid', '==', uid).get()).docs.map((doc) => doc.data());
+      check('upgrade: no invoice, credit note or balance follows the cancellation, past the old renewal date; one confirmation each',
+        JSON.stringify(after.invoices) === JSON.stringify(before.invoices) && after.creditNotes === 0 && after.balance === 0 &&
+          mail.filter((row) => row.kind === 'purchase_confirmed').length === 2 && mail.every((row) => row.kind === 'purchase_confirmed'),
+        `invoices ${after.invoices.join(' ')}; credit notes ${after.creditNotes}; balance ${after.balance}; outbox ${mail.map((row) => row.kind).join(',')}`);
+      clockNow = undefined;
+    }
 
-  // 10c. A cancelled subscription: the switch turns renewal back on.
-  {
-    const uid = SWITCH_CANCELLED;
-    const clock = await clockCustomer(uid, 'cancelled');
-    const { answer: bought } = await start(uid, 'web_monthly', 'tok_us', 499);
-    const subscriptionId = (await ledgerOf(bought.purchaseId)).stripe.subscriptionId;
-    await manageAs(uid, { action: 'cancel' });
-    await clock.advanceTo(clock.frozen + 10 * DAY);
-    const view = await handleGetWebSubscription({}, caller(uid), deps);
-    const { quote } = await manageAs(uid, { action: 'quote_switch_yearly' });
-    const answer = await switchAs(uid, quote);
-    const sub = await stripe.subscriptions.retrieve(subscriptionId);
-    const slot = await slotOf(uid);
-    check('switch from cancelled: yearly, renewal on again at Stripe and in the slot',
-      view.state === 'cancelling' && answer.status === 'succeeded' && sub.cancel_at_period_end === false && sub.cancel_at === null &&
-        sub.items.data[0].price.lookup_key === 'web_yearly_standard' && slot.status === 'active' && slot.autoRenewing === true && slot.web.cancelAtPeriodEnd === false,
-      `page ${view.state}; answer ${answer.status}; cancel_at_period_end ${sub.cancel_at_period_end}, cancel_at ${sub.cancel_at}; slot ${slot.status} renewing ${slot.autoRenewing}`);
-    clockNow = undefined;
-  }
+    // 11b. From a yearly plan reached by the switch: the credit is the yearly line's unused time.
+    {
+      const uid = UPGRADE_YEARLY;
+      const clock = await clockCustomer(uid, 'upgrade-yearly');
+      await start(uid, 'web_monthly', 'tok_us', 499);
+      await clock.advanceTo(clock.frozen + 10 * DAY);
+      const { quote: switchQuote } = await manageAs(uid, { action: 'quote_switch_yearly' });
+      const switched = await switchAs(uid, switchQuote);
+      await clock.advanceTo(clock.frozen + 100 * DAY);
+      const { quote, answer } = await lifetimeAs(uid);
+      const entry = await ledgerOf(answer.purchaseId);
+      const invoice = await stripe.invoices.retrieve(entry.stripe.invoiceId);
+      const expected = Math.floor(4999 * (365 - 90) / 365);
+      check('upgrade from a switched yearly: credited from the yearly line, charged exactly the quote',
+        switched.status === 'succeeded' && quote.creditedPlan === 'web_yearly' && Math.abs(quote.credit - expected) <= 14 &&
+          answer.status === 'succeeded' && invoice.total === quote.total && (await slotOf(uid)).productId === 'web_lifetime',
+        `credit ${quote.credit} (about ${expected}); total ${quote.total}; invoice ${invoice.total}`);
+      clockNow = undefined;
+    }
 
+    // 11c. A card that fails when charged: nothing changes, and the invoice is voided at once.
+    {
+      const uid = UPGRADE_DECLINE;
+      const clock = await clockCustomer(uid, 'upgrade-decline');
+      const { answer: bought } = await start(uid, 'web_monthly', 'tok_us', 499);
+      const subscriptionId = (await ledgerOf(bought.purchaseId)).stripe.subscriptionId;
+      const failing = await stripe.paymentMethods.attach('pm_card_chargeCustomerFail', { customer: clock.customer });
+      await stripe.subscriptions.update(subscriptionId, { default_payment_method: failing.id });
+      await clock.advanceTo(clock.frozen + 10 * DAY);
+      const { quote } = await manageAs(uid, { action: 'quote_lifetime' });
+      const refused = await refusalOf(manageAs(uid, { action: 'buy_lifetime', acceptedTotal: quote.total, attemptId: crypto.randomUUID(), lang: 'en' }));
+      const entry = (await db.collection(WEB_PURCHASES_COLLECTION).where('uid', '==', uid).where('kind', '==', 'upgrade').get()).docs[0]?.data();
+      const invoice = entry?.stripe.invoiceId ? await stripe.invoices.retrieve(entry.stripe.invoiceId) : undefined;
+      const sub = await stripe.subscriptions.retrieve(subscriptionId);
+      const slot = await slotOf(uid);
+      check('upgrade decline: refused card_declined, the subscription untouched, the invoice void, the ledger failed',
+        refused.startsWith('failed-precondition/card_declined') && sub.status === 'active' && invoice?.status === 'void' &&
+          slot.productId === 'web_monthly' && entry?.status === 'failed',
+        `${refused}; subscription ${sub.status}; invoice ${invoice?.status}; slot ${slot.productId}; ledger ${entry?.status}/${entry?.failure}`);
+      clockNow = undefined;
+    }
+  }
 } catch (error) {
   failed = true;
   console.log(`FAIL  unexpected error: ${error?.type ?? ''} ${error?.code ?? ''} ${reasonOf?.(error) ?? ''} ${error?.name ?? ''}`);

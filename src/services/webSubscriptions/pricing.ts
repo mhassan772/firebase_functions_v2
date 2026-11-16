@@ -300,20 +300,31 @@ export interface WebTotal {
 export async function quoteTotal(
   gateway: StripeGateway,
   price: WebPrice,
-  options: { taxEnabled: boolean; address?: Stripe.AddressParam }
+  options: {
+    taxEnabled: boolean;
+    address?: Stripe.AddressParam;
+    /** Lifetime only: the existing customer, taxed at its saved address. */
+    customer?: string;
+    /** Lifetime only: the unused time of a subscription, a second, negative item on the invoice. */
+    credit?: { amount: number; description: string };
+  }
 ): Promise<WebTotal> {
+  const credit = options.credit?.amount ?? 0;
   if (!options.taxEnabled) {
-    return { amount: price.amount, tax: 0, total: price.amount, currency: price.currency };
+    return { amount: price.amount, tax: 0, total: price.amount - credit, currency: price.currency };
   }
   const base = {
     automatic_tax: { enabled: true },
     currency: price.currency,
-    customer_details: { address: options.address ?? {} },
+    ...(options.customer ? { customer: options.customer } : { customer_details: { address: options.address ?? {} } }),
   };
+  const creditItems = options.credit
+    ? [{ amount: -options.credit.amount, currency: price.currency, description: options.credit.description }]
+    : [];
   const preview = await gateway.createInvoicePreview(
     price.interval
       ? { ...base, subscription_details: { items: [{ price: price.priceId }] } }
-      : { ...base, invoice_items: [{ price: price.priceId }] }
+      : { ...base, invoice_items: [{ price: price.priceId }, ...creditItems] }
   );
   if (preview.automatic_tax?.status === "requires_location_inputs") {
     throw refusal("invalid-argument", "The billing address is not complete enough to work out tax.", "billing_address_incomplete");
@@ -348,6 +359,41 @@ export function invoiceAmounts(invoice: Pick<Stripe.Invoice, "lines" | "total_ta
   }
   const tax = (invoice.total_taxes ?? []).reduce((sum, row) => sum + (row.amount ?? 0), 0);
   return { amount, credit, tax, total: invoice.total, currency: invoice.currency ?? "usd" };
+}
+
+/** Stripe's smallest charge in US dollars; a credit never brings a total below it. */
+export const MINIMUM_CHARGE_CENTS = 50;
+
+/**
+ * The credit for the unused time of a subscription's paid period, taken off an upgrade to
+ * lifetime, so nobody pays twice for the same days.
+ *
+ * Ours, not Stripe's: lifetime is a one-off invoice, so Stripe has no proration for it. The base
+ * is the amount before tax of the paid invoice's line with the latest `period.end` (on a plan
+ * switch's invoice the yearly line, never the credit line before it), prorated by the time left
+ * and rounded down to a cent. `kept` is the share of that payment not refunded (a partial refund
+ * by support credits only what the buyer still paid; a full refund credits nothing). Never
+ * negative, and never more than leaves `price` at Stripe's minimum charge.
+ */
+export function unusedTimeCredit(
+  paid: Pick<Stripe.Invoice, "lines"> | undefined,
+  now: Date,
+  price: number,
+  kept = 1
+): number {
+  let line: { amount: number; start: number; end: number } | undefined;
+  for (const row of paid?.lines?.data ?? []) {
+    const start = row.period?.start;
+    const end = row.period?.end;
+    if (row.amount <= 0 || typeof start !== "number" || typeof end !== "number") continue;
+    if (!line || end > line.end) line = { amount: row.amount, start: start * 1000, end: end * 1000 };
+  }
+  if (!line || line.end <= line.start) return 0;
+  const left = line.end - Math.max(now.getTime(), line.start);
+  if (left <= 0) return 0;
+  const share = Math.min(1, Math.max(0, kept));
+  const credit = Math.floor((line.amount * share * left) / (line.end - line.start));
+  return Math.max(0, Math.min(credit, price - MINIMUM_CHARGE_CENTS));
 }
 
 export interface BillingAddress {

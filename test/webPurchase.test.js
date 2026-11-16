@@ -15,7 +15,7 @@ const {
 const { existingPremium, purchaseBlockers, readWebAccountSlots, storeSubscriptionOf, webSlotView } = require("../lib/services/webSubscriptions/accountState");
 const constants = require("../lib/config/constants");
 const { stateDocumentId } = require("../lib/services/subscriptions/persistence");
-const { handleStartWebPurchase, handleGetWebPlans, handleFinishWebPurchase } = require("../lib/handlers/webPurchaseHandlers");
+const { handleStartWebPurchase, handleGetWebPlans, handleFinishWebPurchase, paidButNotShown, PURCHASE_LOCK_MS } = require("../lib/handlers/webPurchaseHandlers");
 const { handleGetWebSubscription, handleManageWebSubscription } = require("../lib/handlers/webManageHandlers");
 const { reasonOf } = require("../lib/utils/callableAuth");
 
@@ -122,13 +122,46 @@ describe("slot views and blockers", () => {
     const store = (platform, autoRenewing, active = true) => ({ ...slot({ platform, autoRenewing, active, environment: "production" }), web: undefined });
     assert.deepEqual(purchaseBlockers({}, NOW).blockers, []);
     assert.deepEqual(purchaseBlockers({ web: slot({}) }, NOW, "web_yearly").blockers, ["already_subscribed"]);
-    assert.deepEqual(purchaseBlockers({ web: slot({}) }, NOW, "web_lifetime").blockers, [], "lifetime may be bought over a subscription");
+    assert.deepEqual(purchaseBlockers({ web: slot({}) }, NOW, "web_lifetime").blockers, ["already_subscribed"], "a running subscription upgrades on /manage");
+    assert.deepEqual(purchaseBlockers({ web: slot({ status: "canceled" }) }, NOW, "web_lifetime").blockers, ["already_subscribed"], "cancelled but running too");
+    const pastDue = slot({ status: "grace_period", inGracePeriod: true }, { paymentFailed: true });
+    assert.deepEqual(purchaseBlockers({ web: pastDue }, NOW, "web_lifetime").blockers, [], "a failed renewal has no unused time: lifetime stays purchasable");
+    assert.deepEqual(purchaseBlockers({ web: pastDue }, NOW, "web_yearly").blockers, ["already_subscribed"]);
     assert.deepEqual(purchaseBlockers({ web: slot({ productId: "web_lifetime" }) }, NOW, "web_lifetime").blockers, ["lifetime_active"]);
     assert.deepEqual(purchaseBlockers({ google: store("google", true) }, NOW, "web_monthly").blockers, ["store_subscription_active"]);
     assert.deepEqual(purchaseBlockers({ google: store("google", true) }, NOW, "web_lifetime").blockers, []);
     assert.deepEqual(purchaseBlockers({ apple: store("apple", false) }, NOW, "web_monthly").blockers, []);
     assert.deepEqual(storeSubscriptionOf({ apple: store("apple", false), google: store("google", true) }, NOW), { platform: "google", autoRenewing: true });
     assert.equal(storeSubscriptionOf({ apple: store("apple", true, false) }, NOW), null);
+  });
+});
+
+describe("a paid purchase the slot does not show yet", () => {
+  const nowMs = NOW.getTime();
+  const holder = (fields = {}) => ({ purchaseId: "p".repeat(32), plan: "web_monthly", status: "paid", livemode: false, ...fields });
+  const view = (state, purchaseId = "p".repeat(32)) => ({ state, purchaseId });
+
+  test("blocks while paid, younger than the lock, and not on the slot", () => {
+    assert.equal(paidButNotShown(holder(), nowMs - 1000, nowMs, { state: "none" }, false), true);
+    assert.equal(paidButNotShown(holder(), nowMs - 1000, nowMs, view("ended"), false), true);
+    assert.equal(paidButNotShown(holder(), nowMs - 1000, nowMs, view("active", "q".repeat(32)), false), true, "the slot names another purchase");
+    assert.equal(paidButNotShown(holder({ plan: "web_lifetime" }), nowMs - 1000, nowMs, view("active", "q".repeat(32)), false), true);
+  });
+
+  test("never blocks once the slot shows it, after the lock, for a switch or an upgrade, or for an entry that is not paid", () => {
+    for (const state of ["active", "cancelling", "payment_failed", "needs_action"]) {
+      assert.equal(paidButNotShown(holder(), nowMs - 1000, nowMs, view(state), false), false, state);
+    }
+    assert.equal(paidButNotShown(holder({ plan: "web_lifetime" }), nowMs - 1000, nowMs, view("lifetime"), false), false);
+    assert.equal(paidButNotShown(holder(), nowMs - PURCHASE_LOCK_MS, nowMs, { state: "none" }, false), false);
+    assert.equal(paidButNotShown(holder({ kind: "switch" }), nowMs - 1000, nowMs, { state: "none" }, false), false);
+    assert.equal(paidButNotShown(holder({ kind: "upgrade", plan: "web_lifetime" }), nowMs - 1000, nowMs, view("active"), false), false);
+    for (const status of ["refunded", "failed", "abandoned", "pending", "disputed"]) {
+      assert.equal(paidButNotShown(holder({ status }), nowMs - 1000, nowMs, { state: "none" }, false), false, status);
+    }
+    assert.equal(paidButNotShown(undefined, nowMs - 1000, nowMs, { state: "none" }, false), false);
+    assert.equal(paidButNotShown(holder(), nowMs - 1000, nowMs, { state: "none" }, true), false, "a sandbox purchase never blocks a live one");
+    assert.equal(paidButNotShown(holder({ livemode: true }), nowMs - 1000, nowMs, { state: "none" }, false), false, "nor the other way round");
   });
 });
 

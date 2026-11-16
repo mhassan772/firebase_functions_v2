@@ -325,6 +325,14 @@ a {
   text-underline-offset: 3px;
 }
 
+/* A link the buyer is told to follow, such as a store's subscriptions page: a full-height target
+   wherever it sits, never a 24 px line of text. */
+a.action-link {
+  display: block;
+  min-height: 48px;
+  padding: 12px 0;
+}
+
 ul.links a {
   display: inline-block;
   min-height: 48px;
@@ -498,6 +506,11 @@ ul.links a {
   border-color: var(--focus);
 }
 
+/* A confirmation that is not destructive keeps the page's own colour. */
+.check.calm input {
+  accent-color: var(--green-text);
+}
+
 .foot {
   margin-top: auto;
   padding: 24px 0;
@@ -525,7 +538,7 @@ ul.links a {
   text-align: center;
 }
 
-/* /subscribe and /manage */
+/* The account page, at /subscribe and /manage */
 
 .plans {
   border: 0;
@@ -587,8 +600,33 @@ ul.links a {
   flex-direction: column;
 }
 
+.plan-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+}
+
 .plan-name {
   font-weight: 700;
+}
+
+/* The months the yearly plan saves; its words say it, the fill only marks it out. */
+.badge {
+  display: inline-block;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: var(--deep);
+  color: #ffffff;
+  font-size: 0.85rem;
+  font-weight: 700;
+  line-height: 1.8;
+}
+
+.plan-single {
+  border: 1.5px solid var(--line);
+  border-radius: 14px;
+  padding: 12px 14px;
 }
 
 .plan-hint {
@@ -605,12 +643,23 @@ ul.links a {
   min-height: 48px;
 }
 
-.terms ul {
-  margin-bottom: 8px;
+h3 {
+  font-size: 1rem;
+  line-height: 1.5;
+  margin: 16px 0 6px;
 }
 
-.quote h2 {
-  margin-top: 0;
+h3:focus {
+  outline: none;
+}
+
+.notice h3 {
+  margin: 0 0 6px;
+}
+
+.pay-note {
+  margin: 8px 0 0;
+  font-size: 0.95rem;
 }
 
 .breakdown {
@@ -638,18 +687,93 @@ ul.links a {
   outline: none;
 }
 
+/* The status block is filled in its tone's tint; the tone is also in its words. */
 .status {
-  border-inline-start: 4px solid var(--green-text);
-  padding-inline-start: 14px;
-  margin-bottom: 16px;
+  border-radius: 14px;
+  padding: 14px 16px;
+  margin: 8px 0 16px;
+  background: var(--surface);
+}
+
+.status.ok {
+  background: var(--mint);
 }
 
 .status.warn {
-  border-inline-start-color: var(--warn);
+  background: var(--warn-bg);
 }
 
-.status h2 {
-  margin-top: 0;
+.status p {
+  margin: 0 0 6px;
+}
+
+.status p:last-child {
+  margin-bottom: 0;
+}
+
+.status-title {
+  margin: 0 0 4px;
+  font-weight: 700;
+}
+
+.block {
+  margin: 0 0 16px;
+}
+
+.panel {
+  margin: 8px 0 16px;
+}
+
+.panel > h2:first-child,
+.block > h2:first-child {
+  margin-top: 8px;
+}
+
+.card-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px 12px;
+  margin: 0 0 16px;
+  padding: 6px 6px 6px 14px;
+  border: 1.5px solid var(--line);
+  border-radius: 14px;
+}
+
+[dir="rtl"] .card-row {
+  padding: 6px 14px 6px 6px;
+}
+
+.card-row p {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.btn.inline {
+  width: auto;
+  margin: 0;
+}
+
+.cancel-row,
+.sign-out {
+  text-align: center;
+  margin: 8px 0 0;
+}
+
+.link-button.danger-link {
+  color: var(--danger);
+}
+
+.link-button[aria-disabled="true"] {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.link-button[aria-busy="true"] {
+  opacity: 0.75;
+  cursor: progress;
 }
 
 .details li {
