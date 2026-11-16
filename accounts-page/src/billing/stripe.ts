@@ -1,4 +1,4 @@
-/// Stripe.js for `/subscribe` and `/manage`, loaded only when one of them needs it.
+/// Stripe.js for the account page, loaded only when it needs it.
 ///
 /// `@stripe/stripe-js/pure` adds the script on the first call, not on import, so no other page
 /// ever reaches js.stripe.com. Stripe.js fixes its locale per instance, so there is one instance
@@ -58,6 +58,10 @@ export interface MountedPayment {
   stripe: Stripe;
   elements: StripeElements;
   element: StripePaymentElement;
+  /// Where the card form says whether its fields are on screen.
+  onStatus: (status: CardFormStatus) => void;
+  /// An in-place update still waiting for Stripe's `update-end`.
+  pendingUpdate: { timer: ReturnType<typeof setTimeout> | null; shown: boolean; fallback: ReturnType<typeof setTimeout> | null } | null;
 }
 
 /// A container for the Payment Element; Arabic needs `dir="rtl"` on an ancestor, since the
@@ -66,7 +70,21 @@ export function paymentHost(id: string, lang: Lang): HTMLElement {
   return h("div", { id, class: "payment-host", dir: lang === "ar" ? "rtl" : "ltr" });
 }
 
+/// `loading` from the start of a mount until the Payment Element's `ready`, `failed` on a load
+/// error, and `loading` again during an in-place update that takes long enough to be seen.
+export type CardFormStatus = "loading" | "ready" | "failed";
+
+/// An update that Stripe applies within this time is not shown as loading, so a plan change that
+/// redraws nothing never flashes the line or speaks it.
+const UPDATE_LOADING_DELAY_MS = 150;
+/// A missing `update-end` never leaves the line up for good.
+const UPDATE_GIVE_UP_MS = 10_000;
+
 /// Creates a deferred-intent Elements group and mounts the Payment Element in `host`.
+///
+/// The one path for every mount, first or again (a language switch, the card panel however it was
+/// opened): `onStatus` hears `loading` at once and then `ready` or `failed`, from listeners attached
+/// before the element is mounted, so no early event is missed.
 export async function mountPayment(options: {
   publishableKey: string;
   lang: Lang;
@@ -74,21 +92,67 @@ export async function mountPayment(options: {
   amount: number;
   currency: string;
   host: HTMLElement;
+  onStatus: (status: CardFormStatus) => void;
 }): Promise<MountedPayment> {
+  options.onStatus("loading");
   const stripe = await stripeFor(options.publishableKey, options.lang);
   const elements = stripe.elements({
     ...(elementsOptions(options.kind, options.amount, options.currency) as StripeElementsOptionsMode),
     locale: options.lang,
     appearance: APPEARANCE,
     fonts: FONTS,
+    // Stripe's ready event can come before the fields are drawn; its own skeleton keeps the
+    // reserved area from looking blank in between.
+    loader: "always",
   });
   const element = elements.create("payment", PAYMENT_ELEMENT_OPTIONS);
+  const mounted: MountedPayment = { stripe, elements, element, onStatus: options.onStatus, pendingUpdate: null };
+  element.on("ready", () => mounted.onStatus("ready"));
+  element.on("loaderror", () => mounted.onStatus("failed"));
+  elements.on("update-end", () => finishUpdate(mounted));
   element.mount(options.host);
-  return { stripe, elements, element };
+  return mounted;
 }
 
-/// Switches the group to another plan's mode and amount without remounting, so typed card details stay.
+/// Switches the group to another plan's mode and amount without remounting, so typed card details
+/// stay. The form reads as loading only if Stripe has not finished redrawing within 150 ms.
 export function updatePayment(mounted: MountedPayment, kind: ElementsKind, amount: number, currency: string): void {
+  // A second change can arrive while the first one's loading line is already up. The line then
+  // belongs to this update too: without carrying it over, an update that finishes inside the
+  // delay would end with nothing to turn the line off.
+  const alreadyShown = mounted.pendingUpdate?.shown === true;
+  clearPendingUpdate(mounted);
+  const pending: NonNullable<MountedPayment["pendingUpdate"]> = { timer: null, shown: alreadyShown, fallback: null };
+  if (!alreadyShown) {
+    pending.timer = setTimeout(() => {
+      pending.timer = null;
+      pending.shown = true;
+      mounted.onStatus("loading");
+    }, UPDATE_LOADING_DELAY_MS);
+  }
+  pending.fallback = setTimeout(() => finishUpdate(mounted), UPDATE_GIVE_UP_MS);
+  mounted.pendingUpdate = pending;
   const { paymentMethodCreation: _ignored, ...options } = elementsOptions(kind, amount, currency);
   mounted.elements.update(options as Parameters<StripeElements["update"]>[0]);
+}
+
+function finishUpdate(mounted: MountedPayment): void {
+  const pending = mounted.pendingUpdate;
+  if (!pending) return;
+  clearPendingUpdate(mounted);
+  if (pending.shown) mounted.onStatus("ready");
+}
+
+function clearPendingUpdate(mounted: MountedPayment): void {
+  const pending = mounted.pendingUpdate;
+  if (!pending) return;
+  if (pending.timer) clearTimeout(pending.timer);
+  if (pending.fallback) clearTimeout(pending.fallback);
+  mounted.pendingUpdate = null;
+}
+
+/// Removes the element and anything still waiting on it.
+export function destroyPayment(mounted: MountedPayment): void {
+  clearPendingUpdate(mounted);
+  mounted.element.destroy();
 }

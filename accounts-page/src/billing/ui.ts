@@ -1,4 +1,4 @@
-/// Pieces `/subscribe` and `/manage` share: the sign-in gate, notices, links and regions that
+/// Pieces of the account page: the sign-in gate, the account line, notices, links and regions that
 /// update in place.
 
 import { signOut } from "firebase/auth";
@@ -8,7 +8,7 @@ import { renderSignIn, type MountedView } from "../auth/signIn";
 import { STORE_SUBSCRIPTION_LINKS } from "../delete/storeSubscriptions";
 import { h, ltr } from "../dom";
 import { STRINGS, type Lang, type Strings } from "../i18n";
-import { storeName, type StorePlatform } from "./logic";
+import { storeWords, type StorePlatform } from "./logic";
 
 // ---------------------------------------------------------------------------
 // Sign-in gate, the same as `/delete`'s: session persistence, guests never count.
@@ -117,7 +117,7 @@ export function gateStep(gate: Gate, s: Strings, retry: () => void): Node[] {
       return loadingStep(s.checkingSignIn);
     case "initFailed":
       return [
-        notice("danger", "!", h("p", { class: "strong" }, s.signInFailedTitle), h("p", {}, s.networkBody)),
+        notice("danger", s, h("p", { class: "strong" }, s.signInFailedTitle), h("p", {}, s.networkBody)),
         h("button", { type: "button", id: "init-retry", class: "btn", onclick: retry }, s.retry),
       ];
     case "signedOut":
@@ -131,14 +131,18 @@ export function loadingStep(text: string): Node[] {
   return [h("div", { class: "spinner", "aria-hidden": "true" }), h("p", { class: "center", role: "status", id: "loading-status", tabindex: -1 }, text)];
 }
 
-/// "Account: name@example.com · Not you? Sign out".
-export function accountRow(signedIn: SignedIn, s: Strings, options: { busy: boolean; onSignOut: () => void }): Node {
+/// "Account: name@example.com", plain text at the top of the card.
+export function accountLine(signedIn: SignedIn, s: Strings): Node {
   const user = signedIn.user;
   const provider = signedIn.provider === "apple" ? s.appleName : signedIn.provider === "google" ? s.googleName : "";
+  return h("p", { class: "account" }, user.email ? h("span", {}, `${s.signedInAs} `, ltr(user.email)) : s.signedInWith(provider));
+}
+
+/// "Not you? Sign out", at the bottom of the card after the content.
+export function signOutButton(s: Strings, options: { busy: boolean; onSignOut: () => void }): Node {
   return h(
-    "div",
-    { class: "account row" },
-    user.email ? h("span", {}, `${s.signedInAs} `, ltr(user.email)) : h("span", {}, s.signedInWith(provider)),
+    "p",
+    { class: "sign-out" },
     h(
       "button",
       {
@@ -158,30 +162,27 @@ export function accountRow(signedIn: SignedIn, s: Strings, options: { busy: bool
 // ---------------------------------------------------------------------------
 // Small pieces
 
-/// A coloured notice that always pairs its colour with an icon and its own words.
-export function notice(tone: "info" | "warn" | "danger", glyph: string, ...content: (Node | null)[]): HTMLElement {
+/// A coloured notice that pairs its colour with an icon and its own words; a warning or an error
+/// also starts with a hidden "Attention", so its tone is spoken and not only seen.
+export function notice(tone: "info" | "warn" | "danger", s: Strings, ...content: (Node | null)[]): HTMLElement {
+  const [first, ...rest] = content.filter((node): node is Node => node !== null);
+  if (tone !== "info" && first instanceof HTMLElement) first.prepend(h("span", { class: "sr-only" }, `${s.attention} `));
   return h(
     "div",
     { class: `notice ${tone}` },
-    h("span", { class: "notice-icon", "aria-hidden": "true" }, glyph),
-    h("div", { class: "notice-body" }, ...content),
+    h("span", { class: "notice-icon", "aria-hidden": "true" }, tone === "info" ? "i" : "!"),
+    h("div", { class: "notice-body" }, ...(first ? [first] : []), ...rest),
   );
 }
 
-export function externalLink(href: string, text: string, s: Strings): Node {
-  return h("a", { href, target: "_blank", rel: "noopener noreferrer" }, text, h("span", { class: "sr-only" }, ` ${s.opensInNewTab}`));
+export function externalLink(href: string, text: string, s: Strings, className?: string): Node {
+  return h("a", { href, target: "_blank", rel: "noopener noreferrer", class: className }, text, h("span", { class: "sr-only" }, ` ${s.opensInNewTab}`));
 }
 
-export { storeName };
-
-/// The store's own page for cancelling, for whichever account is signed in to the store.
-export function storeCancelLink(store: StorePlatform, s: Strings): Node {
-  return externalLink(STORE_SUBSCRIPTION_LINKS[store], s.cancelInStore(storeName(store, s)), s);
-}
-
-/// A link to another page of this site, keeping the page's language.
-export function pageLink(path: "/subscribe" | "/manage", text: string, lang: Lang, className?: string): Node {
-  return h("a", { href: lang === "en" ? `${path}?lang=en` : path, class: className }, text);
+/// The store's own page for its subscriptions, for whichever account is signed in to the store;
+/// an action the buyer is told to take, so a full-height target, never a line of text.
+export function storeManageLink(store: StorePlatform, s: Strings, lang: Lang, className = "action-link"): Node {
+  return externalLink(STORE_SUBSCRIPTION_LINKS[store], s.manageInStore(storeWords(store, s, lang)), s, className);
 }
 
 // ---------------------------------------------------------------------------

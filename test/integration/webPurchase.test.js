@@ -232,7 +232,8 @@ describe("getWebPlans", () => {
     let plans = await handleGetWebPlans({}, caller(), env.deps);
     assert.deepEqual(plans.current, { state: "active", plan: "web_monthly" });
     assert.deepEqual(plans.blockers, ["already_subscribed"]);
-    await buy(env, "web_lifetime");
+    const { quote } = await handleManageWebSubscription({ action: "quote_lifetime" }, caller(), env.deps);
+    await handleManageWebSubscription({ action: "buy_lifetime", acceptedTotal: quote.total, attemptId: "upgrade-attempt-00000001", lang: "en" }, caller(), env.deps);
     plans = await handleGetWebPlans({}, caller(), env.deps);
     assert.deepEqual(plans.current, { state: "lifetime", plan: "web_lifetime" });
     assert.deepEqual(plans.blockers, ["lifetime_active"]);
@@ -494,10 +495,18 @@ describe("startWebPurchase", () => {
     await refused(handleFinishWebPurchase({ purchaseId: "nope" }, caller(), env.deps), "invalid-argument", "invalid_request");
   });
 
-  test("lifetime bought while a web subscription is active: the subscription is cancelled once lifetime is paid", async () => {
+  test("lifetime at full price: refused over a running subscription, bought over a past-due one, which is then cancelled", async () => {
     const env = await setup();
     const monthly = await buy(env, "web_monthly");
     const subscriptionId = (await read(ledgerRef(monthly.result.purchaseId))).stripe.subscriptionId;
+    env.fake.resetCalls();
+    await refused(buy(env, "web_lifetime"), "failed-precondition", "already_subscribed");
+    await handleManageWebSubscription({ action: "cancel" }, caller(), env.deps);
+    await refused(buy(env, "web_lifetime"), "failed-precondition", "already_subscribed");
+    assert.deepEqual(creates(env.fake), []);
+    await handleManageWebSubscription({ action: "resume" }, caller(), env.deps);
+    env.fake.advance(31 * DAY);
+    env.fake.renew(subscriptionId, { paid: false });
     const lifetime = await buy(env, "web_lifetime");
     assert.equal(lifetime.result.status, "succeeded");
     assert.equal(env.fake.state.subscriptions.get(subscriptionId).status, "canceled");
@@ -572,7 +581,9 @@ describe("startWebPurchase", () => {
 
   test("a web subscription alone needs no acknowledgement, and the flag never lifts a blocker", async () => {
     const env = await setup();
-    await buy(env, "web_monthly");
+    const monthly = await buy(env, "web_monthly");
+    env.fake.advance(31 * DAY);
+    env.fake.renew((await read(ledgerRef(monthly.result.purchaseId))).stripe.subscriptionId, { paid: false });
     assert.equal((await buy(env, "web_lifetime")).result.status, "succeeded");
     await seedStoreSlot("google");
     await refused(buy(env, "web_yearly", acknowledged), "failed-precondition", "lifetime_active");
@@ -697,11 +708,12 @@ describe("getWebSubscription", () => {
 
   test("none, then active with its renewal, amount and card", async () => {
     const env = await setup();
-    assert.deepEqual(await get(env), { state: "none", storeSubscription: null, livemode: false, publishableKey: "pk_test_fake" });
+    assert.deepEqual(await get(env), { state: "none", storeSubscription: null, premium: [], livemode: false, publishableKey: "pk_test_fake" });
     // A key of the other mode is never handed to the page; the state is still readable.
     assert.deepEqual(await handleGetWebSubscription({}, caller(), { ...env.deps, publishableKey: "pk_live_wrong" }), {
       state: "none",
       storeSubscription: null,
+      premium: [],
       livemode: false,
     });
     const { result } = await buy(env, "web_monthly", { token: { brand: "mastercard" } });
@@ -716,9 +728,22 @@ describe("getWebSubscription", () => {
       currency: "usd",
       card: { brand: "mastercard", last4: "4242" },
       storeSubscription: null,
+      premium: [{ source: "web", kind: "subscription", plan: "web_monthly", state: "active", renews: true, until: slot.web.paidThrough.toDate().toISOString() }],
       livemode: false,
       publishableKey: "pk_test_fake",
     });
+  });
+
+  test("premium lists every source from the purchase page's reader, store and manual included", async () => {
+    const env = await setup();
+    await seedStoreSlot("apple", { autoRenewing: false });
+    await seedManualSlot({ days: 30 });
+    const view = await get(env);
+    assert.equal(view.state, "none");
+    assert.deepEqual(view.premium.map((source) => [source.source, source.kind, source.state, source.renews]), [
+      ["apple", "subscription", "cancelling", false],
+      ["manual", "grant", "active", false],
+    ]);
   });
 
   test("cancelling, payment_failed, needs_action and ended", async () => {
@@ -1368,6 +1393,20 @@ describe("switch to yearly", () => {
     assert.equal((await outboxRows()).filter((row) => row.kind === "switched_yearly").length, 1);
   });
 
+  test("a failed switch entry whose invoice was paid, no longer the latest paid one, is healed by the sync with one email", async () => {
+    const { env, sub } = await monthly({}, { requiresAction: true });
+    const { quote } = await manage(env, { action: "quote_switch_yearly" });
+    const answer = await switchCall(env, quote);
+    const invoiceId = sub().latest_invoice;
+    await ledgerRef(answer.purchaseId).update({ status: "failed", failure: "declined" });
+    env.fake.completeAction(env.fake.state.invoices.get(invoiceId).payments[0].payment.payment_intent);
+    env.fake.advance(370 * DAY);
+    env.fake.renew(sub().id);
+    await syncWebEntitlement(UID, { firestore: db(), gateway: env.fake, notify: env.deps.notify });
+    assert.equal((await read(ledgerRef(answer.purchaseId))).status, "paid");
+    assert.equal((await outboxRows()).filter((row) => row.kind === "switched_yearly").length, 1);
+  });
+
   test("the manage readers treat null as not given for optional fields", async () => {
     const { env } = await monthly();
     const { quote } = await manage(env, { action: "quote_switch_yearly" });
@@ -1391,6 +1430,359 @@ describe("switch to yearly", () => {
     env.fake.resetCalls();
     await refused(switchCall(env, quote), "failed-precondition", "purchase_in_progress");
     assert.deepEqual(updates(env.fake), []);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Upgrading to lifetime (stage J)
+// ---------------------------------------------------------------------------
+
+describe("upgrade to lifetime", () => {
+  const manage = (env, data, uid = UID) => handleManageWebSubscription(data, caller(uid), env.deps);
+  const outboxRows = async () => (await db().collection(WEB_EMAIL_OUTBOX_COLLECTION).get()).docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+  let attempts = 0;
+  const attemptId = () => `upgrade-${Date.now()}-${++attempts}-aaaaaaaa`;
+  const sweep = (env) => sweepPendingWebPurchases({ firestore: db(), gateway: env.fake, now: env.deps.now }, {
+    now: env.deps.now(), deadline: new Date(Date.now() + 60_000), operationId: "sweep",
+  });
+
+  /** A web subscription ten days in, with the billing emails queued; `card` replaces its saved card. */
+  async function subscribed(plan = "web_monthly", card, options = {}) {
+    const env = await setup(options);
+    env.deps.notify = billingNotifier(db());
+    const { result } = await buy(env, plan, { token: { country: "CA", billing: { country: "CA", state: "ON" } } });
+    const subscriptionId = (await read(ledgerRef(result.purchaseId))).stripe.subscriptionId;
+    if (card) env.fake.setDefaultCard(subscriptionId, card);
+    env.fake.advance(10 * DAY);
+    // The credit is ours, worked out at the callable's now, which must be Stripe's clock here.
+    env.deps.now = () => new Date(env.fake.nowSec * 1000);
+    return { env, firstId: result.purchaseId, subscriptionId, sub: () => env.fake.state.subscriptions.get(subscriptionId) };
+  }
+  const buyCall = (env, quote, id = attemptId(), lang = "ar") => manage(env, { action: "buy_lifetime", acceptedTotal: quote.total, attemptId: id, lang });
+  const lifetimeInvoices = (fake) => [...fake.state.invoices.values()].filter((invoice) => invoice.billing_reason === "manual");
+  const creditOf = (fake, invoiceId) => {
+    const line = fake.state.invoices.get(invoiceId).lines.data.reduce((latest, row) => (row.period.end > (latest?.period.end ?? 0) && row.amount > 0 ? row : latest), undefined);
+    return Math.floor((line.amount * (line.period.end - fake.nowSec)) / (line.period.end - line.period.start));
+  };
+
+  test("the quote: the lifetime price, the unused time of the paid period as a credit, the total and the card; nothing written", async () => {
+    const { env, sub } = await subscribed();
+    const credit = creditOf(env.fake, sub().latest_invoice);
+    const before = await ledgerDocs();
+    env.fake.resetCalls();
+    const answer = await manage(env, { action: "quote_lifetime" });
+    assert.deepEqual(answer, {
+      status: "quote",
+      quote: { plan: "web_lifetime", tier: "standard", amount: 14999, credit, tax: 0, total: 14999 - credit, currency: "usd", creditedPlan: "web_monthly", card: { brand: "visa", last4: "4242" } },
+    });
+    assert.ok(credit > 300 && credit < 499, `credit ${credit}`);
+    assert.deepEqual(await ledgerDocs(), before);
+    assert.deepEqual(creates(env.fake), []);
+  });
+
+  test("an upgrade that succeeds: a lifetime invoice with the negative credit item, the saved card, lifetime on, the subscription cancelled after payment, one email", async () => {
+    const { env, firstId, subscriptionId, sub } = await subscribed();
+    const { quote } = await manage(env, { action: "quote_lifetime" });
+    env.fake.resetCalls();
+    const answer = await buyCall(env, quote);
+    assert.equal(answer.status, "succeeded");
+    const [invoice] = lifetimeInvoices(env.fake);
+    assert.deepEqual(invoice.lines.data.map((line) => line.amount), [-quote.credit, 14999]);
+    assert.equal(invoice.lines.data[0].description, "خصم المدة غير المستخدمة من اشتراكك الشهري");
+    assert.equal(invoice.total, quote.total);
+    assert.equal(invoice.status, "paid");
+    const confirm = env.fake.calls.find((call) => call.name === "confirmPaymentIntent");
+    assert.equal(confirm.args.key, `confirm_${answer.purchaseId}`);
+    const names = env.fake.callNames();
+    assert.ok(names.lastIndexOf("cancelSubscription") > names.indexOf("confirmPaymentIntent"), "cancelled only after the payment");
+    assert.deepEqual(env.fake.calls.filter((call) => call.name === "cancelSubscription").map((call) => call.args), [{ id: subscriptionId }], "no proration, no final invoice");
+    assert.equal(sub().status, "canceled");
+    assert.equal(env.fake.calls.filter((call) => call.name === "updateSubscription").length, 0);
+
+    const slot = await read(webSlotRef());
+    assert.deepEqual([slot.productId, slot.active, slot.web.purchaseId], ["web_lifetime", true, answer.purchaseId]);
+    const entry = await read(ledgerRef(answer.purchaseId));
+    assert.deepEqual([entry.status, entry.kind, entry.plan, entry.switchedFrom, entry.amount, entry.credit, entry.total],
+      ["paid", "upgrade", "web_lifetime", "web_monthly", 14999, quote.credit, quote.total]);
+    assert.equal(entry.stripe.subscriptionId, undefined);
+    assert.deepEqual([entry.billingCountry, entry.billingState, entry.lang], ["CA", "ON", "ar"]);
+    const rows = await outboxRows();
+    assert.deepEqual(rows.map((row) => row.id).sort(), [`confirmed_${answer.purchaseId}`, `confirmed_${firstId}`].sort());
+    const email = rows.find((row) => row.id === `confirmed_${answer.purchaseId}`);
+    assert.deepEqual([email.plan, email.amount, email.credit, email.total, email.creditedPlan, email.lang], ["web_lifetime", 14999, quote.credit, quote.total, "web_monthly", "ar"]);
+    await syncWebEntitlement(UID, { firestore: db(), gateway: env.fake, notify: env.deps.notify });
+    assert.equal((await outboxRows()).length, 2, "nothing for the stopped subscription");
+  });
+
+  test("from a switched yearly plan the credit is the yearly line's unused time", async () => {
+    const { env, sub } = await subscribed();
+    const { quote: switchQuote } = await manage(env, { action: "quote_switch_yearly" });
+    await manage(env, { action: "switch_yearly", acceptedTotal: switchQuote.total, attemptId: attemptId(), lang: "en" });
+    env.fake.advance(100 * DAY);
+    const { quote } = await manage(env, { action: "quote_lifetime" });
+    assert.equal(quote.creditedPlan, "web_yearly");
+    assert.equal(quote.credit, creditOf(env.fake, sub().latest_invoice));
+    assert.ok(quote.credit > 3000, `credit ${quote.credit}`);
+    assert.equal((await buyCall(env, quote, attemptId(), "en")).status, "succeeded");
+    assert.equal(lifetimeInvoices(env.fake)[0].lines.data[0].description, "Credit for the unused time of your yearly plan");
+  });
+
+  test("a stale acceptedTotal re-prices with a fresh quote; nothing is written or charged", async () => {
+    const { env } = await subscribed();
+    const { quote } = await manage(env, { action: "quote_lifetime" });
+    const before = await ledgerDocs();
+    env.fake.resetCalls();
+    assert.deepEqual(await buyCall(env, { total: quote.total + 1 }), { status: "reprice", quote });
+    assert.deepEqual(creates(env.fake), []);
+    assert.deepEqual(await ledgerDocs(), before);
+  });
+
+  test("a decline leaves the subscription untouched, voids the invoice at once and fails the entry; the same attempt repeats it", async () => {
+    const { env, sub } = await subscribed("web_monthly", { failsCharges: true, declineCode: "insufficient_funds" });
+    const slotBefore = await read(webSlotRef());
+    const { quote } = await manage(env, { action: "quote_lifetime" });
+    const id = attemptId();
+    const declined = await refused(buyCall(env, quote, id), "failed-precondition", "card_declined");
+    assert.equal(declined.details.category, "insufficient_funds");
+    assert.equal(lifetimeInvoices(env.fake)[0].status, "void");
+    assert.equal(sub().status, "active");
+    const slot = await read(webSlotRef());
+    assert.deepEqual([slot.productId, slot.web.paidThrough.toMillis()], ["web_monthly", slotBefore.web.paidThrough.toMillis()]);
+    const entry = (await ledgerDocs()).find((row) => row.kind === "upgrade");
+    assert.deepEqual([entry.status, entry.failure], ["failed", "insufficient_funds"]);
+    env.fake.resetCalls();
+    await refused(buyCall(env, quote, id), "failed-precondition", "card_declined");
+    assert.deepEqual(creates(env.fake), []);
+  });
+
+  test("a repeated attemptId charges once", async () => {
+    const { env } = await subscribed();
+    const { quote } = await manage(env, { action: "quote_lifetime" });
+    const id = attemptId();
+    const first = await buyCall(env, quote, id);
+    env.fake.resetCalls();
+    assert.deepEqual(await buyCall(env, quote, id), first);
+    assert.deepEqual(creates(env.fake), []);
+    assert.equal(lifetimeInvoices(env.fake).length, 1);
+  });
+
+  test("the same attempt retried while the first call is making its invoice: no write, purchase_in_progress, then paid", async () => {
+    const { env } = await subscribed();
+    const { quote } = await manage(env, { action: "quote_lifetime" });
+    const createInvoice = env.fake.createInvoice;
+    let entered;
+    let release;
+    const inside = new Promise((resolve) => (entered = resolve));
+    const gate = new Promise((resolve) => (release = resolve));
+    env.fake.createInvoice = async (...args) => {
+      entered();
+      await gate;
+      return createInvoice(...args);
+    };
+    const id = attemptId();
+    const first = buyCall(env, quote, id);
+    await inside;
+    const purchaseId = purchaseIdFor(UID, id);
+    const before = await read(ledgerRef(purchaseId));
+    await refused(buyCall(env, quote, id), "failed-precondition", "purchase_in_progress");
+    assert.deepEqual(await read(ledgerRef(purchaseId)), before);
+    release();
+    assert.deepEqual(await first, { status: "succeeded", purchaseId });
+    assert.equal((await read(ledgerRef(purchaseId))).status, "paid");
+  });
+
+  test("a bank step: requires_action with the invoice PaymentIntent's secret, still waiting, then finished", async () => {
+    const { env, sub } = await subscribed("web_monthly", { requiresAction: true });
+    const { quote } = await manage(env, { action: "quote_lifetime" });
+    const answer = await buyCall(env, quote);
+    assert.equal(answer.status, "requires_action");
+    const [invoice] = lifetimeInvoices(env.fake);
+    const pi = env.fake.state.paymentIntents.get(invoice.payments[0].payment.payment_intent);
+    assert.equal(answer.clientSecret, pi.client_secret);
+    assert.deepEqual(await manage(env, { action: "finish_lifetime", purchaseId: answer.purchaseId }), answer);
+    await refused(manage(env, { action: "finish_switch_yearly", purchaseId: answer.purchaseId }), "not-found", "purchase_not_found");
+    await refused(buyCall(env, quote), "failed-precondition", "purchase_in_progress");
+    assert.equal(sub().status, "active");
+    env.fake.completeAction(pi.id);
+    assert.deepEqual(await manage(env, { action: "finish_lifetime", purchaseId: answer.purchaseId }), { status: "succeeded", purchaseId: answer.purchaseId });
+    assert.equal((await read(webSlotRef())).productId, "web_lifetime");
+    assert.equal(sub().status, "canceled");
+  });
+
+  test("an abandoned bank step is swept after 15 minutes: the invoice voided, the entry failed, the subscription untouched", async () => {
+    const { env, sub } = await subscribed("web_monthly", { requiresAction: true });
+    const { quote } = await manage(env, { action: "quote_lifetime" });
+    const answer = await buyCall(env, quote);
+    await ageLock(answer.purchaseId, 20);
+    await sweep(env);
+    assert.equal(lifetimeInvoices(env.fake)[0].status, "void");
+    const entry = await read(ledgerRef(answer.purchaseId));
+    assert.deepEqual([entry.status, entry.failure], ["failed", "not_completed"]);
+    assert.equal(sub().status, "active");
+    assert.equal((await read(webSlotRef())).productId, "web_monthly");
+  });
+
+  test("the sweep finds an old attempt's invoice the call never recorded, by its metadata, and voids it", async () => {
+    const { env } = await subscribed("web_monthly", { requiresAction: true });
+    const { quote } = await manage(env, { action: "quote_lifetime" });
+    const answer = await buyCall(env, quote);
+    await ledgerRef(answer.purchaseId).update({
+      "stripe.invoiceId": admin.firestore.FieldValue.delete(),
+      "stripe.paymentIntentId": admin.firestore.FieldValue.delete(),
+    });
+    await ageLock(answer.purchaseId, 20);
+    await sweep(env);
+    assert.equal(lifetimeInvoices(env.fake)[0].status, "void");
+    assert.equal((await read(ledgerRef(answer.purchaseId))).status, "failed");
+  });
+
+  test("a full refund of the lifetime payment ends lifetime; the stopped subscription is not restored", async () => {
+    const { env, sub } = await subscribed();
+    const { quote } = await manage(env, { action: "quote_lifetime" });
+    const answer = await buyCall(env, quote);
+    env.fake.refund((await read(ledgerRef(answer.purchaseId))).stripe.chargeId);
+    await syncWebEntitlement(UID, { firestore: db(), gateway: env.fake, now: env.deps.now });
+    const slot = await read(webSlotRef());
+    // The cancelled subscription decides the slot again, as for any refunded lifetime with one.
+    assert.deepEqual([slot.productId, slot.status, slot.active], ["web_monthly", "expired", false]);
+    assert.equal((await read(ledgerRef(answer.purchaseId))).status, "refunded");
+    assert.equal(sub().status, "canceled");
+  });
+
+  test("an older upgrade left at its bank step past the lock is abandoned and voided by a second upgrade; its finish refuses", async () => {
+    const { env, sub } = await subscribed("web_monthly", { requiresAction: true });
+    const { quote } = await manage(env, { action: "quote_lifetime" });
+    const first = await buyCall(env, quote);
+    assert.equal(first.status, "requires_action");
+    const firstInvoice = (await read(ledgerRef(first.purchaseId))).stripe.invoiceId;
+    await ageLock(first.purchaseId, 11);
+    env.fake.setDefaultCard(sub().id);
+    const second = await buyCall(env, (await manage(env, { action: "quote_lifetime" })).quote);
+    assert.equal(second.status, "succeeded");
+    assert.equal(env.fake.state.invoices.get(firstInvoice).status, "void");
+    assert.equal((await read(ledgerRef(first.purchaseId))).status, "abandoned");
+    await refused(manage(env, { action: "finish_lifetime", purchaseId: first.purchaseId }), "failed-precondition", "card_declined");
+    assert.equal(lifetimeInvoices(env.fake).filter((invoice) => invoice.status === "paid").length, 1);
+  });
+
+  test("an older upgrade left at its bank step is abandoned by a switch, so it can never cancel the yearly plan just paid for", async () => {
+    const { env, sub } = await subscribed("web_monthly", { requiresAction: true });
+    const first = await buyCall(env, (await manage(env, { action: "quote_lifetime" })).quote);
+    const firstInvoice = (await read(ledgerRef(first.purchaseId))).stripe.invoiceId;
+    await ageLock(first.purchaseId, 11);
+    env.fake.setDefaultCard(sub().id);
+    const { quote } = await manage(env, { action: "quote_switch_yearly" });
+    assert.equal((await manage(env, { action: "switch_yearly", acceptedTotal: quote.total, attemptId: attemptId(), lang: "en" })).status, "succeeded");
+    assert.equal(env.fake.state.invoices.get(firstInvoice).status, "void");
+    await refused(manage(env, { action: "finish_lifetime", purchaseId: first.purchaseId }), "failed-precondition", "card_declined");
+    assert.deepEqual([sub().status, (await read(webSlotRef())).productId], ["active", "web_yearly"]);
+  });
+
+  test("an upgrade while a switch holds the lock, and a switch while an upgrade does: purchase_in_progress, nothing charged", async () => {
+    const { env } = await subscribed("web_monthly", { requiresAction: true });
+    const { quote: switchQuote } = await manage(env, { action: "quote_switch_yearly" });
+    const switching = await manage(env, { action: "switch_yearly", acceptedTotal: switchQuote.total, attemptId: attemptId(), lang: "en" });
+    assert.equal(switching.status, "requires_action");
+    env.fake.resetCalls();
+    await refused(buyCall(env, (await manage(env, { action: "quote_lifetime" })).quote), "failed-precondition", "purchase_in_progress");
+    assert.deepEqual(creates(env.fake), []);
+
+    await clearFirestore();
+    const other = await subscribed("web_monthly", { requiresAction: true });
+    assert.equal((await buyCall(other.env, (await manage(other.env, { action: "quote_lifetime" })).quote)).status, "requires_action");
+    other.env.fake.resetCalls();
+    const { quote } = await manage(other.env, { action: "quote_switch_yearly" });
+    await refused(manage(other.env, { action: "switch_yearly", acceptedTotal: quote.total, attemptId: attemptId(), lang: "en" }), "failed-precondition", "purchase_in_progress");
+    assert.equal(other.env.fake.calls.filter((call) => call.name === "updateSubscription").length, 0);
+  });
+
+  test("the same attempt retried between the invoice being recorded and confirmed: purchase_in_progress, nothing voided, then paid", async () => {
+    const { env } = await subscribed();
+    const { quote } = await manage(env, { action: "quote_lifetime" });
+    const confirm = env.fake.confirmPaymentIntent;
+    let entered;
+    let release;
+    const inside = new Promise((resolve) => (entered = resolve));
+    const gate = new Promise((resolve) => (release = resolve));
+    env.fake.confirmPaymentIntent = async (...args) => {
+      entered();
+      await gate;
+      return confirm(...args);
+    };
+    const id = attemptId();
+    const first = buyCall(env, quote, id);
+    await inside;
+    const purchaseId = purchaseIdFor(UID, id);
+    const before = await read(ledgerRef(purchaseId));
+    assert.ok(before.stripe.invoiceId, "the invoice is recorded");
+    await refused(buyCall(env, quote, id), "failed-precondition", "purchase_in_progress");
+    assert.deepEqual(await read(ledgerRef(purchaseId)), before);
+    assert.equal(env.fake.state.invoices.get(before.stripe.invoiceId).status, "open");
+    release();
+    assert.deepEqual(await first, { status: "succeeded", purchaseId });
+  });
+
+  test("a webhook sync before the callable settles the upgrade: one confirmation", async () => {
+    const { env } = await subscribed();
+    const { quote } = await manage(env, { action: "quote_lifetime" });
+    const confirm = env.fake.confirmPaymentIntent;
+    env.fake.confirmPaymentIntent = async (...args) => {
+      const intent = await confirm(...args);
+      await syncWebEntitlement(UID, { firestore: db(), gateway: env.fake, notify: env.deps.notify, now: env.deps.now }, { trigger: "webhook" });
+      return intent;
+    };
+    const answer = await buyCall(env, quote);
+    assert.equal(answer.status, "succeeded");
+    assert.equal((await outboxRows()).filter((row) => row.id === `confirmed_${answer.purchaseId}`).length, 1);
+    assert.equal((await read(ledgerRef(answer.purchaseId))).status, "paid");
+  });
+
+  test("a partly refunded payment credits only what is still paid; a fully refunded one credits nothing", async () => {
+    const { env, firstId, sub } = await subscribed("web_yearly");
+    const whole = (await manage(env, { action: "quote_lifetime" })).quote.credit;
+    env.fake.refund((await read(ledgerRef(firstId))).stripe.chargeId, 2500);
+    const partly = (await manage(env, { action: "quote_lifetime" })).quote.credit;
+    assert.ok(Math.abs(partly - Math.floor(whole * (4999 - 2500) / 4999)) <= 1, `${partly} against ${whole}`);
+    env.fake.refund((await read(ledgerRef(firstId))).stripe.chargeId);
+    // A full refund revokes the subscription, so there is nothing left to upgrade.
+    await refused(manage(env, { action: "quote_lifetime" }), "failed-precondition", "no_subscription");
+    assert.ok(sub());
+  });
+
+  test("refusals: payment_due, a lifetime owner, sales off, not a tester, throttled; bad requests; null as not given", async () => {
+    const pastDue = await setup();
+    const bought = await buy(pastDue, "web_yearly");
+    pastDue.fake.advance(366 * DAY);
+    pastDue.fake.renew((await read(ledgerRef(bought.result.purchaseId))).stripe.subscriptionId, { paid: false });
+    const due = await refused(manage(pastDue, { action: "quote_lifetime" }), "failed-precondition", "lifetime_unavailable");
+    assert.equal(due.details.cause, "payment_due");
+    await clearFirestore();
+
+    const owner = await setup();
+    await buy(owner, "web_lifetime");
+    await refused(manage(owner, { action: "quote_lifetime" }), "failed-precondition", "no_subscription");
+    await clearFirestore();
+
+    // Two attempts: the purchase was counted at the real time, these at the fake clock's, ten days on.
+    const { env } = await subscribed("web_monthly", undefined, { limits: { uidPerWindow: 2, ipPerWindow: 100, windowMs: DAY * 1000 } });
+    await db().collection("web_pricing").doc("config").update({ salesEnabled: false });
+    await refused(manage(env, { action: "quote_lifetime" }), "failed-precondition", "sales_disabled");
+    await refused(buyCall(env, { total: 1 }), "failed-precondition", "sales_disabled");
+    await db().collection("web_pricing").doc("config").update({ salesEnabled: true, testers: [OTHER] });
+    await refused(manage(env, { action: "quote_lifetime" }), "failed-precondition", "sales_disabled");
+    await db().collection("web_pricing").doc("config").update({ testers: [UID, OTHER] });
+    assert.equal((await manage(env, { action: "buy_lifetime", acceptedTotal: 1, attemptId: attemptId(), lang: null })).status, "reprice");
+    assert.equal((await buyCall(env, { total: 1 })).status, "reprice");
+    await refused(buyCall(env, { total: 1 }), "resource-exhausted", "throttled");
+    for (const data of [
+      { action: "buy_lifetime", acceptedTotal: 1, lang: "en" },
+      { action: "buy_lifetime", acceptedTotal: null, attemptId: attemptId(), lang: "en" },
+      { action: "buy_lifetime", acceptedTotal: 1, attemptId: "short", lang: "en" },
+      { action: "quote_lifetime", lang: "en" },
+      { action: "finish_lifetime", purchaseId: "nothex" },
+    ]) {
+      await refused(manage(env, data), "invalid-argument", "invalid_request");
+    }
   });
 });
 
@@ -1462,17 +1854,31 @@ describe("purchase lock (finding 1)", () => {
     assert.equal(env.fake.state.charges.size, 1);
   });
 
-  test("a previous purchase paid between the guards and the lock makes the second call check again", async () => {
+  test("a previous purchase paid between the guards and the lock, not yet on the slot, refuses the second call at the lock", async () => {
     const env = await setup();
     const first = await buy(env, "web_monthly");
     // The second call's guards ran before the first was visible: its guard sync sees no
-    // subscription yet, so only the paid lock holder can stop it.
+    // subscription yet, so only the paid lock holder can stop it. Since stage K the lock itself
+    // refuses it while the slot does not show the paid holder, before any entry is written.
+    await webSlotRef().delete();
+    const original = env.fake.listSubscriptions;
+    let hidden = true;
+    env.fake.listSubscriptions = async (customerId) => (hidden ? ((hidden = false), []) : original(customerId));
+    await refused(buy(env, "web_yearly"), "failed-precondition", "purchase_in_progress");
+    assert.equal(hidden, false, "the guard's sync was the one that saw nothing");
+    assert.equal(env.fake.callNames().filter((name) => name === "createSubscription").length, 1, "no second subscription");
+    assert.deepEqual((await ledgerDocs()).map((row) => row.id), [first.result.purchaseId], "and no second ledger entry");
+  });
+
+  test("a previous purchase paid past the lock and missed by the guard sync makes the second call check again", async () => {
+    const env = await setup();
+    const first = await buy(env, "web_monthly");
+    await ageLock(first.result.purchaseId, 11);
     await webSlotRef().delete();
     const original = env.fake.listSubscriptions;
     let hidden = true;
     env.fake.listSubscriptions = async (customerId) => (hidden ? ((hidden = false), []) : original(customerId));
     await refused(buy(env, "web_yearly"), "failed-precondition", "already_subscribed");
-    assert.equal(hidden, false, "the guard's sync was the one that saw nothing");
     assert.equal(env.fake.callNames().filter((name) => name === "createSubscription").length, 1, "no second subscription");
     const second = (await ledgerDocs()).find((row) => row.id !== first.result.purchaseId);
     assert.equal(second.status, "abandoned");
@@ -1526,6 +1932,89 @@ describe("purchase lock (finding 1)", () => {
     assert.equal(slot.productId, "web_lifetime");
     assert.equal(slot.active, true);
     assert.equal((await read(ledgerRef("a".repeat(32)))).status, "paid");
+  });
+});
+
+describe("a paid purchase the slot does not show yet (stage K)", () => {
+  /** A purchase whose bank step completed while the records still lag: paid in the ledger, no slot yet. */
+  async function paidNotShown(env) {
+    const first = await buy(env, "web_monthly", { token: { behavior: "requires_action" } });
+    await ledgerRef(first.result.purchaseId).update({ status: "paid" });
+    return first.result.purchaseId;
+  }
+
+  test("a second purchase is refused purchase_in_progress, with nothing created and no ledger entry", async () => {
+    const env = await setup();
+    await paidNotShown(env);
+    env.fake.resetCalls();
+    await refused(buy(env, "web_lifetime"), "failed-precondition", "purchase_in_progress");
+    await refused(buy(env, "web_yearly"), "failed-precondition", "purchase_in_progress");
+    assert.deepEqual(creates(env.fake), []);
+    assert.equal((await ledgerDocs()).length, 1);
+  });
+
+  test("a declined attempt in the window never takes the lock: it and the next good card are both refused, one subscription only", async () => {
+    const env = await setup();
+    const id = await paidNotShown(env);
+    const declined = env.fake.addToken({ behavior: "decline", declineCode: "insufficient_funds" });
+    await refused(
+      handleStartWebPurchase({ plan: "web_yearly", confirmationToken: declined, acceptedTotal: PRICES.web_yearly, lang: "en" }, caller(), env.deps),
+      "failed-precondition",
+      "purchase_in_progress",
+    );
+    await refused(buy(env, "web_yearly"), "failed-precondition", "purchase_in_progress");
+    assert.equal(subscriptionsOf(env.fake).length, 1, "exactly one subscription at Stripe");
+    assert.deepEqual((await ledgerDocs()).map((row) => row.id), [id]);
+    assert.equal((await read(db().collection(WEB_CUSTOMERS_COLLECTION).doc(UID))).activePurchase.purchaseId, id, "the paid purchase still holds the lock");
+  });
+
+  test("a paid purchase in the other mode never blocks", async () => {
+    const sandbox = await setup();
+    await paidNotShown(sandbox);
+    const live = await setup({ livemode: true });
+    // Each fake numbers its tokens from one; skip the sandbox token's id so this is a new purchase.
+    live.fake.addToken({});
+    assert.equal((await buy(live, "web_yearly")).result.status, "succeeded");
+  });
+
+  test("past the lock it no longer blocks", async () => {
+    const env = await setup();
+    const id = await paidNotShown(env);
+    await ageLock(id, 11);
+    assert.equal((await buy(env, "web_yearly")).result.status, "succeeded");
+  });
+
+  test("a purchase after a refunded, failed or abandoned entry goes ahead", async () => {
+    for (const status of ["refunded", "failed", "abandoned"]) {
+      await clearFirestore();
+      const env = await setup();
+      const first = await buy(env, "web_monthly", { token: { behavior: "requires_action" } });
+      await ledgerRef(first.result.purchaseId).update({ status });
+      assert.equal((await buy(env, "web_lifetime")).result.status, "succeeded", status);
+    }
+  });
+
+  test("a switch and an upgrade right after a purchase the slot shows go ahead", async () => {
+    const env = await setup();
+    const bought = await buy(env, "web_monthly");
+    assert.equal(bought.result.status, "succeeded");
+    const manage = (data) => handleManageWebSubscription(data, caller(), env.deps);
+    const switchQuote = (await manage({ action: "quote_switch_yearly" })).quote;
+    const switched = await manage({ action: "switch_yearly", acceptedTotal: switchQuote.total, attemptId: "stage-k-switch-0001-aaaaaaaa", lang: "en" });
+    assert.equal(switched.status, "succeeded");
+    const lifetimeQuote = (await manage({ action: "quote_lifetime" })).quote;
+    const upgraded = await manage({ action: "buy_lifetime", acceptedTotal: lifetimeQuote.total, attemptId: "stage-k-upgrade-0001-aaaaaaaa", lang: "en" });
+    assert.equal(upgraded.status, "succeeded");
+  });
+
+  test("the plain lifetime purchase of a subscriber whose renewal failed, moments after subscribing, goes ahead", async () => {
+    const env = await setup();
+    const monthly = await buy(env, "web_monthly");
+    const subscriptionId = (await read(ledgerRef(monthly.result.purchaseId))).stripe.subscriptionId;
+    env.fake.advance(31 * DAY);
+    env.fake.renew(subscriptionId, { paid: false });
+    assert.equal((await handleGetWebSubscription({}, caller(), env.deps)).state, "payment_failed");
+    assert.equal((await buy(env, "web_lifetime")).result.status, "succeeded");
   });
 });
 

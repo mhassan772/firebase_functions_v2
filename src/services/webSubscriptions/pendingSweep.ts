@@ -57,12 +57,12 @@ export async function sweepPendingWebPurchases(
         await syncWebEntitlement(uid, deps, { operationId: options.operationId, trigger: "pending_sweep" });
         summary.synced += 1;
       }
-      const isSwitch = entry.kind === "switch";
-      if (!isSwitch && options.now.getTime() - entry.createdAt.getTime() < PENDING_ABANDON_AFTER_MS) continue;
-      const settled = isSwitch ? { status: "failed" as const, failure: "not_completed" } : undefined;
+      const charge = entry.kind !== undefined;
+      if (!charge && options.now.getTime() - entry.createdAt.getTime() < PENDING_ABANDON_AFTER_MS) continue;
+      const settled = charge ? { status: "failed" as const, failure: "not_completed" } : undefined;
       if (await abandonPendingPurchase(deps, entry.purchaseId, options.now, settled)) {
         summary.abandoned += 1;
-        functions.logger.info(isSwitch ? "web_switch_failed" : "web_purchase_abandoned", {
+        functions.logger.info(entry.kind === "switch" ? "web_switch_failed" : entry.kind === "upgrade" ? "web_upgrade_failed" : "web_purchase_abandoned", {
           operationId: options.operationId,
           uid,
           purchaseId: entry.purchaseId,
@@ -132,7 +132,7 @@ export async function stopPendingStripeSide(deps: WebSyncDeps, entry: WebPurchas
       if (!isResourceMissing(error)) throw error;
     }
   }
-  if (entry.kind === "switch") return stopPendingSwitch(deps, entry);
+  if (entry.kind) return stopPendingCharge(deps, entry);
   const invoiceId = entry.stripe.invoiceId;
   if (!invoiceId) return false;
   let invoice;
@@ -157,8 +157,12 @@ export async function stopPendingStripeSide(deps: WebSyncDeps, entry: WebPurchas
 }
 
 /**
- * The plan switch's part of `stopPendingStripeSide`: true when its invoice is paid, otherwise the
- * open invoice is voided, which also drops the change Stripe holds for it.
+ * The part of `stopPendingStripeSide` for a charge made by `/manage` (a plan switch or an upgrade
+ * to lifetime): true when its invoice is paid, otherwise the open invoice is voided, which for a
+ * switch also drops the change Stripe holds for it.
+ *
+ * An upgrade's invoice without an id on the entry is found by its `metadata.purchaseId` among the
+ * customer's newest invoices; a draft one is deleted.
  *
  * The subscription it changes is already running, so the subscription's status says nothing about
  * the switch; only the invoice does. An entry without an invoice id (the call ended between
@@ -167,10 +171,15 @@ export async function stopPendingStripeSide(deps: WebSyncDeps, entry: WebPurchas
  * sync can mark the entry paid. Every caller passes only entries past the purchase lock, whose
  * call has ended, so an unnamed open switch invoice can be voided as theirs.
  */
-async function stopPendingSwitch(deps: WebSyncDeps, entry: WebPurchaseEntry): Promise<boolean> {
+async function stopPendingCharge(deps: WebSyncDeps, entry: WebPurchaseEntry): Promise<boolean> {
   const { firestore, gateway } = deps;
   let invoiceId = entry.stripe.invoiceId;
   const resolved = !invoiceId;
+  if (!invoiceId && entry.kind === "upgrade") {
+    const recent = await gateway.listInvoices({ customer: entry.stripe.customerId, limit: 10 });
+    invoiceId = recent.find((invoice) => invoice.metadata?.purchaseId === entry.purchaseId)?.id;
+    if (!invoiceId) return false;
+  }
   if (!invoiceId) {
     if (!entry.stripe.subscriptionId) return false;
     const subscription = await gateway.retrieveSubscription(entry.stripe.subscriptionId);
@@ -195,6 +204,16 @@ async function stopPendingSwitch(deps: WebSyncDeps, entry: WebPurchaseEntry): Pr
     if (isResourceMissing(error)) return false;
     throw error;
   }
+  if (invoice.status === "open") {
+    try {
+      await gateway.voidInvoice(invoiceId);
+      return false;
+    } catch (error) {
+      // Stripe refuses to void an invoice paid since it was read: then it counts as paid.
+      invoice = await gateway.retrieveInvoice(invoiceId, ["payments"]);
+      if (invoice.status !== "paid") throw error;
+    }
+  }
   if (invoice.status === "paid") {
     if (resolved) {
       const amounts = invoiceAmounts(invoice);
@@ -212,6 +231,6 @@ async function stopPendingSwitch(deps: WebSyncDeps, entry: WebPurchaseEntry): Pr
     }
     return true;
   }
-  if (invoice.status === "open") await gateway.voidInvoice(invoiceId);
+  if (invoice.status === "draft") await gateway.deleteInvoice(invoiceId);
   return false;
 }

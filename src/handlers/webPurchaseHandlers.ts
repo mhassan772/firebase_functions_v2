@@ -8,8 +8,10 @@ import {
   purchaseBlockers,
   readWebAccountSlots,
   StoreSubscriptionSummary,
+  webSlotRef,
   webSlotView,
   WebAccountState,
+  WebSlotView,
 } from "../services/webSubscriptions/accountState";
 import { DELETED_ACCOUNTS_COLLECTION } from "../services/accountDeletion/tombstone";
 import {
@@ -364,7 +366,7 @@ export async function handleStartWebPurchase(
     const locked = await createLockedEntry(ctx, entry);
     if (locked.kind === "existing") return await retriedOutcome(ctx, locked.entry, event);
     if (locked.kind === "busy") {
-      logWebInfo(`${event}_busy`, operationId, { uid, purchaseId, activePurchase: locked.activePurchaseId });
+      logWebInfo(`${event}_busy`, operationId, { uid, purchaseId, activePurchase: locked.activePurchaseId, reason: locked.reason });
       throw refusal("failed-precondition", "Another purchase is in progress.", "purchase_in_progress");
     }
 
@@ -466,7 +468,7 @@ export const PURCHASE_LOCK_MS = 10 * 60 * 1000;
 type LockOutcome =
   | { kind: "created"; previousPaid: boolean }
   | { kind: "existing"; entry: WebPurchaseEntry }
-  | { kind: "busy"; activePurchaseId: string };
+  | { kind: "busy"; activePurchaseId: string; reason: "pending" | "paid_not_shown" };
 
 /**
  * Creates the pending ledger entry and takes the account's purchase lock, in one transaction.
@@ -477,6 +479,10 @@ type LockOutcome =
  * is needed: a settled or stale holder simply stops blocking. A holder that was paid makes the
  * caller check the guards again. So two tabs can never both be charged, and no purchase is
  * abandoned while another call may still confirm it.
+ *
+ * A new purchase is also refused while the holder was paid moments ago and the web slot does not
+ * show it yet (`paidButNotShown`): a page that reloaded before the records caught up, or another
+ * tab, would otherwise sell the same Premium a second time.
  */
 export async function createLockedEntry(ctx: Pick<PurchaseContext, "uid" | "deps">, entry: WebPurchaseEntry): Promise<LockOutcome> {
   const { firestore } = ctx.deps;
@@ -485,8 +491,9 @@ export async function createLockedEntry(ctx: Pick<PurchaseContext, "uid" | "deps
   const mappingRef = firestore.collection(WEB_CUSTOMERS_COLLECTION).doc(ctx.uid);
   const tombstoneRef = firestore.collection(DELETED_ACCOUNTS_COLLECTION).doc(ctx.uid);
   const nowMs = ctx.deps.now().getTime();
+  const slotRef = webSlotRef(firestore, ctx.uid, entry.livemode);
   return firestore.runTransaction(async (transaction): Promise<LockOutcome> => {
-    const [own, mapping, tombstone] = await transaction.getAll(ownRef, mappingRef, tombstoneRef);
+    const [own, mapping, tombstone, slot] = await transaction.getAll(ownRef, mappingRef, tombstoneRef, slotRef);
     if (own.exists) {
       const existing = ledgerEntryFromData(entry.purchaseId, own.data());
       if (!existing) throw new Error("unreadable ledger entry");
@@ -498,7 +505,10 @@ export async function createLockedEntry(ctx: Pick<PurchaseContext, "uid" | "deps
     if (lockId && lockId !== entry.purchaseId) {
       const holder = ledgerEntryFromData(lockId, (await transaction.get(ledger.doc(lockId))).data());
       if (holderBlocks(holder, startedMs, nowMs)) {
-        return { kind: "busy", activePurchaseId: lockId };
+        return { kind: "busy", activePurchaseId: lockId, reason: "pending" };
+      }
+      if (!entry.kind && paidButNotShown(holder, startedMs, nowMs, webSlotView(slot.data(), new Date(nowMs)), entry.livemode)) {
+        return { kind: "busy", activePurchaseId: lockId, reason: "paid_not_shown" };
       }
       previousPaid = holder?.status === "paid";
     }
@@ -521,6 +531,26 @@ function readLock(value: unknown): { lockId?: string; startedMs: number } {
 /** A lock holder blocks while its entry is pending and it started under `PURCHASE_LOCK_MS` ago. */
 function holderBlocks(holder: WebPurchaseEntry | undefined, startedMs: number, nowMs: number): boolean {
   return holder?.status === "pending" && nowMs - startedMs < PURCHASE_LOCK_MS;
+}
+
+/**
+ * Whether the lock holder is a plain purchase paid under `PURCHASE_LOCK_MS` ago that the web slot
+ * does not show yet: a subscription slot naming another purchase or none running, or a lifetime
+ * purchase without a lifetime slot. A switch or an upgrade changes a subscription the slot already
+ * shows, so it never counts; a refunded, failed or abandoned holder is not paid. The lock is shared
+ * by both Stripe modes while `view` is the slot of the new purchase's mode, so a holder of the other
+ * mode (a tester's sandbox purchase before a live one) never counts either.
+ */
+export function paidButNotShown(
+  holder: WebPurchaseEntry | undefined,
+  startedMs: number,
+  nowMs: number,
+  view: WebSlotView,
+  livemode: boolean
+): boolean {
+  if (!holder || holder.kind || holder.status !== "paid" || holder.livemode !== livemode || nowMs - startedMs >= PURCHASE_LOCK_MS) return false;
+  if (holder.plan === "web_lifetime") return view.state !== "lifetime";
+  return view.purchaseId !== holder.purchaseId || view.state === "none" || view.state === "ended";
 }
 
 /**
@@ -585,11 +615,16 @@ async function updateCustomerForPurchase(
 }
 
 /**
- * Abandons the account's other pending purchases older than the lock's lifetime, after the
- * guard's sync has marked any that were paid. Each is stopped at Stripe only once its invoice is read as unpaid; one that turned
- * out paid is left pending for the sync to mark, and the call returns true.
+ * Abandons the account's other pending purchases older than the lock's lifetime, of every kind (a
+ * purchase, a plan switch, an upgrade to lifetime), after the guard's sync has marked any that
+ * were paid. Each is stopped at Stripe only once its invoice is read as unpaid, so an old bank
+ * step can no longer be completed behind a new charge. One that turned out paid is left for the
+ * sync to mark, and its purchase id is returned.
  */
-async function abandonOlderPending(ctx: PurchaseContext, currentPurchaseId: string): Promise<boolean> {
+export async function abandonOlderPending(
+  ctx: Pick<PurchaseContext, "uid" | "operationId" | "deps" | "syncDeps">,
+  currentPurchaseId: string
+): Promise<string | undefined> {
   const { firestore, gateway } = ctx.syncDeps;
   // Only entries past the lock's lifetime: a younger pending entry may belong to a call that
   // is about to confirm it, and the lock already kept this purchase from racing it.
@@ -601,15 +636,16 @@ async function abandonOlderPending(ctx: PurchaseContext, currentPurchaseId: stri
       entry.livemode === gateway.livemode &&
       entry.createdAt.getTime() <= staleBefore
   );
-  let paidTurnedUp = false;
+  let paidTurnedUp: string | undefined;
   for (const entry of older) {
     const abandoned = await abandonPendingPurchase(ctx.syncDeps, entry.purchaseId, ctx.deps.now());
     if (abandoned) {
-      logWebInfo("web_purchase_abandoned", ctx.operationId, { uid: ctx.uid, purchaseId: entry.purchaseId, plan: entry.plan, by: currentPurchaseId });
+      logWebInfo("web_purchase_abandoned", ctx.operationId, { uid: ctx.uid, purchaseId: entry.purchaseId, plan: entry.plan, kind: entry.kind ?? null, by: currentPurchaseId });
       continue;
     }
+    // Not abandoned: paid after all, whether or not the sync has marked it yet.
     const after = ledgerEntryFromData(entry.purchaseId, (await firestore.collection(WEB_PURCHASES_COLLECTION).doc(entry.purchaseId).get()).data());
-    if (after?.status === "pending") paidTurnedUp = true;
+    if (after?.status === "pending" || after?.status === "paid") paidTurnedUp ??= entry.purchaseId;
   }
   return paidTurnedUp;
 }
@@ -619,6 +655,8 @@ interface CreatedPayment {
   invoiceId: string;
   paymentIntentId: string;
   invoiceTotal: number;
+  /** The finalized invoice; lifetime only. */
+  invoice?: Stripe.Invoice;
 }
 
 function metadataFor(entry: WebPurchaseEntry): Record<string, string> {
@@ -656,8 +694,19 @@ async function createIncompleteSubscription(ctx: PurchaseContext, entry: WebPurc
   };
 }
 
-/** Recipe C8: a one-off invoice for the lifetime price, finalized so the token can pay it. Cards only. */
-async function createLifetimeInvoice(ctx: PurchaseContext, entry: WebPurchaseEntry, price: WebPrice): Promise<CreatedPayment> {
+/**
+ * Recipe C8: a one-off invoice for the lifetime price, finalized so a card can pay it. Cards only.
+ *
+ * An upgrade from a subscription adds `credit`, a second, negative item for the subscription's
+ * unused time (accepted next to the price's item in the sandbox), described in the buyer's
+ * language. Its idempotency key comes from the purchase like the others.
+ */
+export async function createLifetimeInvoice(
+  ctx: Pick<PurchaseContext, "gate">,
+  entry: WebPurchaseEntry,
+  price: WebPrice,
+  credit?: { amount: number; description: string }
+): Promise<CreatedPayment> {
   const { gateway, config } = ctx.gate;
   const draft = await gateway.createInvoice(
     {
@@ -675,8 +724,20 @@ async function createLifetimeInvoice(ctx: PurchaseContext, entry: WebPurchaseEnt
     { customer: entry.stripe.customerId, invoice: draft.id!, pricing: { price: price.priceId } },
     `item_${entry.purchaseId}`
   );
+  if (credit && credit.amount > 0) {
+    await gateway.createInvoiceItem(
+      {
+        customer: entry.stripe.customerId,
+        invoice: draft.id!,
+        amount: -credit.amount,
+        currency: price.currency,
+        description: credit.description,
+      },
+      `credit_${entry.purchaseId}`
+    );
+  }
   const open = await gateway.finalizeInvoice(draft.id!, { auto_advance: false, expand: ["confirmation_secret", "payments"] });
-  return { invoiceId: open.id!, paymentIntentId: paymentIntentOf(open), invoiceTotal: open.total };
+  return { invoiceId: open.id!, paymentIntentId: paymentIntentOf(open), invoiceTotal: open.total, invoice: open };
 }
 
 /**
@@ -722,7 +783,7 @@ const SETTLE_WAIT_MS = 1000;
  * succeeds (about 4 s in the sandbox). A sync before that finds no started subscription and
  * grants nothing, leaving access to the webhook. Giving up is not an error: the webhook syncs.
  */
-async function awaitSettled(ctx: PurchaseContext, entry: WebPurchaseEntry): Promise<boolean> {
+export async function awaitSettled(ctx: Pick<PurchaseContext, "gate" | "deps">, entry: WebPurchaseEntry): Promise<boolean> {
   const sleep = ctx.deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const { gateway } = ctx.gate;
   for (let attempt = 0; attempt < SETTLE_ATTEMPTS; attempt++) {

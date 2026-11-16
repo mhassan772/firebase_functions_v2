@@ -5,7 +5,7 @@ import { connectFunctionsEmulator, getFunctions, httpsCallable, type Functions }
 
 import { emulatorSettings, hostAndPort } from "../firebaseConfig";
 import type { Lang } from "../i18n";
-import type { FinishResult, ManageResult, Plan, PlansResponse, StartResult, SubscriptionResponse, SwitchResult } from "./logic";
+import type { FinishResult, LifetimeResult, ManageResult, Plan, PlansResponse, StartResult, SubscriptionResponse, SwitchResult } from "./logic";
 
 const FUNCTIONS_REGION = "europe-west2";
 /// A little over the purchase callable's own 120 s, so the server always answers first.
@@ -64,6 +64,13 @@ export function manageWebSubscription(
     | { action: "switch_yearly"; acceptedTotal: number; attemptId: string; lang: Lang }
     | { action: "finish_switch_yearly"; purchaseId: string },
 ): Promise<SwitchResult>;
+export function manageWebSubscription(
+  app: FirebaseApp,
+  request:
+    | { action: "quote_lifetime" }
+    | { action: "buy_lifetime"; acceptedTotal: number; attemptId: string; lang: Lang }
+    | { action: "finish_lifetime"; purchaseId: string },
+): Promise<LifetimeResult>;
 export function manageWebSubscription(app: FirebaseApp, request: { action: string }): Promise<unknown> {
   return call(app, "manageWebSubscription", request, PURCHASE_TIMEOUT_MS);
 }

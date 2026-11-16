@@ -397,6 +397,27 @@ function createFakeStripe(options = {}) {
     return subscriptionView(sub, params.expand ?? []);
   }
 
+  /**
+   * A PaymentIntent confirmed with a saved card while the buyer is present, as an upgrade to
+   * lifetime does: a card that `failsCharges` throws a card error, one that `requiresAction`
+   * leaves it waiting for the bank, as the sandbox showed.
+   */
+  function confirmWithSavedCard(pi, paymentMethodId) {
+    const method = must(state.paymentMethods, paymentMethodId, "payment_method");
+    const invoice = [...state.invoices.values()].find((row) => row.payments.some((payment) => payment.payment.payment_intent === pi.id));
+    pi.payment_method = paymentMethodId;
+    if (method.failsCharges) {
+      pi.last_payment_error = { type: "card_error", code: "card_declined", decline_code: method.declineCode ?? "generic_decline" };
+      throw Object.assign(stripeError("card_declined", "Your card was declined.", "card_error"), { decline_code: method.declineCode ?? "generic_decline" });
+    }
+    if (method.requiresAction) {
+      Object.assign(pi, { status: "requires_action", next_action: { type: "use_stripe_sdk" } });
+      return pi;
+    }
+    payInvoiceNow(invoice, { paymentMethod: paymentMethodId, cardCountry: method.card.country });
+    return pi;
+  }
+
   function cancelNow(sub) {
     if (sub.status === "canceled" || sub.status === "incomplete_expired") {
       throw stripeError("resource_missing", `No such subscription: '${sub.id}'`);
@@ -543,18 +564,24 @@ function createFakeStripe(options = {}) {
       return clone(
         idempotent(key, () => {
           const invoice = must(state.invoices, params.invoice, "invoice");
-          const price = priceById(params.pricing.price);
-          const item = { id: nextId("ii"), object: "invoiceitem", invoice: invoice.id, amount: price.unit_amount };
-          invoice.lines.data.push({
+          // A price's item, or a bare amount such as an upgrade's negative credit (the sandbox
+          // lists that one first on the finalized invoice).
+          const price = params.pricing ? priceById(params.pricing.price) : null;
+          const amount = price ? price.unit_amount : params.amount;
+          const item = { id: nextId("ii"), object: "invoiceitem", invoice: invoice.id, amount, description: params.description ?? null };
+          const line = {
             id: nextId("il"),
             object: "line_item",
-            amount: price.unit_amount,
+            amount,
+            description: params.description ?? null,
             period: { start: fake.nowSec, end: fake.nowSec },
             parent: { type: "invoice_item_details", invoice_item_details: { invoice_item: item.id } },
-            pricing: { price_details: { price: price.id, product: price.product } },
-          });
-          invoice.total += price.unit_amount;
-          invoice.subtotal += price.unit_amount;
+            pricing: price ? { price_details: { price: price.id, product: price.product } } : null,
+          };
+          if (price) invoice.lines.data.push(line);
+          else invoice.lines.data.unshift(line);
+          invoice.total += amount;
+          invoice.subtotal += amount;
           state.invoiceItems.set(item.id, item);
           return item;
         })
@@ -659,16 +686,17 @@ function createFakeStripe(options = {}) {
       }
       const priceId = params.subscription_details?.items?.[0]?.price ?? params.invoice_items?.[0]?.price;
       const price = priceById(priceId);
-      const address = params.customer_details?.address ?? {};
+      const extra = (params.invoice_items ?? []).slice(1).reduce((sum, item) => sum + (item.amount ?? 0), 0);
+      const address = params.customer_details?.address ?? (params.customer ? state.customers.get(params.customer)?.address : undefined) ?? {};
       const automatic = params.automatic_tax?.enabled === true;
       if (automatic && address.country === "CA" && !address.state && !address.postal_code) {
-        return { object: "invoice", total: price.unit_amount, currency: "usd", total_taxes: [], automatic_tax: { enabled: true, status: "requires_location_inputs" } };
+        return { object: "invoice", total: price.unit_amount + extra, currency: "usd", total_taxes: [], automatic_tax: { enabled: true, status: "requires_location_inputs" } };
       }
       const tax = automatic ? fake.taxFor(address) : 0;
       return {
         object: "invoice",
-        total: price.unit_amount + tax,
-        subtotal: price.unit_amount,
+        total: price.unit_amount + extra + tax,
+        subtotal: price.unit_amount + extra,
         currency: "usd",
         total_taxes: tax ? [{ amount: tax }] : [],
         automatic_tax: { enabled: automatic, status: automatic ? "complete" : null },
@@ -680,6 +708,7 @@ function createFakeStripe(options = {}) {
       return clone(
         idempotent(key, () => {
           const pi = must(state.paymentIntents, id, "payment_intent");
+          if (params.payment_method) return confirmWithSavedCard(pi, params.payment_method);
           const token = must(state.tokens, params.confirmation_token, "confirmationtoken");
           if (token.used) {
             throw stripeError("payment_intent_confirmation_token_invalid", "This ConfirmationToken has already been used.");

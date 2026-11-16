@@ -25,8 +25,10 @@ export interface BillingContent {
   plan?: string;
   /** Integer cents. */
   amount?: number;
-  /** The plan switch's credit for unused days, a positive number. */
+  /** The credit for unused time (a plan switch, an upgrade to lifetime), a positive number. */
   credit?: number;
+  /** An upgrade to lifetime: `web_monthly` or `web_yearly`, the plan credited and stopped. */
+  creditedPlan?: string;
   tax?: number;
   total?: number;
   currency?: string;
@@ -48,13 +50,23 @@ export class BillingEmailIncompleteError extends Error {
 
 const LOCALE: Record<BillingLang, string> = { ar: "ar-u-nu-arab-ca-gregory", en: "en" };
 
-/** Integer cents as the pages show them, such as "$49.99" or "‏٤٩٫٩٩ US$". */
+/** US dollars as the pages write them: the number, then the currency's name in Arabic. */
+const DOLLARS: Record<BillingLang, (amount: string) => string> = {
+  ar: (amount) => `${amount} دولار`,
+  en: (amount) => `$${amount}`,
+};
+
+/**
+ * Integer cents as the pages show them, such as "$49.99" or "٤٩٫٩٩ دولار", so an email and the
+ * page never write the same amount two ways. Another currency keeps the platform's format.
+ */
 export function formatMoney(amount: number, currency: string, lang: BillingLang): string {
-  return new Intl.NumberFormat(LOCALE[lang], {
-    style: "currency",
-    currency: currency.toUpperCase(),
-    minimumFractionDigits: 2,
-  }).format(amount / 100);
+  const code = currency.toUpperCase();
+  if (code === "USD") {
+    const number = new Intl.NumberFormat(LOCALE[lang], { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(amount / 100);
+    return DOLLARS[lang](number);
+  }
+  return new Intl.NumberFormat(LOCALE[lang], { style: "currency", currency: code, minimumFractionDigits: 2 }).format(amount / 100);
 }
 
 /** A date with the day, the month's name and the year, in UTC, as the pages show it. */
@@ -80,7 +92,17 @@ interface Copy {
   noRefunds: string;
   whereToCancel: string;
   kinds: {
-    purchase_confirmed: { subject: string; thanksSubscription: string; thanksLifetime: string; renewsUntilCancelled: string; lifetimeTerms: string };
+    purchase_confirmed: {
+      subject: string;
+      thanksSubscription: string;
+      thanksLifetime: string;
+      renewsUntilCancelled: string;
+      lifetimeTerms: string;
+      /** The upgrade's credit line, by the plan credited. */
+      credit: Record<string, string>;
+      /** The upgrade's subscription, by its plan, has stopped. */
+      stopped: Record<string, string>;
+    };
     renewed: { subject: string; body: (subscription: string) => string };
     payment_failed: { subject: string; body: string; until: (date: string) => string; replace: string; retries: string; note: string };
     payment_failed_final: { subject: string; body: string; stops: (date: string) => string; replace: string; note: string };
@@ -111,6 +133,14 @@ const COPY: Record<BillingLang, Copy> = {
         thanksLifetime: "شكرًا لشرائك. فُعّل بريميوم مدى الحياة لحسابك في منطوق.",
         renewsUntilCancelled: "يتجدد الاشتراك تلقائيًا حتى تلغيه.",
         lifetimeTerms: "هذه دفعة واحدة، دون تجديد. «مدى الحياة» تعني ٥٠ سنة، أو طوال مدة تقديم الخدمة إن كانت أقصر.",
+        credit: {
+          web_monthly: "خصم المدة غير المستخدمة من اشتراكك الشهري:",
+          web_yearly: "خصم المدة غير المستخدمة من اشتراكك السنوي:",
+        },
+        stopped: {
+          web_monthly: "توقف اشتراكك الشهري، ولن يتجدد ولن يُخصم منه شيء بعد اليوم.",
+          web_yearly: "توقف اشتراكك السنوي، ولن يتجدد ولن يُخصم منه شيء بعد اليوم.",
+        },
       },
       renewed: {
         subject: "تجدّد اشتراكك في منطوق بريميوم",
@@ -179,6 +209,14 @@ const COPY: Record<BillingLang, Copy> = {
         thanksLifetime: "Thank you for your purchase. Premium is now on for your Mantooq account, for life.",
         renewsUntilCancelled: "Your subscription renews automatically until you cancel.",
         lifetimeTerms: "This is one payment, with no renewals. Lifetime means 50 years, or for as long as the service runs if that is shorter.",
+        credit: {
+          web_monthly: "Credit for the unused time of your monthly plan:",
+          web_yearly: "Credit for the unused time of your yearly plan:",
+        },
+        stopped: {
+          web_monthly: "Your monthly subscription has stopped. It won't renew, and nothing more is charged for it.",
+          web_yearly: "Your yearly subscription has stopped. It won't renew, and nothing more is charged for it.",
+        },
       },
       renewed: {
         subject: "Your Mantooq Premium subscription renewed",
@@ -255,13 +293,19 @@ function body(kind: BillingKind, lang: BillingLang, content: BillingContent): Bo
       const k = t.kinds.purchase_confirmed;
       const lifetime = plan === "web_lifetime";
       const details = [`${t.labels.plan} ${planName}`, `${t.labels.price} ${money(content.amount, "amount")}`];
+      // An upgrade from a subscription: its credit, under a label that says it is taken off, so
+      // with no minus sign, and the plan stopped.
+      const upgrade = lifetime && content.creditedPlan ? need(k.stopped[content.creditedPlan], "creditedPlan") : null;
+      if (upgrade && content.credit) {
+        details.push(`${k.credit[content.creditedPlan!]} ${money(content.credit, "credit")}`);
+      }
       if (content.tax) details.push(`${t.labels.tax} ${money(content.tax, "tax")}`);
       details.push(`${t.labels.total} ${money(content.total, "total")}`);
       if (!lifetime) details.push(`${t.labels.renews} ${date(content.renewsAt, "renewsAt")}`);
       return {
         subject: k.subject,
         paragraphs: lifetime
-          ? [k.thanksLifetime, k.lifetimeTerms, t.openApp, t.noRefunds]
+          ? [k.thanksLifetime, ...(upgrade ? [upgrade] : []), k.lifetimeTerms, t.openApp, t.noRefunds]
           : [k.thanksSubscription, k.renewsUntilCancelled, t.openApp, `${t.noRefunds} ${t.whereToCancel}`],
         details,
         button: t.manageButton,
@@ -333,8 +377,8 @@ function body(kind: BillingKind, lang: BillingLang, content: BillingContent): Bo
       const details = [
         `${t.labels.plan} ${planName}`,
         `${k.yearlyPrice} ${money(content.amount, "amount")}`,
-        // The credit is a deduction, so it is shown with a minus sign.
-        `${k.credit} ${money(-need(content.credit, "credit"), "credit")}`,
+        // The label says the credit is taken off, so the amount carries no minus sign.
+        `${k.credit} ${money(need(content.credit, "credit"), "credit")}`,
       ];
       if (content.tax) details.push(`${t.labels.tax} ${money(content.tax, "tax")}`);
       details.push(`${t.labels.paid} ${money(content.total, "total")}`, `${t.labels.renews} ${date(content.renewsAt, "renewsAt")}`);

@@ -85,6 +85,17 @@ describe("decideSlotEmails", () => {
     });
   });
 
+  test("an upgrade to lifetime queues purchase_confirmed with its credit and the stopped plan, and nothing for the stopped subscription", () => {
+    const upgrade = entry("p3", "web_lifetime", "en", { kind: "upgrade", switchedFrom: "web_yearly", amount: 14999, credit: 2500, total: 12499 });
+    const previous = slot("active", { purchaseId: "p1" });
+    const next = slot("active", { subscriptionId: undefined, purchaseId: "p3", lastPaidInvoiceId: "in_3" }, { productId: "web_lifetime" });
+    const emails = decideSlotEmails(notice({ previous, next, becamePaid: [upgrade], entries: [entry("p1", "web_yearly"), upgrade] }));
+    assert.deepEqual(kinds(emails), ["purchase_confirmed:confirmed_p3"]);
+    assert.deepEqual(emails[0].fields, {
+      plan: "web_lifetime", amount: 14999, tax: 0, total: 12499, currency: "usd", credit: 2500, creditedPlan: "web_yearly",
+    });
+  });
+
   test("renewed only for a subscription_cycle invoice on the same subscription", () => {
     const previous = slot("active");
     const next = slot("active", { lastPaidInvoiceId: "in_2", paidThrough: at(665) });
@@ -189,9 +200,18 @@ describe("templates", () => {
     assert.match(en("renewal_reminder"), /renews automatically on December 14, 2026 for \$56\.49[\s\S]*cancel it on the manage page before that date[\s\S]*expires before that date/);
     assert.doesNotMatch(en("renewal_reminder", { cardExpiresFirst: false }), /expires/);
     assert.match(en("cancellation_confirmed"), /won't renew[\s\S]*until December 14, 2026[\s\S]*resume/);
+    const upgrade = { plan: "web_lifetime", amount: 14999, credit: 2500, tax: 0, total: 12499, creditedPlan: "web_yearly" };
+    assert.match(en("purchase_confirmed", upgrade),
+      /for life[\s\S]*Plan: Lifetime[\s\S]*Price: \$149\.99[\s\S]*unused time of your yearly plan: \$25\.00[\s\S]*Total: \$124\.99[\s\S]*yearly subscription has stopped[\s\S]*50 years/);
+    assert.doesNotMatch(en("purchase_confirmed", upgrade), /Next renewal|renews automatically/);
+    assert.match(en("purchase_confirmed", { ...upgrade, creditedPlan: "web_monthly", credit: 0, total: 14999 }), /monthly subscription has stopped/);
+    assert.doesNotMatch(en("purchase_confirmed", { ...upgrade, credit: 0, total: 14999 }), /unused time/, "no credit line for a zero credit");
+    assert.match(ar("purchase_confirmed", upgrade), /خصم المدة غير المستخدمة من اشتراكك السنوي: [\s\S]*توقف اشتراكك السنوي/);
+    assert.doesNotMatch(ar("purchase_confirmed", upgrade), /14999|12499|2500|undefined|null/);
+    assert.doesNotMatch(en("purchase_confirmed", { plan: "web_lifetime", tax: 0, total: 14999 }), /stopped|unused/, "a plain lifetime purchase is unchanged");
     const switched = { credit: 333, tax: 0, total: 4666 };
     assert.match(en("switched_yearly", switched),
-      /to the yearly plan[\s\S]*starts on the day you switched[\s\S]*Plan: Yearly[\s\S]*Yearly price: \$49\.99[\s\S]*unused days of your monthly plan: -\$3\.33[\s\S]*Amount paid: \$46\.66[\s\S]*Next renewal: December 14, 2026[\s\S]*every year[\s\S]*until you cancel[\s\S]*not refundable/);
+      /to the yearly plan[\s\S]*starts on the day you switched[\s\S]*Plan: Yearly[\s\S]*Yearly price: \$49\.99[\s\S]*unused days of your monthly plan: \$3\.33[\s\S]*Amount paid: \$46\.66[\s\S]*Next renewal: December 14, 2026[\s\S]*every year[\s\S]*until you cancel[\s\S]*not refundable/);
     assert.doesNotMatch(en("switched_yearly", switched), /Tax:/, "no tax line when there is none");
     assert.match(en("switched_yearly", { credit: 333, tax: 650, total: 5316 }), /Tax: \$6\.50[\s\S]*Amount paid: \$53\.16/);
     assert.match(ar("switched_yearly", switched), /الخطة: سنوي[\s\S]*السعر السنوي: [\s\S]*خصم الأيام المتبقية من الاشتراك الشهري: [\s\S]*المبلغ المدفوع: [\s\S]*١٤ ديسمبر ٢٠٢٦[\s\S]*كل سنة[\s\S]*لا تُسترد/);
@@ -209,7 +229,11 @@ describe("templates", () => {
 
   test("money and dates as the pages show them", () => {
     assert.equal(formatMoney(499, "usd", "en"), "$4.99");
-    assert.equal(formatMoney(14999, "usd", "ar"), "\u200f\u0661\u0664\u0669\u066b\u0669\u0669\u00a0US$");
+    assert.equal(formatMoney(14999, "usd", "ar"), "١٤٩٫٩٩ دولار");
+    assert.equal(formatMoney(123450, "USD", "ar"), "١٬٢٣٤٫٥٠ دولار");
+    assert.equal(formatMoney(5000, "usd", "en"), "$50.00");
+    assert.doesNotMatch(formatMoney(499, "usd", "ar"), /[0-9$]|US/);
+    assert.equal(formatMoney(499, "eur", "en"), "€4.99");
     assert.equal(formatDate(date, "en"), "December 14, 2026");
     assert.equal(formatDate(date, "ar"), "١٤ ديسمبر ٢٠٢٦");
   });

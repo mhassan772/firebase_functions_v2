@@ -29,12 +29,17 @@ const STORE_PRODUCTION_SLOTS: ReadonlyArray<{ platform: StorePlatform; key: "app
   { platform: "google", key: "google" },
 ];
 
+/** The account's web slot for the key's mode. */
+export function webSlotRef(db: Firestore, uid: string, livemode: boolean) {
+  const web = STATE_SLOTS[webSlotIndex(livemode)];
+  return db.collection(SUBSCRIPTION_STATE_COLLECTION).doc(stateDocumentId(uid, web.platform, web.environment));
+}
+
 export async function readWebAccountSlots(db: Firestore, uid: string, livemode: boolean): Promise<WebAccountSlots> {
   const slots = db.collection(SUBSCRIPTION_STATE_COLLECTION);
-  const web = STATE_SLOTS[webSlotIndex(livemode)];
   // With the manual kill switch off the slot is not even read, as the projection ignores it.
   const [webSnap, ...otherSnaps] = await db.getAll(
-    slots.doc(stateDocumentId(uid, web.platform, web.environment)),
+    webSlotRef(db, uid, livemode),
     ...STORE_PRODUCTION_SLOTS.map((slot) => slots.doc(stateDocumentId(uid, slot.platform, "production"))),
     ...(MANUAL_SLOT_ENABLED ? [slots.doc(stateDocumentId(uid, MANUAL_SLOT.platform, MANUAL_SLOT.environment))] : [])
   );
@@ -139,8 +144,11 @@ export type WebPurchaseBlocker = "lifetime_active" | "already_subscribed" | "sto
  * Why a purchase of `plan` would be refused now, in the order the purchase checks them.
  *
  * A web subscription that is active, cancelling, past due or waiting for authentication blocks
- * monthly and yearly; lifetime may still be bought, and the subscription is cancelled once it
- * is paid. An auto-renewing production store subscription blocks monthly and yearly only.
+ * monthly and yearly. One that is active or cancelling blocks lifetime too: its unused time is
+ * credited only by the upgrade on `/manage`, so nobody pays the full price from a stale page. A
+ * past-due one has no unused time, so lifetime may still be bought, and the subscription is
+ * cancelled once it is paid. An auto-renewing production store subscription blocks monthly and
+ * yearly only.
  * With no plan, every blocker that applies to some plan is listed.
  */
 export function purchaseBlockers(
@@ -153,7 +161,8 @@ export function purchaseBlockers(
   const storeSubscription = storeSubscriptionOf(slots, now);
   const recurring = plan === undefined || plan !== "web_lifetime";
   if (view.state === "lifetime") blockers.push("lifetime_active");
-  if (recurring && ["active", "cancelling", "payment_failed", "needs_action"].includes(view.state)) {
+  const running = view.state === "active" || view.state === "cancelling";
+  if (running || (recurring && (view.state === "payment_failed" || view.state === "needs_action"))) {
     blockers.push("already_subscribed");
   }
   if (recurring && storeSubscription?.autoRenewing) blockers.push("store_subscription_active");
