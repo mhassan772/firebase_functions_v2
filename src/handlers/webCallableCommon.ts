@@ -122,7 +122,7 @@ export function refusalWith(
   code: functions.https.FunctionsErrorCode,
   message: string,
   reason: string,
-  extra: Record<string, string>
+  extra: Record<string, unknown>
 ): functions.https.HttpsError {
   return new functions.https.HttpsError(code, message, { reason, ...extra });
 }

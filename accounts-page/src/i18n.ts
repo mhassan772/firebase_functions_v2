@@ -191,12 +191,29 @@ const ar = {
     "هذه الأسعار العامة. لتحصل على سعر بلدك، افتح تطبيق منطوق مرة واحدة وأنت مسجّل الدخول بهذا الحساب، بالإصدار 90.7 أو أحدث، ثم أعد تحميل هذه الصفحة.",
   choosePlan: "اختر الخطة",
   blockerLifetime: "لديك وصول مدى الحياة بالفعل، فلا حاجة إلى شراء آخر.",
-  blockerSubscribed: "لديك اشتراك من هذا الموقع بالفعل، لذلك لا تظهر الخطتان الشهرية والسنوية.",
+  premiumHeading: "ما لديك الآن",
+  premiumWebRenews: (plan: string | null, date: string | null) =>
+    `اشتراك${plan ? ` ${plan}` : ""} من هذا الموقع، ${date ? `يتجدد في ${date}` : "يتجدد تلقائيًا"}.`,
+  premiumWebCancelling: (plan: string | null, date: string | null) =>
+    `اشتراك${plan ? ` ${plan}` : ""} من هذا الموقع، أُلغي تجديده، ويبقى بريميوم حتى ${date ?? "نهاية المدة المدفوعة"}.`,
+  premiumWebPaymentFailed: (plan: string | null) => `اشتراك${plan ? ` ${plan}` : ""} من هذا الموقع: لم تنجح دفعة التجديد.`,
+  premiumWebLifetime: "وصول مدى الحياة من هذا الموقع.",
+  premiumStoreRenews: (store: string, date: string | null) => `اشتراك عبر ${store}، ${date ? `يتجدد في ${date}` : "يتجدد تلقائيًا"}.`,
+  premiumStoreCancelling: (store: string, date: string | null) =>
+    `اشتراك عبر ${store}، أُلغي تجديده، ويبقى بريميوم حتى ${date ?? "نهاية مدته"}.`,
+  premiumManual: (date: string | null) => (date ? `بريميوم فعّله فريق منطوق، حتى ${date}.` : "بريميوم فعّله فريق منطوق."),
+  notOffered: (plans: string) => `غير متاح لك الآن: ${plans}.`,
+  blockerSubscribed: "لديك اشتراك من هذا الموقع بالفعل. إلغاؤه وتغيير بطاقته والتحويل من الشهري إلى السنوي كلها من صفحة إدارة الاشتراك.",
   blockerSubscribedLifetime: "يمكنك شراء «مدى الحياة»، وعندها يُلغى اشتراكك الحالي دون استرداد للمدة الباقية.",
-  blockerStore: (store: string) =>
-    `لديك اشتراك في ${store} يتجدد تلقائيًا، لذلك لا تظهر الخطتان الشهرية والسنوية هنا حتى لا تدفع مرتين. إن أردت الدفع من هنا، فألغِ تجديده من ${store} أولًا، ثم أعد تحميل الصفحة.`,
+  blockerStore: (store: string, date: string | null) =>
+    `لديك اشتراك في ${store} يتجدد تلقائيًا، واشتراك آخر من هنا يعني أن تدفع مرتين. إن أردت الدفع من هنا، فألغِ تجديده من ${store} أولًا، ويبقى بريميوم حتى ${date ?? "نهاية مدته"}، ثم أعد تحميل هذه الصفحة.`,
   blockerStoreLifetime: (store: string) =>
     `ما زال بإمكانك شراء «مدى الحياة». إن اشتريته فألغِ اشتراك ${store} بنفسك، فهو لا يتوقف وحده.`,
+  confirmIntro: "لديك بريميوم بالفعل:",
+  confirmStartsToday: "الخطة التي تشتريها الآن تبدأ اليوم، لا بعد انتهاء ما لديك، ولا تُضاف مدتها إليه. ولا يُسترد أي مبلغ.",
+  acknowledge: "فهمت ذلك",
+  acknowledgeFirst: "حدّد مربع «فهمت ذلك» أولًا.",
+  existingPremiumChanged: "لديك بريميوم لم يكن ظاهرًا حين فتحت الصفحة، ولم يُخصم أي مبلغ. راجعه، ثم حدّد «فهمت ذلك» قبل الدفع.",
   noticeHeading: "قبل الدفع",
   noticeImmediate: "يبدأ بريميوم فور نجاح الدفع.",
   noticeNoRefunds: "لا تُسترد المبالغ المدفوعة.",
@@ -310,6 +327,30 @@ const ar = {
   noSubscriptionError: "لم نجد اشتراكًا يمكن تغييره. أعد تحميل الصفحة.",
   noActionRequiredError: "لا توجد دفعة تنتظر التحقق.",
   stripeUnavailable: "تغيير البطاقة والتحقق غير متاحين الآن. حاول لاحقًا.",
+  switchYearlyButton: "حوّل إلى الاشتراك السنوي",
+  switchHeading: "التحويل إلى الاشتراك السنوي",
+  switchIntro: "يُخصم المبلغ اليوم من بطاقتك المحفوظة، ويصبح اشتراكك سنويًا تبدأ سنته من اليوم. وتُخصم من السعر قيمة الأيام المتبقية من شهرك الحالي.",
+  loadingSwitchQuote: "جارٍ حساب المبلغ…",
+  switchQuoteFailed: "تعذّر حساب المبلغ. حاول مرة أخرى.",
+  switchQuoteReady: (total: string) => `يُخصم منك اليوم ${total} إن أكّدت التحويل.`,
+  switchYearlyPrice: "السعر السنوي:",
+  switchCredit: "خصم الأيام المتبقية من هذا الشهر:",
+  switchTax: "الضريبة:",
+  switchTotalToday: "المبلغ الذي يُخصم اليوم:",
+  switchRenews: (date: string | null, price: string) =>
+    date
+      ? `يتجدد الاشتراك تلقائيًا في ${date}، ثم كل سنة بمبلغ ${price}، حتى تلغيه.`
+      : `يتجدد الاشتراك تلقائيًا كل سنة بمبلغ ${price} حتى تلغيه.`,
+  switchResumes: "كنت قد ألغيت التجديد، والتحويل يعيده.",
+  switchConfirm: (total: string) => `ادفع ${total} وحوّل إلى السنوي`,
+  switchBack: "رجوع",
+  switching: "جارٍ الدفع والتحويل…",
+  switchedAnnouncement: "أصبح اشتراكك سنويًا.",
+  switchRepriced: (total: string) =>
+    `تغيّر المبلغ قليلًا منذ عرضه، وأصبح ${total}. لم يُخصم أي مبلغ. راجعه، ثم اضغط زر الدفع إن وافقت عليه.`,
+  switchDeclinedReplace: "يمكنك تغيير البطاقة ثم المحاولة مرة أخرى.",
+  switchUnavailableAnnouncement: "لم يعد التحويل إلى السنوي متاحًا لهذا الاشتراك.",
+  switchVerifyNotCompleted: "لم يكتمل التحقق من الدفع، ولم يُخصم أي مبلغ، وما زال اشتراكك شهريًا. حاول مرة أخرى.",
   provinces: {
     AB: "ألبرتا",
     BC: "كولومبيا البريطانية",
@@ -517,12 +558,31 @@ const en: Strings = {
     "These are the standard prices. To get your country's price, open the Mantooq app once, signed in with this account, on version 90.7 or later, then reload this page.",
   choosePlan: "Choose a plan",
   blockerLifetime: "You already have lifetime access, so there's nothing more to buy.",
-  blockerSubscribed: "You already have a subscription from this site, so the monthly and yearly plans aren't offered.",
+  premiumHeading: "What you have now",
+  premiumWebRenews: (plan: string | null, date: string | null) =>
+    `${plan ? `${plan} subscription` : "Subscription"} from this site, ${date ? `renews on ${date}` : "renews automatically"}.`,
+  premiumWebCancelling: (plan: string | null, date: string | null) =>
+    `${plan ? `${plan} subscription` : "Subscription"} from this site, cancelled; Premium stays on until ${date ?? "the end of the paid period"}.`,
+  premiumWebPaymentFailed: (plan: string | null) =>
+    `${plan ? `${plan} subscription` : "Subscription"} from this site: the renewal payment didn't go through.`,
+  premiumWebLifetime: "Lifetime access from this site.",
+  premiumStoreRenews: (store: string, date: string | null) => `Subscription through ${store}, ${date ? `renews on ${date}` : "renews automatically"}.`,
+  premiumStoreCancelling: (store: string, date: string | null) =>
+    `Subscription through ${store}, cancelled; Premium stays on until ${date ?? "the end of its period"}.`,
+  premiumManual: (date: string | null) => (date ? `Premium activated by the Mantooq team, until ${date}.` : "Premium activated by the Mantooq team."),
+  notOffered: (plans: string) => `Not available to you now: ${plans}.`,
+  blockerSubscribed: "You already subscribe from this site. Cancelling it, changing its card and moving from monthly to yearly are all on the manage page.",
   blockerSubscribedLifetime: "You can buy lifetime access; your current subscription is then cancelled, with no refund for the time left.",
-  blockerStore: (store: string) =>
-    `You have a ${store} subscription that renews automatically, so the monthly and yearly plans aren't offered here: you'd pay twice. To pay here instead, turn off its renewal in ${store} first, then reload this page.`,
+  blockerStore: (store: string, date: string | null) =>
+    `You have a ${store} subscription that renews automatically, so a second subscription here would charge you twice. To pay here instead, turn off its renewal in ${store} first. Premium stays on until ${date ?? "the end of its period"}. Then reload this page.`,
   blockerStoreLifetime: (store: string) =>
     `You can still buy lifetime access. If you do, cancel the ${store} subscription yourself: it doesn't stop on its own.`,
+  confirmIntro: "You already have Premium:",
+  confirmStartsToday: "The plan you buy now starts today. It doesn't start when what you have ends, and it isn't added to it. Nothing is refunded.",
+  acknowledge: "I understand",
+  acknowledgeFirst: "Tick “I understand” first.",
+  existingPremiumChanged:
+    "You have Premium that wasn't shown when you opened this page, and nothing was charged. Check it, then tick “I understand” before paying.",
   noticeHeading: "Before you pay",
   noticeImmediate: "Premium starts as soon as the payment goes through.",
   noticeNoRefunds: "Payments are not refundable.",
@@ -635,6 +695,30 @@ const en: Strings = {
   noSubscriptionError: "We couldn't find a subscription to change. Reload the page.",
   noActionRequiredError: "No payment is waiting for verification.",
   stripeUnavailable: "Card changes and verification aren't available right now. Try later.",
+  switchYearlyButton: "Switch to the yearly plan",
+  switchHeading: "Switch to the yearly plan",
+  switchIntro: "Your saved card is charged today, and your plan becomes yearly, with the year starting today. The days left in your current month are taken off the price.",
+  loadingSwitchQuote: "Working out the amount…",
+  switchQuoteFailed: "We couldn't work out the amount. Try again.",
+  switchQuoteReady: (total: string) => `If you confirm the switch, you're charged ${total} today.`,
+  switchYearlyPrice: "Yearly price:",
+  switchCredit: "Credit for the days left this month:",
+  switchTax: "Tax:",
+  switchTotalToday: "Charged today:",
+  switchRenews: (date: string | null, price: string) =>
+    date
+      ? `It renews automatically on ${date}, then every year at ${price}, until you cancel.`
+      : `It renews automatically every year at ${price} until you cancel.`,
+  switchResumes: "You had cancelled the renewal; switching turns it back on.",
+  switchConfirm: (total: string) => `Pay ${total} and switch to yearly`,
+  switchBack: "Back",
+  switching: "Paying and switching…",
+  switchedAnnouncement: "Your subscription is now yearly.",
+  switchRepriced: (total: string) =>
+    `The amount changed slightly since it was shown and is now ${total}. Nothing was charged. Check it, then press the pay button if you agree.`,
+  switchDeclinedReplace: "You can replace the card, then try again.",
+  switchUnavailableAnnouncement: "Switching to yearly is no longer available for this subscription.",
+  switchVerifyNotCompleted: "The payment check wasn't completed. Nothing was charged, and your plan is still monthly. Try again.",
   provinces: {
     AB: "Alberta",
     BC: "British Columbia",

@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import {
   asksForProvince,
+  blockedPlans,
   cardBrandName,
+  confirmationFor,
   defaultPlan,
   doubleSubscriptionStore,
   elementsKindFor,
@@ -10,16 +12,26 @@ import {
   formatDate,
   formatMoney,
   intervalOf,
+  keepsAttempt,
   manageActions,
   PAYMENT_ELEMENT_OPTIONS,
+  planNames,
+  premiumLine,
+  premiumOf,
   purchasablePlans,
   purchaseRequest,
   refusalFrom,
   replaceCardRequest,
   shownTotal,
+  switchRequest,
+  switchSummary,
   type PlanOffer,
+  type PlansResponse,
+  type PremiumSource,
   type Quote,
+  type SwitchQuote,
 } from "../src/billing/logic";
+import { STRINGS } from "../src/i18n";
 import { routeFor } from "../src/router";
 
 const MONTHLY: PlanOffer = { plan: "web_monthly", amount: 499, currency: "usd", interval: "month" };
@@ -243,13 +255,88 @@ describe("replaceCardRequest", () => {
 
 describe("manageActions", () => {
   it("offers what each state allows", () => {
-    expect(manageActions("active")).toEqual({ cancel: true, resume: false, replaceCard: true, authenticate: false, subscribe: false });
-    expect(manageActions("cancelling")).toEqual({ cancel: false, resume: true, replaceCard: true, authenticate: false, subscribe: false });
-    expect(manageActions("payment_failed")).toEqual({ cancel: true, resume: false, replaceCard: true, authenticate: false, subscribe: false });
-    expect(manageActions("needs_action")).toEqual({ cancel: true, resume: false, replaceCard: true, authenticate: true, subscribe: false });
-    expect(manageActions("lifetime")).toEqual({ cancel: false, resume: false, replaceCard: false, authenticate: false, subscribe: false });
-    expect(manageActions("ended")).toEqual({ cancel: false, resume: false, replaceCard: false, authenticate: false, subscribe: true });
-    expect(manageActions("none")).toEqual({ cancel: false, resume: false, replaceCard: false, authenticate: false, subscribe: true });
+    const none = { switchYearly: false };
+    expect(manageActions("active")).toEqual({ cancel: true, resume: false, replaceCard: true, authenticate: false, subscribe: false, ...none });
+    expect(manageActions("cancelling")).toEqual({ cancel: false, resume: true, replaceCard: true, authenticate: false, subscribe: false, ...none });
+    expect(manageActions("payment_failed")).toEqual({ cancel: true, resume: false, replaceCard: true, authenticate: false, subscribe: false, ...none });
+    expect(manageActions("needs_action")).toEqual({ cancel: true, resume: false, replaceCard: true, authenticate: true, subscribe: false, ...none });
+    expect(manageActions("lifetime")).toEqual({ cancel: false, resume: false, replaceCard: false, authenticate: false, subscribe: false, ...none });
+    expect(manageActions("ended")).toEqual({ cancel: false, resume: false, replaceCard: false, authenticate: false, subscribe: true, ...none });
+    expect(manageActions("none")).toEqual({ cancel: false, resume: false, replaceCard: false, authenticate: false, subscribe: true, ...none });
+  });
+
+  it("offers the switch to yearly only on a paid-up monthly plan, cancelled or not", () => {
+    expect(manageActions("active", "web_monthly").switchYearly).toBe(true);
+    expect(manageActions("cancelling", "web_monthly").switchYearly).toBe(true);
+    for (const state of ["payment_failed", "needs_action", "ended", "none", "lifetime"] as const) {
+      expect(manageActions(state, "web_monthly").switchYearly).toBe(false);
+    }
+    expect(manageActions("active", "web_yearly").switchYearly).toBe(false);
+    expect(manageActions("active").switchYearly).toBe(false);
+  });
+});
+
+describe("the switch panel", () => {
+  const quote: SwitchQuote = {
+    plan: "web_yearly", tier: "standard", amount: 4999, credit: 333, tax: 0, total: 4666, currency: "usd",
+    renewsAt: "2027-11-26T05:40:15.000Z", card: { brand: "visa", last4: "4242" },
+  };
+
+  it("lists the yearly price, the credit as a deduction, the total today and the card; then renewal and no refunds", () => {
+    const summary = switchSummary(quote, "active", STRINGS.en, "en");
+    expect(summary.rows).toEqual([
+      { label: "Yearly price:", value: "$49.99" },
+      { label: "Credit for the days left this month:", value: "-$3.33" },
+      { label: "Charged today:", value: "$46.66" },
+      { label: "Card:", value: "Visa ending in", digits: "4242" },
+    ]);
+    expect(summary.notes).toEqual([
+      "It renews automatically on November 26, 2027, then every year at $49.99, until you cancel.",
+      STRINGS.en.noticeNoRefunds,
+    ]);
+    expect(summary.confirm).toBe("Pay $46.66 and switch to yearly");
+  });
+
+  it("shows tax only when there is some, and says a cancelled renewal is turned back on", () => {
+    const taxed = switchSummary({ ...quote, tax: 650, total: 5316 }, "cancelling", STRINGS.en, "en");
+    expect(taxed.rows.map((row) => row.label)).toEqual(["Yearly price:", "Credit for the days left this month:", "Tax:", "Charged today:", "Card:"]);
+    expect(taxed.rows[2].value).toBe("$6.50");
+    expect(taxed.notes).toContain(STRINGS.en.switchResumes);
+    expect(switchSummary(quote, "active", STRINGS.en, "en").notes).not.toContain(STRINGS.en.switchResumes);
+    const noCard = switchSummary({ ...quote, card: undefined }, "active", STRINGS.en, "en");
+    expect(noCard.rows.map((row) => row.label)).not.toContain("Card:");
+  });
+
+  it("in Arabic, money and the date through the page's formats, with no raw cents", () => {
+    const summary = switchSummary(quote, "cancelling", STRINGS.ar, "ar");
+    const text = [...summary.rows.map((row) => `${row.label} ${row.value}`), ...summary.notes, summary.confirm].join(" ");
+    expect(text).toContain(formatMoney(4999, "usd", "ar"));
+    expect(text).toContain(formatMoney(-333, "usd", "ar"));
+    expect(text).toContain(formatDate(quote.renewsAt, "ar")!);
+    expect(text).toContain(STRINGS.ar.switchResumes);
+    expect(text).not.toMatch(/4999|4666|\b333\b|undefined|null/);
+  });
+
+  it("each confirmation sends the shown total and its attempt id", () => {
+    expect(switchRequest(quote, "attempt-0001-aaaaaaaa", "ar")).toEqual({ action: "switch_yearly", acceptedTotal: 4666, attemptId: "attempt-0001-aaaaaaaa", lang: "ar" });
+  });
+
+  it("keeps the attempt id only while the server may hold the attempt", () => {
+    expect(keepsAttempt({ kind: "noAnswer" })).toBe(true);
+    expect(keepsAttempt({ kind: "generic" })).toBe(true);
+    expect(keepsAttempt({ kind: "verifyNotCompleted" })).toBe(true);
+    expect(keepsAttempt({ kind: "declined", category: "declined" })).toBe(false);
+    expect(keepsAttempt({ kind: "purchaseInProgress" })).toBe(false);
+    expect(keepsAttempt({ kind: "throttled" })).toBe(false);
+  });
+
+  it("reads switch_unavailable, whatever its cause", () => {
+    expect(refusalFrom({ code: "functions/failed-precondition", details: { reason: "switch_unavailable", cause: "payment_due" } })).toEqual({ kind: "switchUnavailable" });
+  });
+
+  it("the purchase page names the switch among what the manage page does", () => {
+    expect(STRINGS.en.blockerSubscribed).toMatch(/monthly to yearly/);
+    expect(STRINGS.ar.blockerSubscribed).toMatch(/السنوي/);
   });
 });
 
@@ -285,5 +372,66 @@ describe("asksForProvince", () => {
     expect(asksForProvince({ kind: "billingAddressIncomplete" }, "US")).toBe(false);
     expect(asksForProvince({ kind: "billingAddressIncomplete" }, null)).toBe(false);
     expect(asksForProvince({ kind: "generic" }, "CA")).toBe(false);
+  });
+});
+
+describe("existing premium", () => {
+  const s = STRINGS.en;
+  const ar = STRINGS.ar;
+  const UNTIL = "2026-12-14T12:00:00Z";
+  const web = (fields: Partial<PremiumSource> = {}): PremiumSource => ({ source: "web", kind: "subscription", plan: "web_monthly", state: "active", renews: true, until: UNTIL, ...fields });
+  const store = (source: "apple" | "google", renews: boolean): PremiumSource => ({ source, kind: "subscription", state: renews ? "active" : "cancelling", renews, until: UNTIL });
+  const manual: PremiumSource = { source: "manual", kind: "grant", state: "active", renews: false, until: UNTIL };
+  const plansWith = (fields: Partial<PlansResponse>) => ({ plans: ALL, blockers: [], storeSubscription: null, ...fields });
+
+  it("reads a missing list, from an older backend, as empty", () => {
+    expect(premiumOf({})).toEqual([]);
+    expect(confirmationFor({})).toBeNull();
+  });
+
+  it("writes one line per source, with the date in words", () => {
+    const line = (source: PremiumSource) => premiumLine(source, s, "en");
+    expect(line(web())).toEqual({ text: "Monthly subscription from this site, renews on December 14, 2026.", manage: false });
+    expect(line(web({ plan: "web_yearly", state: "cancelling", renews: false })).text).toBe(
+      "Yearly subscription from this site, cancelled; Premium stays on until December 14, 2026.",
+    );
+    expect(line(web({ state: "payment_failed" }))).toEqual({ text: "Monthly subscription from this site: the renewal payment didn't go through.", manage: true });
+    expect(line(web({ state: "needs_action" })).manage).toBe(true);
+    expect(line({ source: "web", kind: "lifetime", plan: "web_lifetime", state: "active", renews: false }).text).toBe("Lifetime access from this site.");
+    expect(line(store("apple", true)).text).toBe("Subscription through App Store, renews on December 14, 2026.");
+    expect(line(store("google", false)).text).toBe("Subscription through Google Play, cancelled; Premium stays on until December 14, 2026.");
+    expect(line(manual).text).toBe("Premium activated by the Mantooq team, until December 14, 2026.");
+    expect(premiumLine(manual, ar, "ar").text).toContain("ديسمبر");
+    expect(premiumLine(manual, ar, "ar").text).not.toMatch(/[0-9]/);
+  });
+
+  it("names each blocked plan with its reason", () => {
+    expect(blockedPlans(plansWith({}))).toEqual([]);
+    expect(blockedPlans(plansWith({ blockers: ["lifetime_active"] }))).toEqual([{ plans: ["web_monthly", "web_yearly", "web_lifetime"], reason: { kind: "lifetime" } }]);
+    expect(blockedPlans(plansWith({ blockers: ["already_subscribed"], premium: [web()] }))).toEqual([{ plans: ["web_monthly", "web_yearly"], reason: { kind: "web" } }]);
+    expect(
+      blockedPlans(plansWith({ blockers: ["store_subscription_active"], storeSubscription: { platform: "google", autoRenewing: true }, premium: [store("google", true)] })),
+    ).toEqual([{ plans: ["web_monthly", "web_yearly"], reason: { kind: "store", platform: "google", until: UNTIL } }]);
+    expect(
+      blockedPlans({ plans: [YEARLY, LIFETIME], blockers: ["store_subscription_active"], storeSubscription: { platform: "apple", autoRenewing: true } }),
+    ).toEqual([{ plans: ["web_yearly"], reason: { kind: "store", platform: "apple" } }]);
+    expect(planNames(["web_monthly", "web_yearly"], s, "en")).toBe("Monthly and Yearly");
+  });
+
+  it("asks for confirmation over a store subscription or a manual grant, never over this site's own", () => {
+    expect(confirmationFor({ premium: [web()] })).toBeNull();
+    expect(confirmationFor({ premium: [web({ kind: "lifetime", plan: "web_lifetime", renews: false })] })).toBeNull();
+    expect(confirmationFor({ premium: [manual] })).toEqual({ sources: [manual], renewingStores: [] });
+    expect(confirmationFor({ premium: [web(), store("apple", false)] })).toEqual({ sources: [store("apple", false)], renewingStores: [] });
+    expect(confirmationFor({ premium: [store("google", true), manual] })).toEqual({ sources: [store("google", true), manual], renewingStores: ["google"] });
+  });
+
+  it("sends acknowledgeExisting only once ticked, and reads the server's refusal", () => {
+    const base = { offer: LIFETIME, quote: null, freshTokenId: "ctoken_new", province: null, lang: "en" as const };
+    // The key itself must be absent: the callable SDK would send an `undefined` value as `null`.
+    expect(Object.keys(purchaseRequest(base))).not.toContain("acknowledgeExisting");
+    expect(Object.keys(purchaseRequest({ ...base, acknowledged: false }))).not.toContain("acknowledgeExisting");
+    expect(purchaseRequest({ ...base, acknowledged: true }).acknowledgeExisting).toBe(true);
+    expect(refusalFrom(httpsError("failed-precondition", { reason: "existing_premium", premium: [manual] }))).toEqual({ kind: "existingPremium" });
   });
 });

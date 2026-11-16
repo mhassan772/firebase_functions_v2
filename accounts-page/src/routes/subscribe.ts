@@ -12,9 +12,16 @@ import { announce, focusLanguageToggle, focusSelector, heading, renderShell } fr
 import { finishWebPurchase, getWebPlans, startWebPurchase } from "../billing/api";
 import {
   asksForProvince,
+  blockedPlans,
+  confirmationFor,
   defaultPlan,
   elementsKindFor,
+  formatDate,
   formatMoney,
+  planName,
+  planNames,
+  premiumLine,
+  premiumOf,
   purchasablePlans,
   purchaseRequest,
   refusalFrom,
@@ -25,6 +32,7 @@ import {
   type PlansResponse,
   type Quote,
   type Refusal,
+  type BlockedPlans,
 } from "../billing/logic";
 import { mountPayment, paymentHost, updatePayment, type MountedPayment } from "../billing/stripe";
 import {
@@ -75,6 +83,10 @@ const form = {
   needProvince: false,
   province: "",
   error: null as { refusal: Refusal | { kind: "cardIncomplete" | "authenticationNotCompleted" | "provinceMissing" }; place: ErrorPlace } | null,
+  /// The buyer ticked «فهمت ذلك» over premium from a store or a manual grant; kept when the plan
+  /// changes, cleared when the plans load again.
+  acknowledged: false,
+  acknowledgeError: false,
 };
 
 const gate = createGate({ lang: () => lang, onChange: onGateChange });
@@ -96,9 +108,12 @@ function onGateChange(change: GateChange) {
   if (change.announce) announce(change.announce);
 }
 
-async function loadPlans(options: { announce?: string } = {}) {
+/// `existingPremium`: the server refused a purchase over premium this page did not show, so the
+/// plan is kept and focus goes to the confirmation that now appears.
+async function loadPlans(options: { announce?: string; existingPremium?: boolean } = {}) {
   const session = gate.session;
   if (!session) return;
+  const previousPlan = form.selected;
   view = { kind: "loadingPlans" };
   resetForm();
   render({ focus: "h1" });
@@ -117,10 +132,12 @@ async function loadPlans(options: { announce?: string } = {}) {
     return;
   }
   offers = purchasablePlans(plans);
-  form.selected = defaultPlan(offers);
+  const keep = options.existingPremium && offers.some((offer) => offer.plan === previousPlan);
+  form.selected = keep ? previousPlan : defaultPlan(offers);
   view = { kind: "ready" };
-  render({ focus: "h1" });
-  announce(t().plansLoaded);
+  const confirming = Boolean(options.existingPremium && selectedOffer() && confirmationFor(plans));
+  render({ focus: confirming ? "#acknowledge" : "h1" });
+  announce(options.existingPremium ? t().existingPremiumChanged : t().plansLoaded);
 }
 
 function resetForm() {
@@ -135,6 +152,8 @@ function resetForm() {
     needProvince: false,
     province: "",
     error: null,
+    acknowledged: false,
+    acknowledgeError: false,
   });
 }
 
@@ -244,7 +263,15 @@ async function onPay() {
   if (form.busy) return;
   const offer = selectedOffer();
   const session = gate.session;
-  if (!offer || !form.payment || !session || form.cardStatus !== "ready") return;
+  if (!offer || !session) return;
+  if (needsAcknowledgement()) {
+    form.acknowledgeError = true;
+    regions.update("pay-region");
+    focusSelector("#acknowledge");
+    announce(t().acknowledgeFirst);
+    return;
+  }
+  if (!form.payment || form.cardStatus !== "ready") return;
   if (form.needProvince && !form.province) {
     showError({ refusal: { kind: "provinceMissing" }, place: "province" });
     return;
@@ -293,6 +320,7 @@ async function purchase(offer: PlanOffer) {
         freshTokenId: token.id,
         province: form.needProvince ? form.province : null,
         lang,
+        acknowledged: Boolean(plans && confirmationFor(plans)) && form.acknowledged,
       }),
     );
   } catch (error) {
@@ -330,6 +358,10 @@ async function purchaseRefused(refusal: Refusal) {
     case "accountDeleted":
       resetForm();
       await gate.signOut(refusal.kind === "accountDeleted" ? t().accountDeleted : undefined);
+      return;
+    case "existingPremium":
+      // A stale page: the plans are read again, so the premium and its confirmation show.
+      await loadPlans({ existingPremium: true });
       return;
     case "billingAddressIncomplete":
       if (asksForProvince(refusal, form.billingCountry)) {
@@ -425,10 +457,6 @@ function money(cents: number, currency: string): string {
   return formatMoney(cents, currency, lang);
 }
 
-function planName(plan: Plan, s: Strings): string {
-  return plan === "web_monthly" ? s.planMonthly : plan === "web_yearly" ? s.planYearly : s.planLifetime;
-}
-
 function priceText(offer: PlanOffer, s: Strings): string {
   const price = money(offer.amount, offer.currency);
   return offer.interval === "month" ? s.perMonth(price) : offer.interval === "year" ? s.perYear(price) : s.once(price);
@@ -486,6 +514,8 @@ function errorText(refusal: NonNullable<typeof form.error>["refusal"]): string {
       return s.storeActiveError(storeLabel(refusal.platform, s));
     case "purchaseInProgress":
       return s.purchaseInProgress;
+    case "existingPremium":
+      return s.existingPremiumChanged;
     case "accountDeleted":
       return s.accountDeleted;
     case "noAnswer":
@@ -609,7 +639,7 @@ async function checkVerifiedAgain() {
 function readyView(): Node[] {
   const s = t();
   const response = plans!;
-  const nodes: (Node | null)[] = [heading(s.subscribeTitle), signedInRow(), ...blockerNotices(response)];
+  const nodes: (Node | null)[] = [heading(s.subscribeTitle), signedInRow(), premiumSection(response), ...blockedNotices(response)];
   if (offers.length === 0) return compact(nodes);
   if (!response.countryKnown) nodes.push(notice("info", "i", h("p", {}, s.unknownCountryNote)));
   nodes.push(planGroup());
@@ -628,40 +658,110 @@ function readyView(): Node[] {
   return compact(nodes);
 }
 
-function blockerNotices(response: PlansResponse): Node[] {
+/// «ما لديك الآن»: every source of premium the account holds, so none goes unmentioned.
+function premiumSection(response: PlansResponse): Node | null {
   const s = t();
-  const blockers = new Set(response.blockers);
+  const sources = premiumOf(response);
+  if (sources.length === 0) return null;
+  return h(
+    "section",
+    { class: "terms", "aria-labelledby": "premium-heading" },
+    h("h2", { id: "premium-heading" }, s.premiumHeading),
+    h(
+      "ul",
+      { class: "plain" },
+      ...sources.map((source) => {
+        const line = premiumLine(source, s, lang);
+        return h("li", {}, line.text, line.manage ? " " : null, line.manage ? pageLink("/manage", s.manageLink, lang) : null);
+      }),
+    ),
+  );
+}
+
+/// Each plan of the tier that cannot be bought, with why and the step that unblocks it.
+function blockedNotices(response: PlansResponse): Node[] {
   const lifetimeOffered = offers.some((offer) => offer.plan === "web_lifetime");
-  const nodes: Node[] = [];
-  if (blockers.has("lifetime_active")) {
-    nodes.push(notice("info", "i", h("p", {}, s.blockerLifetime), h("p", {}, pageLink("/manage", s.manageLink, lang))));
-    return nodes;
-  }
-  if (blockers.has("already_subscribed")) {
-    nodes.push(
-      notice(
+  const confirmation = confirmationFor(response);
+  return blockedPlans(response).map((blocked) => blockedNotice(blocked, lifetimeOffered, confirmation?.renewingStores ?? []));
+}
+
+function blockedNotice(blocked: BlockedPlans, lifetimeOffered: boolean, confirmedStores: readonly ("apple" | "google")[]): Node {
+  const s = t();
+  const names = h("p", { class: "strong" }, s.notOffered(planNames(blocked.plans, s, lang)));
+  const reason = blocked.reason;
+  switch (reason.kind) {
+    case "lifetime":
+      return notice("info", "i", names, h("p", {}, s.blockerLifetime));
+    case "web":
+      return notice(
         "info",
         "i",
+        names,
         h("p", {}, s.blockerSubscribed),
-        lifetimeOffered ? h("p", {}, s.blockerSubscribedLifetime) : null,
         h("p", {}, pageLink("/manage", s.manageLink, lang)),
-      ),
-    );
+        lifetimeOffered ? h("p", {}, s.blockerSubscribedLifetime) : null,
+      );
+    case "store": {
+      const name = storeName(reason.platform, s);
+      // The confirmation above the pay button says it when the backend lists the store; an older
+      // backend lists nothing, so it is said here as before.
+      const sayLifetime = lifetimeOffered && !confirmedStores.includes(reason.platform);
+      return notice(
+        "warn",
+        "!",
+        names,
+        h("p", {}, s.blockerStore(name, formatDate(reason.until, lang))),
+        h("p", {}, storeCancelLink(reason.platform, s)),
+        sayLifetime ? h("p", {}, s.blockerStoreLifetime(name)) : null,
+      );
+    }
   }
-  const store = response.storeSubscription;
-  if (blockers.has("store_subscription_active") && store) {
-    const name = storeName(store.platform, s);
-    nodes.push(
+}
+
+/// Whether the pay button waits for «فهمت ذلك»: the plan is bought over premium from a store or a
+/// manual grant, and the buyer has not ticked it.
+function needsAcknowledgement(): boolean {
+  return Boolean(plans && confirmationFor(plans)) && !form.acknowledged;
+}
+
+/// The confirmation directly above the pay button: what the account has from elsewhere, that the
+/// plan starts today and adds nothing to it, and the checkbox the purchase waits for.
+function confirmationView(): Node[] {
+  const s = t();
+  const confirmation = plans ? confirmationFor(plans) : null;
+  if (!confirmation) return [];
+  const checkbox = h("input", {
+    type: "checkbox",
+    id: "acknowledge",
+    "aria-invalid": form.acknowledgeError ? "true" : undefined,
+    "aria-describedby": form.acknowledgeError ? "acknowledge-error" : undefined,
+    onchange: (event: Event) => {
+      form.acknowledged = (event.target as HTMLInputElement).checked;
+      form.acknowledgeError = false;
+      regions.update("pay-region");
+    },
+  });
+  checkbox.checked = form.acknowledged;
+  checkbox.disabled = form.busy;
+  return compact([
+    h(
+      "div",
+      { id: "existing-notice" },
       notice(
         "warn",
         "!",
-        h("p", {}, s.blockerStore(name)),
-        h("p", {}, storeCancelLink(store.platform, s)),
-        lifetimeOffered ? h("p", {}, s.blockerStoreLifetime(name)) : null,
+        h("p", {}, s.confirmIntro),
+        h("ul", { class: "plain" }, ...confirmation.sources.map((source) => h("li", {}, premiumLine(source, s, lang).text))),
+        h("p", { class: "strong" }, s.confirmStartsToday),
+        ...confirmation.renewingStores.flatMap((store) => [
+          h("p", {}, s.blockerStoreLifetime(storeName(store, s))),
+          h("p", {}, storeCancelLink(store, s)),
+        ]),
       ),
-    );
-  }
-  return nodes;
+    ),
+    h("label", { class: `check${form.acknowledgeError ? " invalid" : ""}`, for: "acknowledge" }, checkbox, h("span", {}, s.acknowledge)),
+    form.acknowledgeError ? h("p", { id: "acknowledge-error", class: "error" }, s.acknowledgeFirst) : null,
+  ]);
 }
 
 function planGroup(): Node {
@@ -735,19 +835,21 @@ function payRegion(): (Node | null)[] {
   const total = shownTotal(offer, form.quote);
   const quote = form.quote && form.quote.plan === offer.plan ? form.quote : null;
   const errorId = form.error && form.error.place !== "province" ? `${form.error.place}-error-text` : "";
-  const describedBy = [errorId, quote ? "quote" : ""].filter(Boolean).join(" ");
+  const waiting = needsAcknowledgement();
+  const describedBy = [errorId, quote ? "quote" : "", waiting ? "existing-notice" : ""].filter(Boolean).join(" ");
   return [
     form.needProvince ? provinceField() : null,
     quote ? quoteView(quote) : null,
     noticeView(offer, total),
     errorFor("pay"),
+    ...confirmationView(),
     h(
       "button",
       {
         type: "button",
         id: "pay",
         class: "btn",
-        "aria-disabled": form.busy || form.cardStatus !== "ready" ? "true" : undefined,
+        "aria-disabled": form.busy || form.cardStatus !== "ready" || waiting ? "true" : undefined,
         "aria-busy": form.busy ? "true" : undefined,
         "aria-describedby": describedBy || undefined,
         onclick: () => void onPay(),

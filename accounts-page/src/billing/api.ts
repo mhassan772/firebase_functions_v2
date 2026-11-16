@@ -5,7 +5,7 @@ import { connectFunctionsEmulator, getFunctions, httpsCallable, type Functions }
 
 import { emulatorSettings, hostAndPort } from "../firebaseConfig";
 import type { Lang } from "../i18n";
-import type { FinishResult, ManageResult, Plan, PlansResponse, StartResult, SubscriptionResponse } from "./logic";
+import type { FinishResult, ManageResult, Plan, PlansResponse, StartResult, SubscriptionResponse, SwitchResult } from "./logic";
 
 const FUNCTIONS_REGION = "europe-west2";
 /// A little over the purchase callable's own 120 s, so the server always answers first.
@@ -38,7 +38,7 @@ export function getWebPlans(app: FirebaseApp, lang: Lang): Promise<PlansResponse
 
 export function startWebPurchase(
   app: FirebaseApp,
-  request: { plan: Plan; confirmationToken: string; acceptedTotal: number; billingState?: string; lang: Lang },
+  request: { plan: Plan; confirmationToken: string; acceptedTotal: number; billingState?: string; lang: Lang; acknowledgeExisting?: true },
 ): Promise<StartResult> {
   return call(app, "startWebPurchase", request, PURCHASE_TIMEOUT_MS);
 }
@@ -57,6 +57,13 @@ export function manageWebSubscription(
   app: FirebaseApp,
   request: { action: "replace_card"; confirmationToken: string; acceptedRenewalAmount?: number } | { action: "finish_replace_card"; setupIntentId: string },
 ): Promise<ManageResult>;
+export function manageWebSubscription(
+  app: FirebaseApp,
+  request:
+    | { action: "quote_switch_yearly" }
+    | { action: "switch_yearly"; acceptedTotal: number; attemptId: string; lang: Lang }
+    | { action: "finish_switch_yearly"; purchaseId: string },
+): Promise<SwitchResult>;
 export function manageWebSubscription(app: FirebaseApp, request: { action: string }): Promise<unknown> {
   return call(app, "manageWebSubscription", request, PURCHASE_TIMEOUT_MS);
 }

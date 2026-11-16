@@ -1,5 +1,5 @@
-/// `/manage`: the signed-in account's web subscription, with cancel, resume, card replacement and
-/// the bank's verification of a renewal.
+/// `/manage`: the signed-in account's web subscription, with cancel, resume, card replacement, the
+/// switch from monthly to yearly and the bank's verification of a renewal.
 
 import { h, ltr } from "../dom";
 import { STRINGS, langFromParam, type Lang, type Strings } from "../i18n";
@@ -11,15 +11,20 @@ import {
   formatDate,
   formatMoney,
   intervalOf,
+  keepsAttempt,
   manageActions,
   refusalFrom,
   replaceCardRequest,
+  switchRequest,
+  switchSummary,
   type DeclineCategory,
   type ManageResult,
   type Quote,
   type Refusal,
   type SubscriptionResponse,
   type SubscriptionState,
+  type SwitchQuote,
+  type SwitchResult,
 } from "../billing/logic";
 import { mountPayment, paymentHost, stripeFor, type MountedPayment } from "../billing/stripe";
 import {
@@ -38,8 +43,11 @@ import {
 
 type View = { kind: "gate" } | { kind: "loading" } | { kind: "loadFailed"; refusal: Refusal } | { kind: "ready" };
 
-type Action = "cancel" | "resume" | "authenticate" | "replace";
-type ShownError = Refusal | { kind: "cardIncomplete" | "verifyNotCompleted" | "cardVerifyNotCompleted" | "stripeUnavailable" };
+type Action = "cancel" | "resume" | "authenticate" | "replace" | "switch";
+type Place = "actions" | "replace" | "switch";
+type ShownError =
+  | Refusal
+  | { kind: "cardIncomplete" | "verifyNotCompleted" | "cardVerifyNotCompleted" | "switchVerifyNotCompleted" | "stripeUnavailable" };
 
 let lang: Lang = langFromParam(new URLSearchParams(location.search).get("lang"));
 let view: View = { kind: "gate" };
@@ -50,7 +58,7 @@ let regions = new Regions();
 const page = {
   busy: null as Action | null,
   progress: "",
-  error: null as { error: ShownError; place: "actions" | "replace" } | null,
+  error: null as { error: ShownError; place: Place } | null,
 };
 
 const replace = {
@@ -59,6 +67,17 @@ const replace = {
   mountId: 0,
   cardStatus: "loading" as "loading" | "failed" | "ready",
   quote: null as Quote | null,
+};
+
+/// The panel that moves a monthly subscription to yearly.
+const switchPanel = {
+  open: false,
+  status: "loading" as "loading" | "failed" | "ready",
+  quote: null as SwitchQuote | null,
+  loadError: null as Refusal | null,
+  /// The confirmation the server may already hold; see `keepsAttempt`.
+  attemptId: null as string | null,
+  loadId: 0,
 };
 
 const gate = createGate({ lang: () => lang, onChange: onGateChange });
@@ -80,13 +99,15 @@ function onGateChange(change: GateChange) {
   if (change.announce) announce(change.announce);
 }
 
-/// Reads the subscription (the server syncs it from Stripe first) and shows it.
-async function load(options: { announce?: string; focus?: string } = {}) {
+/// Reads the subscription (the server syncs it from Stripe first) and shows it. `loadingFocus` is
+/// where focus waits while it loads, `focus` where it lands once the view is ready.
+async function load(options: { announce?: string; focus?: string; loadingFocus?: string } = {}) {
   const session = gate.session;
   if (!session) return;
   closeReplace();
+  closeSwitch();
   view = { kind: "loading" };
-  render({ focus: options.focus });
+  render({ focus: options.loadingFocus ?? options.focus });
   if (options.announce) announce(options.announce);
   try {
     subscription = await getWebSubscription(session.app);
@@ -107,10 +128,13 @@ async function load(options: { announce?: string; focus?: string } = {}) {
 }
 
 /// After an action: shows the new state with focus on its heading, and says what happened.
+///
+/// The button that had focus goes with the old view, so focus waits on the loading message
+/// meanwhile; left to the browser it falls to the page body for the seconds the sync takes.
 async function reloadAfter(message: string) {
   page.busy = null;
   page.error = null;
-  await load({ focus: "#status-heading" });
+  await load({ focus: "#status-heading", loadingFocus: "#loading-status" });
   announce(`${message} ${statusHeadingText(subscription?.state ?? "none")}.`);
 }
 
@@ -118,27 +142,28 @@ function setBusy(action: Action | null, progress = "") {
   page.busy = action;
   page.progress = progress;
   replace.payment?.element.update({ readOnly: action !== null });
-  regions.update("actions", "replace-actions");
+  regions.update("actions", "replace-actions", "switch-actions");
   if (progress) announce(progress);
 }
 
-function showError(error: ShownError, place: "actions" | "replace") {
+function showError(error: ShownError, place: Place) {
   page.busy = null;
   page.error = { error, place };
   replace.payment?.element.update({ readOnly: false });
-  regions.update("actions", "replace-actions", "replace-error");
+  regions.update("actions", "replace-actions", "replace-error", "switch-actions", "switch-error");
   announce(errorText(error, place));
   if (!document.activeElement || document.activeElement === document.body) {
     // The bank's window took focus with it when it closed.
-    focusSelector(place === "replace" ? "#save-card" : "#status-heading");
+    focusSelector(place === "replace" ? "#save-card" : place === "switch" ? "#confirm-switch" : "#status-heading");
   }
 }
 
-async function failed(error: unknown, place: "actions" | "replace") {
+async function failed(error: unknown, place: Place) {
   const refusal = refusalFrom(error);
   if (refusal.kind === "signedOut" || refusal.kind === "accountDeleted") {
     page.busy = null;
     closeReplace();
+    closeSwitch();
     await gate.signOut(refusal.kind === "accountDeleted" ? t().accountDeleted : undefined);
     return;
   }
@@ -261,6 +286,7 @@ async function runAuthenticate() {
 
 function openReplace() {
   if (page.busy) return;
+  closeSwitch();
   replace.open = true;
   replace.quote = null;
   page.error = null;
@@ -413,9 +439,160 @@ async function afterReplaceAnswer(result: ManageResult) {
   }
 }
 
+// Switching to yearly
+
+function openSwitch() {
+  if (page.busy) return;
+  closeReplace();
+  closeSwitch();
+  switchPanel.open = true;
+  page.error = null;
+  render({ focus: "#switch-heading" });
+  void loadSwitchQuote();
+}
+
+function closeSwitch() {
+  switchPanel.loadId += 1;
+  switchPanel.open = false;
+  switchPanel.status = "loading";
+  switchPanel.quote = null;
+  switchPanel.loadError = null;
+  switchPanel.attemptId = null;
+}
+
+function cancelSwitch() {
+  if (page.busy) return;
+  closeSwitch();
+  page.error = null;
+  render({ focus: "#switch-yearly" });
+}
+
+/// Asks the server what the switch costs now; the panel's heading keeps focus meanwhile.
+async function loadSwitchQuote() {
+  const session = gate.session;
+  if (!session) return;
+  const loadId = ++switchPanel.loadId;
+  switchPanel.status = "loading";
+  switchPanel.loadError = null;
+  regions.update("switch-body", "switch-actions");
+  let answer: SwitchResult;
+  try {
+    answer = await manageWebSubscription(session.app, { action: "quote_switch_yearly" });
+  } catch (error) {
+    if (loadId !== switchPanel.loadId) return;
+    const refusal = refusalFrom(error);
+    if (refusal.kind === "signedOut" || refusal.kind === "accountDeleted") {
+      await failed(error, "switch");
+      return;
+    }
+    if (refusal.kind === "switchUnavailable" || refusal.kind === "noSubscription") {
+      await reloadAfter(t().switchUnavailableAnnouncement);
+      return;
+    }
+    switchPanel.status = "failed";
+    switchPanel.loadError = refusal;
+    regions.update("switch-body", "switch-actions");
+    announce(quoteFailureText(refusal));
+    return;
+  }
+  if (loadId !== switchPanel.loadId || answer.status !== "quote") return;
+  switchPanel.quote = answer.quote;
+  switchPanel.status = "ready";
+  regions.update("switch-body", "switch-actions");
+  announce(t().switchQuoteReady(money(answer.quote.total, answer.quote.currency)));
+}
+
+async function onConfirmSwitch() {
+  if (page.busy || !switchPanel.quote || switchPanel.status !== "ready") return;
+  const session = gate.session!;
+  page.error = null;
+  regions.update("switch-error");
+  setBusy("switch", t().switching);
+  switchPanel.attemptId ??= crypto.randomUUID();
+  let result: SwitchResult;
+  try {
+    result = await manageWebSubscription(session.app, switchRequest(switchPanel.quote, switchPanel.attemptId, lang));
+  } catch (error) {
+    await switchFailed(error);
+    return;
+  }
+  await afterSwitchAnswer(result);
+}
+
+async function afterSwitchAnswer(result: SwitchResult) {
+  const session = gate.session!;
+  switch (result.status) {
+    case "succeeded":
+      switchPanel.attemptId = null;
+      await reloadAfter(t().switchedAnnouncement);
+      return;
+    case "quote":
+    case "reprice":
+      // Nothing was charged; the next press is a new attempt at the new total.
+      switchPanel.attemptId = null;
+      switchPanel.quote = result.quote;
+      page.busy = null;
+      regions.update("switch-body", "switch-actions", "switch-error");
+      announce(t().switchRepriced(money(result.quote.total, result.quote.currency)));
+      focusSelector("#switch-summary");
+      return;
+    case "requires_action": {
+      setBusy("switch", t().verifyingPayment);
+      const key = await stripeKey();
+      let stripe;
+      try {
+        if (!key) throw new Error("no key");
+        stripe = await stripeFor(key, lang);
+      } catch {
+        showError({ kind: "stripeUnavailable" }, "switch");
+        return;
+      }
+      try {
+        await stripe.handleNextAction({ clientSecret: result.clientSecret });
+      } catch {
+        // The server says where the payment stands.
+      }
+      setBusy("switch", t().checkingPayment);
+      let finished: SwitchResult;
+      try {
+        finished = await manageWebSubscription(session.app, { action: "finish_switch_yearly", purchaseId: result.purchaseId });
+      } catch (error) {
+        await switchFailed(error);
+        return;
+      }
+      if (finished.status === "requires_action") {
+        // The same attempt is sent again on the next press, which asks for the bank step again.
+        showError({ kind: "switchVerifyNotCompleted" }, "switch");
+        return;
+      }
+      await afterSwitchAnswer(finished);
+      return;
+    }
+  }
+}
+
+async function switchFailed(error: unknown) {
+  const refusal = refusalFrom(error);
+  if (refusal.kind === "switchUnavailable" || refusal.kind === "noSubscription") {
+    switchPanel.attemptId = null;
+    await reloadAfter(t().switchUnavailableAnnouncement);
+    return;
+  }
+  if (!keepsAttempt(refusal)) switchPanel.attemptId = null;
+  await failed(error, "switch");
+}
+
+/// From a declined switch to the card form, which replaces the card the switch was charged to.
+function replaceAfterDecline() {
+  if (page.busy) return;
+  closeSwitch();
+  openReplace();
+}
+
 async function onSignOut() {
   if (page.busy) return;
   closeReplace();
+  closeSwitch();
   await gate.signOut(t().signedOutAnnouncement);
 }
 
@@ -491,13 +668,30 @@ function declineText(category: DeclineCategory, s: Strings): string {
   }
 }
 
-function errorText(error: ShownError, place: "actions" | "replace" = page.error?.place ?? "actions"): string {
+function quoteFailureText(refusal: Refusal): string {
+  const s = t();
+  switch (refusal.kind) {
+    case "salesDisabled":
+      return s.salesDisabled;
+    case "noAnswer":
+      return s.actionNoAnswer;
+    default:
+      return s.switchQuoteFailed;
+  }
+}
+
+function errorText(error: ShownError, place: Place = page.error?.place ?? "actions"): string {
   const s = t();
   switch (error.kind) {
     case "declined":
       // A card replacement's check verifies the card, not a payment.
       if (place === "replace" && error.category === "authentication_failed") return s.cardVerifyFailed;
+      if (place === "switch") return `${declineText(error.category, s)} ${s.switchDeclinedReplace}`;
       return declineText(error.category, s);
+    case "switchVerifyNotCompleted":
+      return s.switchVerifyNotCompleted;
+    case "purchaseInProgress":
+      return s.purchaseInProgress;
     case "cardIncomplete":
       return s.cardIncomplete;
     case "verifyNotCompleted":
@@ -513,7 +707,7 @@ function errorText(error: ShownError, place: "actions" | "replace" = page.error?
     case "throttled":
       return s.throttled;
     case "salesDisabled":
-      return s.stripeUnavailable;
+      return place === "switch" ? s.salesDisabled : s.stripeUnavailable;
     case "noSubscription":
       return s.noSubscriptionError;
     case "noActionRequired":
@@ -585,7 +779,7 @@ function signedInRow(): Node {
 
 function readyView(sub: SubscriptionResponse): Node[] {
   const s = t();
-  const actions = manageActions(sub.state);
+  const actions = manageActions(sub.state, sub.plan);
   const nodes: (Node | null)[] = [heading(s.manageTitle), signedInRow(), statusSection(sub)];
   const store = doubleSubscriptionStore(sub);
   if (store) {
@@ -602,6 +796,7 @@ function readyView(sub: SubscriptionResponse): Node[] {
   if (actions.subscribe) nodes.push(pageLink("/subscribe", s.subscribeLink, lang, "btn"));
   nodes.push(regions.create("actions", () => actionButtons(sub)));
   if (replace.open) nodes.push(replaceSection(sub));
+  if (switchPanel.open) nodes.push(switchSection());
   return compact(nodes);
 }
 
@@ -633,7 +828,7 @@ function statusSection(sub: SubscriptionResponse): Node {
   );
 }
 
-function errorFor(place: "actions" | "replace"): Node | null {
+function errorFor(place: Place): Node | null {
   if (!page.error || page.error.place !== place) return null;
   return h("div", { id: `${place}-error-text` }, notice("danger", "!", h("p", {}, errorText(page.error.error))));
 }
@@ -658,7 +853,7 @@ function actionButton(options: { id: string; action: Action; label: string; busy
 
 function actionButtons(sub: SubscriptionResponse): (Node | null)[] {
   const s = t();
-  const actions = manageActions(sub.state);
+  const actions = manageActions(sub.state, sub.plan);
   return [
     errorFor("actions"),
     actions.authenticate
@@ -666,6 +861,9 @@ function actionButtons(sub: SubscriptionResponse): (Node | null)[] {
       : null,
     actions.resume
       ? actionButton({ id: "resume", action: "resume", label: s.resumeButton, busyLabel: s.resuming, className: "btn", onClick: () => void runResume() })
+      : null,
+    actions.switchYearly && !switchPanel.open
+      ? actionButton({ id: "switch-yearly", action: "switch", label: s.switchYearlyButton, onClick: () => openSwitch() })
       : null,
     actions.replaceCard && !replace.open
       ? actionButton({ id: "replace-card", action: "replace", label: s.replaceCardButton, onClick: () => openReplace() })
@@ -747,6 +945,88 @@ function replaceActions(): (Node | null)[] {
       s.cancel,
     ),
   ];
+}
+
+function switchSection(): Node {
+  const s = t();
+  return h(
+    "section",
+    { class: "pay-card", "aria-labelledby": "switch-heading" },
+    h("h2", { id: "switch-heading", tabindex: -1 }, s.switchHeading),
+    h("p", {}, s.switchIntro),
+    regions.create("switch-body", switchBody),
+    regions.create("switch-error", () => [errorFor("switch")]),
+    regions.create("switch-actions", switchActions),
+  );
+}
+
+function switchBody(): (Node | null)[] {
+  const s = t();
+  switch (switchPanel.status) {
+    case "loading":
+      return [h("p", { class: "muted", role: "status" }, s.loadingSwitchQuote)];
+    case "failed":
+      return [
+        notice("danger", "!", h("p", {}, quoteFailureText(switchPanel.loadError ?? { kind: "generic" }))),
+        h("button", { type: "button", id: "switch-retry", class: "btn secondary", onclick: () => void loadSwitchQuote() }, s.retry),
+      ];
+    case "ready": {
+      const summary = switchSummary(switchPanel.quote!, subscription?.state ?? "active", s, lang);
+      return [
+        h(
+          "div",
+          { id: "switch-summary", tabindex: -1 },
+          h(
+            "ul",
+            { class: "plain details" },
+            ...summary.rows.map((row) => h("li", {}, `${row.label} `, row.value, row.digits ? " " : null, row.digits ? ltr(row.digits) : null)),
+          ),
+          ...summary.notes.map((note) => h("p", {}, note)),
+        ),
+      ];
+    }
+  }
+}
+
+function switchActions(): (Node | null)[] {
+  const s = t();
+  const busy = page.busy !== null;
+  const ready = switchPanel.status === "ready" && switchPanel.quote !== null;
+  const declined = page.error?.place === "switch" && page.error.error.kind === "declined";
+  const describedBy = [page.error?.place === "switch" ? "switch-error-text" : "", ready ? "switch-summary" : ""].filter(Boolean).join(" ");
+  return [
+    ready
+      ? h(
+          "button",
+          {
+            type: "button",
+            id: "confirm-switch",
+            class: "btn",
+            "aria-disabled": busy ? "true" : undefined,
+            "aria-busy": page.busy === "switch" ? "true" : undefined,
+            "aria-describedby": describedBy || undefined,
+            onclick: () => void onConfirmSwitch(),
+          },
+          page.busy === "switch" ? page.progress || s.switching : summaryConfirm(),
+        )
+      : null,
+    declined
+      ? h(
+          "button",
+          { type: "button", id: "switch-replace-card", class: "btn secondary", "aria-disabled": busy ? "true" : undefined, onclick: () => replaceAfterDecline() },
+          s.replaceCardButton,
+        )
+      : null,
+    h(
+      "button",
+      { type: "button", id: "switch-back", class: "btn secondary", "aria-disabled": busy ? "true" : undefined, onclick: () => cancelSwitch() },
+      s.switchBack,
+    ),
+  ];
+}
+
+function summaryConfirm(): string {
+  return switchSummary(switchPanel.quote!, subscription?.state ?? "active", t(), lang).confirm;
 }
 
 /// Entry point the router calls once.

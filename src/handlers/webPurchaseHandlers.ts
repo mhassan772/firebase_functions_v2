@@ -2,7 +2,15 @@ import * as crypto from "crypto";
 import { Timestamp } from "firebase-admin/firestore";
 import * as functions from "firebase-functions";
 import type Stripe from "stripe";
-import { purchaseBlockers, readWebAccountSlots, StoreSubscriptionSummary, webSlotView, WebAccountState } from "../services/webSubscriptions/accountState";
+import {
+  existingPremium,
+  PremiumSource,
+  purchaseBlockers,
+  readWebAccountSlots,
+  StoreSubscriptionSummary,
+  webSlotView,
+  WebAccountState,
+} from "../services/webSubscriptions/accountState";
 import { DELETED_ACCOUNTS_COLLECTION } from "../services/accountDeletion/tombstone";
 import {
   accountDeleted,
@@ -84,7 +92,7 @@ const DECLINE_CATEGORIES: readonly DeclineCategory[] = [
   "authentication_failed",
 ];
 
-const PURCHASE_ID_PATTERN = /^[0-9a-f]{32}$/;
+export const PURCHASE_ID_PATTERN = /^[0-9a-f]{32}$/;
 const BILLING_STATE_PATTERN = /^[\p{L}\p{N} .'-]{1,64}$/u;
 
 // ---------------------------------------------------------------------------
@@ -101,6 +109,8 @@ export interface WebPlansResult {
   current: { state: WebAccountState; plan?: string } | null;
   storeSubscription: StoreSubscriptionSummary | null;
   blockers: string[];
+  /** Added after the first page shipped, so that page ignores it. */
+  premium: PremiumSource[];
 }
 
 /**
@@ -147,12 +157,14 @@ export async function handleGetWebPlans(
     const slots = await readWebAccountSlots(deps.firestore, uid, gate.gateway.livemode);
     const { blockers, storeSubscription } = purchaseBlockers(slots, now);
     const view = webSlotView(slots.web, now);
+    const premium = existingPremium(slots, now);
     logWebInfo(`${event}_success`, operationId, {
       uid,
       tier: known.tier,
       countryKnown: known.countryKnown,
       livemode: gate.gateway.livemode,
       blockers,
+      premium: premium.map((source) => source.source),
       appCheck: hasAppCheck(context),
     });
     return {
@@ -165,6 +177,7 @@ export async function handleGetWebPlans(
       current: view.state === "none" ? null : { state: view.state, ...(view.plan ? { plan: view.plan } : {}) },
       storeSubscription,
       blockers,
+      premium,
     };
   } catch (error) {
     throw toWebCallableError(event, operationId, state.stage, error);
@@ -187,19 +200,25 @@ interface StartRequest {
   acceptedTotal: number;
   billingState?: string;
   lang: "ar" | "en";
+  /** The buyer confirmed buying over premium from a store or a manual grant. */
+  acknowledgeExisting: boolean;
 }
 
 function readStartRequest(data: unknown): StartRequest {
-  const request = readRequestObject(data, ["plan", "confirmationToken", "acceptedTotal", "billingState", "lang"]);
+  const request = readRequestObject(data, ["plan", "confirmationToken", "acceptedTotal", "billingState", "lang", "acknowledgeExisting"]);
   if (!isWebPlan(request.plan)) throw invalidRequest();
   const acceptedTotal = optionalCents(request.acceptedTotal);
   if (acceptedTotal === undefined) throw invalidRequest();
+  // The callable SDK sends an `undefined` value as `null`, so both mean the flag was not given.
+  const acknowledge = request.acknowledgeExisting;
+  if (acknowledge !== undefined && acknowledge !== null && typeof acknowledge !== "boolean") throw invalidRequest();
   return {
     plan: request.plan,
     confirmationToken: requiredString(request.confirmationToken, CONFIRMATION_TOKEN_PATTERN),
     acceptedTotal,
     billingState: optionalString(request.billingState, BILLING_STATE_PATTERN),
     lang: readWebLang(request.lang),
+    acknowledgeExisting: request.acknowledgeExisting === true,
   };
 }
 
@@ -249,6 +268,7 @@ export async function handleStartWebPurchase(
       uid,
       plan: request.plan,
       purchaseId,
+      acknowledgeExisting: request.acknowledgeExisting,
       token: shortId(request.confirmationToken),
       livemode: gateway.livemode,
       appCheck: hasAppCheck(context),
@@ -268,7 +288,7 @@ export async function handleStartWebPurchase(
     if (customerIdFor(mapping, gateway.livemode)) {
       await syncWebEntitlement(uid, ctx.syncDeps, { operationId, trigger: "purchase_guard" });
     }
-    await assertPurchaseAllowed(ctx, request.plan);
+    await assertPurchaseAllowed(ctx, request.plan, request.acknowledgeExisting);
 
     state.stage = "token";
     const token = await readConfirmationToken(
@@ -363,7 +383,7 @@ export async function handleStartWebPurchase(
       const olderPaid = await abandonOlderPending(ctx, purchaseId);
       if (locked.previousPaid || olderPaid) {
         await syncWebEntitlement(uid, ctx.syncDeps, { operationId, trigger: "purchase_guard" });
-        await assertPurchaseAllowed(ctx, request.plan);
+        await assertPurchaseAllowed(ctx, request.plan, request.acknowledgeExisting);
       }
     } catch (error) {
       const failure = error instanceof functions.https.HttpsError ? `refused_${reasonOf(error) ?? error.code}` : `before_create_${state.stage}`;
@@ -458,7 +478,7 @@ type LockOutcome =
  * caller check the guards again. So two tabs can never both be charged, and no purchase is
  * abandoned while another call may still confirm it.
  */
-async function createLockedEntry(ctx: PurchaseContext, entry: WebPurchaseEntry): Promise<LockOutcome> {
+export async function createLockedEntry(ctx: Pick<PurchaseContext, "uid" | "deps">, entry: WebPurchaseEntry): Promise<LockOutcome> {
   const { firestore } = ctx.deps;
   const ledger = firestore.collection(WEB_PURCHASES_COLLECTION);
   const ownRef = ledger.doc(entry.purchaseId);
@@ -473,13 +493,11 @@ async function createLockedEntry(ctx: PurchaseContext, entry: WebPurchaseEntry):
       return { kind: "existing", entry: existing };
     }
     if (tombstone.exists || !mapping.exists) throw accountDeleted();
-    const lock = mapping.get("activePurchase") as { purchaseId?: unknown; startedAt?: unknown } | undefined;
-    const lockId = typeof lock?.purchaseId === "string" ? lock.purchaseId : undefined;
-    const startedMs = lock?.startedAt instanceof Timestamp ? lock.startedAt.toMillis() : 0;
+    const { lockId, startedMs } = readLock(mapping.get("activePurchase"));
     let previousPaid = false;
     if (lockId && lockId !== entry.purchaseId) {
       const holder = ledgerEntryFromData(lockId, (await transaction.get(ledger.doc(lockId))).data());
-      if (holder?.status === "pending" && nowMs - startedMs < PURCHASE_LOCK_MS) {
+      if (holderBlocks(holder, startedMs, nowMs)) {
         return { kind: "busy", activePurchaseId: lockId };
       }
       previousPaid = holder?.status === "paid";
@@ -492,13 +510,50 @@ async function createLockedEntry(ctx: PurchaseContext, entry: WebPurchaseEntry):
   });
 }
 
-/** Refuses with the first blocker that applies to `plan`, read from the account's slots. */
-async function assertPurchaseAllowed(ctx: PurchaseContext, plan: WebPlan): Promise<void> {
+function readLock(value: unknown): { lockId?: string; startedMs: number } {
+  const lock = value as { purchaseId?: unknown; startedAt?: unknown } | undefined;
+  return {
+    lockId: typeof lock?.purchaseId === "string" ? lock.purchaseId : undefined,
+    startedMs: lock?.startedAt instanceof Timestamp ? lock.startedAt.toMillis() : 0,
+  };
+}
+
+/** A lock holder blocks while its entry is pending and it started under `PURCHASE_LOCK_MS` ago. */
+function holderBlocks(holder: WebPurchaseEntry | undefined, startedMs: number, nowMs: number): boolean {
+  return holder?.status === "pending" && nowMs - startedMs < PURCHASE_LOCK_MS;
+}
+
+/**
+ * The purchase holding the account's lock now, read without taking it: for a step that must not
+ * touch Stripe while another purchase may still be confirming (the plan switch voids a pending
+ * change before it takes the lock).
+ */
+export async function lockHolderNow(ctx: Pick<PurchaseContext, "uid" | "deps">): Promise<string | undefined> {
+  const { firestore } = ctx.deps;
+  const { lockId, startedMs } = readLock((await firestore.collection(WEB_CUSTOMERS_COLLECTION).doc(ctx.uid).get()).get("activePurchase"));
+  if (!lockId) return undefined;
+  const holder = ledgerEntryFromData(lockId, (await firestore.collection(WEB_PURCHASES_COLLECTION).doc(lockId).get()).data());
+  return holderBlocks(holder, startedMs, ctx.deps.now().getTime()) ? lockId : undefined;
+}
+
+/**
+ * Refuses with the first blocker that applies to `plan`, read from the account's slots; then,
+ * unless the buyer confirmed it, when premium from a store or a manual grant is active, since the
+ * purchase starts today and adds nothing to the days already held.
+ */
+async function assertPurchaseAllowed(ctx: PurchaseContext, plan: WebPlan, acknowledgeExisting: boolean): Promise<void> {
   const now = ctx.deps.now();
   const slots = await readWebAccountSlots(ctx.deps.firestore, ctx.uid, ctx.gate.gateway.livemode);
   const { blockers, storeSubscription } = purchaseBlockers(slots, now, plan);
   const blocker = blockers[0];
-  if (!blocker) return;
+  if (!blocker) {
+    if (acknowledgeExisting) return;
+    const premium = existingPremium(slots, now).filter((source) => source.source !== "web");
+    if (premium.length > 0) {
+      throw refusalWith("failed-precondition", "Premium from another source is active.", "existing_premium", { premium });
+    }
+    return;
+  }
   if (blocker === "store_subscription_active" && storeSubscription) {
     throw refusalWith("failed-precondition", "A store subscription is already active.", blocker, {
       platform: storeSubscription.platform,
@@ -641,8 +696,8 @@ async function failUnpaid(
 }
 
 /** Marks a still-pending entry failed or abandoned. */
-async function settleUnstarted(
-  ctx: PurchaseContext,
+export async function settleUnstarted(
+  ctx: Pick<PurchaseContext, "uid" | "operationId" | "deps">,
   purchaseId: string,
   status: "failed" | "abandoned",
   failure: string

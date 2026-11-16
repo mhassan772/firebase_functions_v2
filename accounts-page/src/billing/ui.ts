@@ -8,7 +8,7 @@ import { renderSignIn, type MountedView } from "../auth/signIn";
 import { STORE_SUBSCRIPTION_LINKS } from "../delete/storeSubscriptions";
 import { h, ltr } from "../dom";
 import { STRINGS, type Lang, type Strings } from "../i18n";
-import type { StorePlatform } from "./logic";
+import { storeName, type StorePlatform } from "./logic";
 
 // ---------------------------------------------------------------------------
 // Sign-in gate, the same as `/delete`'s: session persistence, guests never count.
@@ -128,7 +128,7 @@ export function gateStep(gate: Gate, s: Strings, retry: () => void): Node[] {
 }
 
 export function loadingStep(text: string): Node[] {
-  return [h("div", { class: "spinner", "aria-hidden": "true" }), h("p", { class: "center", role: "status" }, text)];
+  return [h("div", { class: "spinner", "aria-hidden": "true" }), h("p", { class: "center", role: "status", id: "loading-status", tabindex: -1 }, text)];
 }
 
 /// "Account: name@example.com · Not you? Sign out".
@@ -172,9 +172,7 @@ export function externalLink(href: string, text: string, s: Strings): Node {
   return h("a", { href, target: "_blank", rel: "noopener noreferrer" }, text, h("span", { class: "sr-only" }, ` ${s.opensInNewTab}`));
 }
 
-export function storeName(store: StorePlatform, s: Strings): string {
-  return store === "apple" ? s.appStoreName : s.playStoreName;
-}
+export { storeName };
 
 /// The store's own page for cancelling, for whichever account is signed in to the store.
 export function storeCancelLink(store: StorePlatform, s: Strings): Node {

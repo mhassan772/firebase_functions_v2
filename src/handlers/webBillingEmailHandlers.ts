@@ -129,6 +129,7 @@ function contentOf(data: DocumentData) {
   return {
     plan: typeof data.plan === "string" ? data.plan : undefined,
     amount: cents(data.amount),
+    credit: cents(data.credit),
     tax: cents(data.tax),
     total: cents(data.total),
     currency: typeof data.currency === "string" ? data.currency : undefined,

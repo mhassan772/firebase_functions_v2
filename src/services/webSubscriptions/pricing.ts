@@ -5,7 +5,7 @@ import { toAlpha2 } from "../../utils/countryCodes";
 import { SubscriptionError } from "../subscriptions/errors";
 import { KnownCountries, WEB_PRICING_CONFIG_PATH } from "../storeCountry";
 import { isWebPlan, WebPlan } from "./ledger";
-import { StripeGateway } from "./stripeGateway";
+import { idOf, isResourceMissing, StripeGateway } from "./stripeGateway";
 
 export interface WebTierConfig {
   /** Higher is dearer. */
@@ -322,6 +322,34 @@ export async function quoteTotal(
   return { amount: price.amount, tax, total: preview.total, currency: preview.currency ?? price.currency };
 }
 
+/** An invoice's amounts as the buyer is shown them. Integer cents. */
+export interface InvoiceAmounts {
+  /** The charged lines before tax: the yearly price on a plan switch. */
+  amount: number;
+  /** The credited lines (unused days of the plan switched from) as a positive number. */
+  credit: number;
+  tax: number;
+  total: number;
+  currency: string;
+}
+
+/**
+ * Splits an invoice, or a preview of one, into price, credit, tax and total.
+ *
+ * Read from the lines Stripe computed, never worked out here, so a quote shows exactly what the
+ * same change then charges. A credit is a line with a negative amount.
+ */
+export function invoiceAmounts(invoice: Pick<Stripe.Invoice, "lines" | "total_taxes" | "total" | "currency">): InvoiceAmounts {
+  let amount = 0;
+  let credit = 0;
+  for (const line of invoice.lines?.data ?? []) {
+    if (line.amount < 0) credit -= line.amount;
+    else amount += line.amount;
+  }
+  const tax = (invoice.total_taxes ?? []).reduce((sum, row) => sum + (row.amount ?? 0), 0);
+  return { amount, credit, tax, total: invoice.total, currency: invoice.currency ?? "usd" };
+}
+
 export interface BillingAddress {
   /** Copied to the Stripe customer so its invoices are taxed at this address. */
   address: Stripe.AddressParam;
@@ -362,6 +390,52 @@ export interface TokenCard {
   /** `apple_pay`, `google_pay` and the like, or null for a typed card. */
   wallet: string | null;
   brand: string | null;
+}
+
+/** A saved card: the subscription's default payment method. */
+export interface SavedCard {
+  /** Null when Stripe does not know it, which prices as the full tier. */
+  country: string | null;
+  brand: string | null;
+  last4: string | null;
+  funding: string | null;
+  wallet: string | null;
+  expMonth: number | null;
+  expYear: number | null;
+}
+
+/**
+ * The saved card behind a payment method id; undefined when there is none, it is not a card, or
+ * it belongs to another customer.
+ *
+ * The one reader of a subscription's default card: the manage page shows its brand and last four
+ * digits, the plan switch prices by its country, and the renewal reminder checks its expiry.
+ */
+export async function savedCardOf(
+  gateway: StripeGateway,
+  paymentMethodId: string | undefined,
+  customerId: string
+): Promise<SavedCard | undefined> {
+  if (!paymentMethodId) return undefined;
+  let method: Stripe.PaymentMethod;
+  try {
+    method = await gateway.retrievePaymentMethod(paymentMethodId);
+  } catch (error) {
+    if (isResourceMissing(error)) return undefined;
+    throw error;
+  }
+  const owner = idOf(method.customer as string | { id: string } | null);
+  if ((owner && owner !== customerId) || !method.card) return undefined;
+  const card = method.card;
+  return {
+    country: card.country ? toAlpha2(card.country) ?? null : null,
+    brand: card.brand ?? null,
+    last4: card.last4 ?? null,
+    funding: card.funding ?? null,
+    wallet: card.wallet?.type ?? null,
+    expMonth: typeof card.exp_month === "number" ? card.exp_month : null,
+    expYear: typeof card.exp_year === "number" ? card.exp_year : null,
+  };
 }
 
 /** The card on a confirmation token, or `card_required` for anything that is not a card (Link). */

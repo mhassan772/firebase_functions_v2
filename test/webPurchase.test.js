@@ -12,7 +12,9 @@ const {
   readConfirmationToken,
   requireVerifiedEmail,
 } = require("../lib/handlers/webCallableCommon");
-const { purchaseBlockers, storeSubscriptionOf, webSlotView } = require("../lib/services/webSubscriptions/accountState");
+const { existingPremium, purchaseBlockers, readWebAccountSlots, storeSubscriptionOf, webSlotView } = require("../lib/services/webSubscriptions/accountState");
+const constants = require("../lib/config/constants");
+const { stateDocumentId } = require("../lib/services/subscriptions/persistence");
 const { handleStartWebPurchase, handleGetWebPlans, handleFinishWebPurchase } = require("../lib/handlers/webPurchaseHandlers");
 const { handleGetWebSubscription, handleManageWebSubscription } = require("../lib/handlers/webManageHandlers");
 const { reasonOf } = require("../lib/utils/callableAuth");
@@ -130,6 +132,85 @@ describe("slot views and blockers", () => {
   });
 });
 
+describe("existing premium", () => {
+  const iso = (ms) => new Date(ms).toISOString();
+  const store = (platform, autoRenewing, fields = {}) => ({ ...slot({ platform, productId: "monthly_sub", autoRenewing, environment: "production", ...fields }), web: undefined });
+  const manual = (days) => ({ ...slot({ platform: "manual", productId: "manual_grant", environment: "production", autoRenewing: false, expiresAt: Timestamp.fromMillis(NOW.getTime() + days * DAY) }), web: undefined });
+
+  test("each source alone", () => {
+    assert.deepEqual(existingPremium({}, NOW), []);
+    // paidThrough, not expiresAt, which carries the grace margin.
+    const web = slot({ expiresAt: Timestamp.fromMillis(NOW.getTime() + 10 * DAY + 6 * 3600 * 1000) });
+    assert.deepEqual(existingPremium({ web }, NOW), [
+      { source: "web", kind: "subscription", plan: "web_monthly", state: "active", renews: true, until: iso(NOW.getTime() + 10 * DAY) },
+    ]);
+    assert.deepEqual(existingPremium({ web: slot({ status: "canceled", autoRenewing: false }, { cancelAtPeriodEnd: true }) }, NOW)[0], {
+      source: "web", kind: "subscription", plan: "web_monthly", state: "cancelling", renews: false, until: iso(NOW.getTime() + 10 * DAY),
+    });
+    assert.equal(existingPremium({ web: slot({ status: "billing_retry", active: false, expiresAt: Timestamp.fromMillis(NOW.getTime() - DAY) }) }, NOW)[0].state, "payment_failed", "listed although it gives no premium now");
+    assert.deepEqual(existingPremium({ web: slot({ status: "grace_period" }, { needsAction: true }) }, NOW).map((row) => [row.state, row.renews]), [["needs_action", true]]);
+    assert.deepEqual(existingPremium({ web: slot({ status: "expired", active: false }) }, NOW), []);
+    assert.deepEqual(existingPremium({ web: slot({ productId: "web_lifetime", autoRenewing: false }) }, NOW), [
+      { source: "web", kind: "lifetime", plan: "web_lifetime", state: "active", renews: false },
+    ]);
+    assert.deepEqual(existingPremium({ apple: store("apple", true) }, NOW), [
+      { source: "apple", kind: "subscription", state: "active", renews: true, until: iso(NOW.getTime() + 10 * DAY) },
+    ]);
+    assert.deepEqual(existingPremium({ manual: manual(30) }, NOW), [
+      { source: "manual", kind: "grant", state: "active", renews: false, until: iso(NOW.getTime() + 30 * DAY) },
+    ]);
+  });
+
+  test("a store subscription cancelled but still running is listed as cancelling; an ended one is not", () => {
+    assert.deepEqual(existingPremium({ google: store("google", false, { status: "canceled" }) }, NOW), [
+      { source: "google", kind: "subscription", state: "cancelling", renews: false, until: iso(NOW.getTime() + 10 * DAY) },
+    ]);
+    assert.deepEqual(existingPremium({ google: store("google", true, { active: false, status: "expired" }) }, NOW), []);
+  });
+
+  test("an expired or revoked manual grant is not listed", () => {
+    assert.deepEqual(existingPremium({ manual: manual(-1) }, NOW), []);
+    assert.deepEqual(existingPremium({ manual: { ...manual(30), status: "revoked" } }, NOW), []);
+  });
+
+  test("combined, in the order web, apple, google, manual; the blockers are unchanged", () => {
+    const slots = { manual: manual(30), google: store("google", false), apple: store("apple", true), web: slot({ productId: "web_lifetime", autoRenewing: false }) };
+    assert.deepEqual(existingPremium(slots, NOW).map((row) => row.source), ["web", "apple", "google", "manual"]);
+    assert.deepEqual(purchaseBlockers(slots, NOW).blockers, ["lifetime_active", "store_subscription_active"]);
+    assert.deepEqual(purchaseBlockers({ manual: manual(30) }, NOW).blockers, [], "a manual grant blocks nothing");
+  });
+
+  test("the slots read: the web slot of the mode, the production store slots, and the manual slot unless switched off", async () => {
+    const uid = "Buyer0000000000000000001";
+    const stored = new Map([
+      [stateDocumentId(uid, "manual", "production"), manual(30)],
+      [stateDocumentId(uid, "apple", "sandbox"), store("apple", true, { environment: "sandbox" })],
+    ]);
+    let requested = [];
+    const db = {
+      collection: () => ({ doc: (id) => ({ id }) }),
+      getAll: async (...refs) => {
+        requested = refs.map((ref) => ref.id);
+        return refs.map((ref) => ({ exists: stored.has(ref.id), data: () => stored.get(ref.id) }));
+      },
+    };
+    const slots = await readWebAccountSlots(db, uid, false);
+    assert.deepEqual(requested, ["web_test", "apple_production", "google_production", "manual_production"].map((suffix) => `${stateDocumentId(uid, ...suffix.split("_"))}`));
+    assert.deepEqual(Object.keys(slots), ["manual"], "a sandbox store slot is never read");
+    assert.deepEqual(existingPremium(slots, NOW).map((row) => row.source), ["manual"]);
+    const enabled = constants.MANUAL_SLOT_ENABLED;
+    constants.MANUAL_SLOT_ENABLED = false;
+    try {
+      const off = await readWebAccountSlots(db, uid, true);
+      assert.equal(requested.length, 3);
+      assert.equal(requested[0], stateDocumentId(uid, "web", "production"));
+      assert.deepEqual(existingPremium(off, NOW), []);
+    } finally {
+      constants.MANUAL_SLOT_ENABLED = enabled;
+    }
+  });
+});
+
 describe("refusals before any read", () => {
   const deps = { firestore: untouchable, gateway: undefined, publishableKey: undefined, storeCountry: untouchable, throttle: untouchable, now: () => NOW };
 
@@ -155,6 +236,9 @@ describe("refusals before any read", () => {
     await assert.rejects(handleStartWebPurchase(start, context({ verified: false }), deps), (error) => reasonOf(error) === "email_unverified");
     await assert.rejects(handleGetWebPlans({}, context({ verified: false }), deps), (error) => reasonOf(error) === "email_unverified");
     await assert.rejects(handleStartWebPurchase(start, context(), deps), (error) => reasonOf(error) === "sales_disabled");
+    await assert.rejects(handleStartWebPurchase({ ...start, acknowledgeExisting: "yes" }, context(), deps), (error) => reasonOf(error) === "invalid_request");
+    // The callable SDK sends an unset field as null: it must read as "not given", not as a bad request.
+    await assert.rejects(handleStartWebPurchase({ ...start, acknowledgeExisting: null }, context(), deps), (error) => reasonOf(error) === "sales_disabled");
     await assert.rejects(handleGetWebPlans({}, context(), deps), (error) => reasonOf(error) === "sales_disabled");
     await assert.rejects(handleFinishWebPurchase({ purchaseId: "a".repeat(32) }, context(), deps), (error) => reasonOf(error) === "sales_disabled");
     await assert.rejects(handleGetWebSubscription({}, context({ verified: false }), deps), (error) => reasonOf(error) === "sales_disabled");
