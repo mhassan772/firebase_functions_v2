@@ -27,7 +27,8 @@ export interface StripeGateway {
 
   createSubscription(params: Stripe.SubscriptionCreateParams, idempotencyKey: string): Promise<Stripe.Subscription>;
   retrieveSubscription(id: string, expand?: string[]): Promise<Stripe.Subscription>;
-  updateSubscription(id: string, params: Stripe.SubscriptionUpdateParams): Promise<Stripe.Subscription>;
+  /** The key is for an update that charges (the plan switch), so a retry never charges twice. */
+  updateSubscription(id: string, params: Stripe.SubscriptionUpdateParams, idempotencyKey?: string): Promise<Stripe.Subscription>;
   cancelSubscription(id: string): Promise<Stripe.Subscription>;
   /** Every subscription of the customer in any status, newest first, up to 100. */
   listSubscriptions(customerId: string): Promise<Stripe.Subscription[]>;
@@ -94,7 +95,7 @@ export function liveStripeGateway(secretKey: string): StripeGateway {
     deleteCustomer: (id) => stripe.customers.del(id),
     createSubscription: (params, key) => stripe.subscriptions.create(params, withKey(key)),
     retrieveSubscription: (id, expand) => stripe.subscriptions.retrieve(id, expand ? { expand } : {}),
-    updateSubscription: (id, params) => stripe.subscriptions.update(id, params),
+    updateSubscription: (id, params, key) => stripe.subscriptions.update(id, params, key ? withKey(key) : undefined),
     cancelSubscription: (id) => stripe.subscriptions.cancel(id),
     async listSubscriptions(customerId) {
       const page = await stripe.subscriptions.list({ customer: customerId, status: "all", limit: 100 });

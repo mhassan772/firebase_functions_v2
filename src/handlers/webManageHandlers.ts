@@ -1,27 +1,53 @@
 import * as crypto from "crypto";
+import { Timestamp } from "firebase-admin/firestore";
 import * as functions from "firebase-functions";
 import type Stripe from "stripe";
 import { readWebAccountSlots, StoreSubscriptionSummary, storeSubscriptionOf, webSlotView, WebAccountState } from "../services/webSubscriptions/accountState";
 import { customerIdFor, readCustomerMapping } from "../services/webSubscriptions/customers";
-import { isWebPlan, ledgerEntryFromData, WEB_PURCHASES_COLLECTION, WebPlan } from "../services/webSubscriptions/ledger";
-import { cardFromToken, dearerTier, lookupKeyFor, tierOfCountry, WebPricingConfig } from "../services/webSubscriptions/pricing";
-import { idOf, isResourceMissing, shortId, stripeErrorCode } from "../services/webSubscriptions/stripeGateway";
-import { syncWebEntitlement, WebSyncDeps } from "../services/webSubscriptions/sync";
+import {
+  isWebPlan,
+  ledgerEntryFromData,
+  purchaseIdFor,
+  WEB_PURCHASES_COLLECTION,
+  WebPlan,
+  WebPurchaseEntry,
+} from "../services/webSubscriptions/ledger";
+import { stopPendingStripeSide } from "../services/webSubscriptions/pendingSweep";
+import {
+  cardFromToken,
+  chargedTier,
+  dearerTier,
+  invoiceAmounts,
+  KnownTier,
+  knownTier,
+  lookupKeyFor,
+  savedCardOf,
+  SavedCard,
+  tierOfCountry,
+  WebPrice,
+  WebPricingConfig,
+} from "../services/webSubscriptions/pricing";
+import { idOf, isResourceMissing, shortId, StripeGateway, stripeErrorCode } from "../services/webSubscriptions/stripeGateway";
+import { servicePeriodEnd, syncWebEntitlement, WebSyncDeps } from "../services/webSubscriptions/sync";
 import { hasAppCheck, refusal, requireCaller } from "../utils/callableAuth";
 import {
   cardDeclined,
   categoryOfLastError,
   CONFIRMATION_TOKEN_PATTERN,
   consumeWebThrottle,
+  DeclineCategory,
   declineCategory,
   invalidRequest,
   isCardError,
+  isInvalidRequestError,
   isTokenError,
   logWebInfo,
   openWebGate,
   optionalCents,
   readConfirmationToken,
   readRequestObject,
+  readWebLang,
+  refusalWith,
   requiredString,
   tokenInvalid,
   toWebCallableError,
@@ -29,7 +55,7 @@ import {
   WebCallerContext,
   WebGate,
 } from "./webCallableCommon";
-import { WebQuote } from "./webPurchaseHandlers";
+import { createLockedEntry, lockHolderNow, PURCHASE_ID_PATTERN, PURCHASE_LOCK_MS, settleUnstarted, WebQuote } from "./webPurchaseHandlers";
 
 const SETUP_INTENT_PATTERN = /^seti_[A-Za-z0-9]{6,200}$/;
 /** Subscription states `/manage` can act on; anything else is `no_subscription`. */
@@ -126,7 +152,7 @@ export async function handleGetWebSubscription(
             result.amount = item.price.unit_amount;
             result.currency = item.price.currency;
           }
-          const card = await cardOf(gate, idOf(subscription.default_payment_method as string | { id: string } | null), customerId);
+          const card = await cardOf(gateway, idOf(subscription.default_payment_method as string | { id: string } | null), customerId);
           if (card) result.card = card;
         }
       }
@@ -149,18 +175,13 @@ async function ownSubscription(gate: WebGate, subscriptionId: string, customerId
   }
 }
 
-async function cardOf(gate: WebGate, paymentMethodId: string | undefined, customerId: string) {
-  if (!paymentMethodId) return undefined;
-  try {
-    const method = await gate.gateway.retrievePaymentMethod(paymentMethodId);
-    const owner = idOf(method.customer as string | { id: string } | null);
-    if (owner && owner !== customerId) return undefined;
-    if (!method.card?.brand || !method.card.last4) return undefined;
-    return { brand: method.card.brand, last4: method.card.last4 };
-  } catch (error) {
-    if (isResourceMissing(error)) return undefined;
-    throw error;
-  }
+/** The brand and last four digits of a saved card, which is all a page is ever shown of it. */
+function shownCard(card: SavedCard | undefined): { brand: string; last4: string } | undefined {
+  return card?.brand && card.last4 ? { brand: card.brand, last4: card.last4 } : undefined;
+}
+
+async function cardOf(gateway: StripeGateway, paymentMethodId: string | undefined, customerId: string) {
+  return shownCard(await savedCardOf(gateway, paymentMethodId, customerId));
 }
 
 // ---------------------------------------------------------------------------
@@ -171,12 +192,25 @@ export type ManageWebSubscriptionResult =
   | { status: "succeeded" }
   | { status: "reprice"; quote: WebQuote }
   | { status: "requires_action"; setupIntentId: string; clientSecret: string }
-  | { clientSecret: string; purchaseId?: string };
+  | { clientSecret: string; purchaseId?: string }
+  | SwitchResult;
+
+/** The answers of the three plan switch actions. */
+export type SwitchResult =
+  | { status: "quote"; quote: SwitchQuote }
+  | { status: "reprice"; quote: SwitchQuote }
+  | { status: "succeeded"; purchaseId: string }
+  | { status: "requires_action"; purchaseId: string; clientSecret: string };
 
 type ManageRequest =
-  | { action: "cancel" | "resume" | "authenticate" }
+  | { action: "cancel" | "resume" | "authenticate" | "quote_switch_yearly" }
   | { action: "replace_card"; confirmationToken: string; acceptedRenewalAmount?: number }
-  | { action: "finish_replace_card"; setupIntentId: string };
+  | { action: "finish_replace_card"; setupIntentId: string }
+  | { action: "switch_yearly"; acceptedTotal: number; attemptId: string; lang: "ar" | "en" }
+  | { action: "finish_switch_yearly"; purchaseId: string };
+
+/** A random id the page makes once per confirmation, such as a UUID. */
+const ATTEMPT_ID_PATTERN = /^[A-Za-z0-9-]{16,64}$/;
 
 function readManageRequest(data: unknown): ManageRequest {
   const action = (data as { action?: unknown } | null)?.action;
@@ -184,8 +218,19 @@ function readManageRequest(data: unknown): ManageRequest {
     case "cancel":
     case "resume":
     case "authenticate":
+    case "quote_switch_yearly":
       readRequestObject(data, ["action"]);
       return { action };
+    case "switch_yearly": {
+      const request = readRequestObject(data, ["action", "acceptedTotal", "attemptId", "lang"]);
+      const acceptedTotal = optionalCents(request.acceptedTotal);
+      if (acceptedTotal === undefined) throw invalidRequest();
+      return { action, acceptedTotal, attemptId: requiredString(request.attemptId, ATTEMPT_ID_PATTERN), lang: readWebLang(request.lang) };
+    }
+    case "finish_switch_yearly": {
+      const request = readRequestObject(data, ["action", "purchaseId"]);
+      return { action, purchaseId: requiredString(request.purchaseId, PURCHASE_ID_PATTERN) };
+    }
     case "replace_card": {
       const request = readRequestObject(data, ["action", "confirmationToken", "acceptedRenewalAmount"]);
       return {
@@ -213,12 +258,16 @@ interface ManageContext {
   customerId: string;
   subscription: Stripe.Subscription;
   plan: WebPlan;
+  state: WebAccountState;
   purchaseId?: string;
 }
 
 /**
- * Changes the caller's own web subscription: cancel at period end, resume, replace the card, or
- * hand the page what it needs to authenticate a renewal.
+ * Changes the caller's own web subscription: cancel at period end, resume, replace the card,
+ * switch from monthly to yearly, or hand the page what it needs to authenticate a renewal.
+ *
+ * Quoting and making a switch need sales open, since a switch is a sale; finishing one already
+ * charged needs only the key.
  *
  * The customer comes from `web_customers/{uid}` and the subscription from the account's web
  * slot, both checked against each other; the page sends no Stripe id except the SetupIntent of
@@ -236,7 +285,8 @@ export async function handleManageWebSubscription(
     const uid = requireCaller(context, { allowAnonymous: false, withReason: true });
     const request = readManageRequest(data);
     state.stage = "gate";
-    const gate = await openWebGate(uid, deps, { sales: false });
+    const sale = request.action === "quote_switch_yearly" || request.action === "switch_yearly";
+    const gate = await openWebGate(uid, deps, { sales: sale });
     logWebInfo(`${event}_start`, operationId, { uid, action: request.action, livemode: gate.gateway.livemode, appCheck: hasAppCheck(context) });
 
     state.stage = "subscription";
@@ -260,6 +310,16 @@ export async function handleManageWebSubscription(
         break;
       case "finish_replace_card":
         result = await finishReplaceCard(ctx, request.setupIntentId);
+        break;
+      case "quote_switch_yearly":
+        assertSwitchable(ctx);
+        result = { status: "quote", quote: (await planSwitch(ctx)).quote };
+        break;
+      case "switch_yearly":
+        result = await switchYearly(ctx, request, context);
+        break;
+      case "finish_switch_yearly":
+        result = await finishSwitchYearly(ctx, request.purchaseId);
         break;
     }
     logWebInfo(`${event}_success`, operationId, {
@@ -295,7 +355,7 @@ async function manageContext(uid: string, operationId: string, deps: WebCallable
   if (!subscription || !OPEN_SUBSCRIPTION_STATUSES.has(subscription.status) || !isWebPlan(product) || product === "web_lifetime") {
     throw noSubscription();
   }
-  return { uid, operationId, deps, gate, syncDeps, customerId, subscription, plan: product, purchaseId: view.purchaseId };
+  return { uid, operationId, deps, gate, syncDeps, customerId, subscription, plan: product, state: view.state, purchaseId: view.purchaseId };
 }
 
 async function sync(ctx: ManageContext, trigger: string): Promise<void> {
@@ -307,7 +367,9 @@ async function authenticate(ctx: ManageContext): Promise<ManageWebSubscriptionRe
   const invoiceId = idOf(ctx.subscription.latest_invoice as string | { id: string } | null);
   if (invoiceId) {
     const invoice = await ctx.gate.gateway.retrieveInvoice(invoiceId, ["payments"]);
-    if (invoice.status === "open" && idOf(invoice.customer as string | { id: string } | null) === ctx.customerId) {
+    // A plan switch's open invoice is the switch's to finish, under its own purchase.
+    const renewal = invoice.billing_reason !== "subscription_update";
+    if (renewal && invoice.status === "open" && idOf(invoice.customer as string | { id: string } | null) === ctx.customerId) {
       const payment = (invoice.payments?.data ?? []).find((row) => row.status === "open" || row.is_default);
       const paymentIntentId = idOf(payment?.payment?.payment_intent ?? null);
       if (paymentIntentId) {
@@ -479,4 +541,399 @@ async function applyCard(ctx: ManageContext, paymentMethodId: string): Promise<M
   }
   await sync(ctx, "replace_card");
   return { status: "succeeded" };
+}
+
+// ---------------------------------------------------------------------------
+// Switching from monthly to yearly
+// ---------------------------------------------------------------------------
+
+/** What `/manage` shows before a plan switch. Integer cents. */
+export interface SwitchQuote {
+  plan: "web_yearly";
+  tier: string;
+  /** The yearly price, before tax. */
+  amount: number;
+  /** The unused days of the month, a positive number taken off the amount. */
+  credit: number;
+  tax: number;
+  /** What the saved card is charged today. */
+  total: number;
+  currency: string;
+  /** ISO 8601: the end of the year the switch pays for, a year from the switch. */
+  renewsAt: string;
+  /** Left out when the saved card cannot be read; the charge then fails as a decline. */
+  card?: { brand: string; last4: string };
+}
+
+function switchUnavailable(cause: "not_monthly" | "payment_due") {
+  return refusalWith("failed-precondition", "This subscription cannot be switched to yearly.", "switch_unavailable", { cause });
+}
+
+/**
+ * Only a monthly subscription that is paid up switches: active or cancelling, its Stripe status
+ * `active`. A past-due one would have its renewal and the switch due at once.
+ */
+function assertSwitchable(ctx: ManageContext): void {
+  if (ctx.plan !== "web_monthly") throw switchUnavailable("not_monthly");
+  if ((ctx.state !== "active" && ctx.state !== "cancelling") || ctx.subscription.status !== "active") {
+    throw switchUnavailable("payment_due");
+  }
+}
+
+interface SwitchPlan {
+  quote: SwitchQuote;
+  price: WebPrice;
+  known: KnownTier;
+  card: SavedCard | undefined;
+}
+
+/**
+ * The change a switch makes, identical in the preview and the update: the one item to the yearly
+ * price, the unused days credited on an invoice raised now, the year starting today, and renewal
+ * turned back on for a subscription that was cancelled.
+ */
+function switchChange(ctx: ManageContext, price: WebPrice) {
+  return {
+    items: [{ id: ctx.subscription.items.data[0].id, price: price.priceId }],
+    proration_behavior: "always_invoice" as const,
+    billing_cycle_anchor: { type: "now" as const },
+    cancel_at_period_end: false,
+  };
+}
+
+/**
+ * Prices a switch as a new yearly purchase is priced, then has Stripe preview the invoice the
+ * change raises; the quote is that preview.
+ *
+ * The tier is the dearer of the account's known tier and the saved card's country, and a card
+ * whose country is unknown prices as the full tier. The anchor reset cannot be combined with a
+ * fixed proration date, so Stripe works out the credit at the moment of each call, and it can move
+ * by a cent between the quote and the charge; `switchYearly` previews again for that reason.
+ */
+async function planSwitch(ctx: ManageContext): Promise<SwitchPlan> {
+  const { config, gateway, prices } = ctx.gate;
+  const card = await savedCardOf(gateway, idOf(ctx.subscription.default_payment_method as string | { id: string } | null), ctx.customerId);
+  const known = knownTier(config, await ctx.deps.storeCountry.knownCountries(ctx.uid));
+  const tier = chargedTier(config, known.tier, card?.country ?? null);
+  const lookupKey = lookupKeyFor(config, tier, "web_yearly");
+  const price = (await prices.get([lookupKey])).get(lookupKey)!;
+  const preview = await gateway.createInvoicePreview({
+    customer: ctx.customerId,
+    subscription: ctx.subscription.id,
+    subscription_details: switchChange(ctx, price),
+  });
+  const amounts = invoiceAmounts(preview);
+  const quote: SwitchQuote = {
+    plan: "web_yearly",
+    tier,
+    amount: amounts.amount,
+    credit: amounts.credit,
+    tax: amounts.tax,
+    total: amounts.total,
+    currency: amounts.currency,
+    renewsAt: (servicePeriodEnd(preview) ?? ctx.deps.now()).toISOString(),
+  };
+  const shown = shownCard(card);
+  if (shown) quote.card = shown;
+  return { quote, price, known, card };
+}
+
+const purchaseInProgress = () => refusal("failed-precondition", "Another purchase is in progress.", "purchase_in_progress");
+const switchNotFound = () => refusal("not-found", "No such purchase.", "purchase_not_found");
+
+/**
+ * Charges the switch, in the stage I contract's order.
+ *
+ * The purchase id comes from the uid and the page's `attemptId`, and the update carries a key
+ * built from it, so a repeated call returns its attempt's outcome and never charges twice. The
+ * update uses `pending_if_incomplete`: Stripe applies the price, the anchor, the renewal and the
+ * metadata only once the invoice is paid, so a decline leaves the monthly plan with its dates.
+ */
+async function switchYearly(
+  ctx: ManageContext,
+  request: { acceptedTotal: number; attemptId: string; lang: "ar" | "en" },
+  context: WebCallerContext
+): Promise<SwitchResult> {
+  const { gateway } = ctx.gate;
+  const { firestore } = ctx.deps;
+  const purchaseId = purchaseIdFor(ctx.uid, request.attemptId);
+  const ledgerRef = firestore.collection(WEB_PURCHASES_COLLECTION).doc(purchaseId);
+  const existing = ledgerEntryFromData(purchaseId, (await ledgerRef.get()).data());
+  if (existing) return settleSwitchAttempt(ctx, existing, "retried");
+
+  await consumeWebThrottle(ctx.deps, ctx.uid, context);
+  assertSwitchable(ctx);
+  // Checked before voiding an earlier attempt's invoice, which may belong to a call still waiting
+  // for its bank step; the lock itself is taken with the entry below.
+  if (await lockHolderNow(ctx)) throw purchaseInProgress();
+  await voidEarlierSwitch(ctx);
+
+  const plan = await planSwitch(ctx);
+  if (plan.quote.total !== request.acceptedTotal) {
+    logWebInfo("web_subscription_switch_reprice", ctx.operationId, {
+      uid: ctx.uid,
+      subscriptionId: ctx.subscription.id,
+      accepted: request.acceptedTotal,
+      total: plan.quote.total,
+    });
+    return { status: "reprice", quote: plan.quote };
+  }
+
+  const previous = ctx.purchaseId
+    ? ledgerEntryFromData(ctx.purchaseId, (await firestore.collection(WEB_PURCHASES_COLLECTION).doc(ctx.purchaseId).get()).data())
+    : undefined;
+  const own = previous?.uid === ctx.uid ? previous : undefined;
+  const now = ctx.deps.now();
+  const entry: WebPurchaseEntry = {
+    purchaseId,
+    uid: ctx.uid,
+    plan: "web_yearly",
+    kind: "switch",
+    switchedFrom: "web_monthly",
+    tierShown: plan.known.tier,
+    tierCharged: plan.quote.tier,
+    lookupKey: plan.price.lookupKey,
+    priceId: plan.price.priceId,
+    amount: plan.quote.amount,
+    credit: plan.quote.credit,
+    tax: plan.quote.tax,
+    total: plan.quote.total,
+    currency: plan.quote.currency,
+    knownCountry: plan.known.knownCountry,
+    cardCountry: plan.card?.country ?? null,
+    cardFunding: plan.card?.funding ?? null,
+    wallet: plan.card?.wallet ?? null,
+    billingCountry: own?.billingCountry ?? null,
+    billingState: own?.billingState ?? null,
+    livemode: gateway.livemode,
+    lang: request.lang,
+    status: "pending",
+    stripe: { customerId: ctx.customerId, subscriptionId: ctx.subscription.id },
+    createdAt: now,
+    updatedAt: now,
+  };
+  const locked = await createLockedEntry(ctx, entry);
+  if (locked.kind === "existing") return settleSwitchAttempt(ctx, locked.entry, "retried");
+  if (locked.kind === "busy") {
+    logWebInfo("web_subscription_switch_busy", ctx.operationId, { uid: ctx.uid, purchaseId, activePurchase: locked.activePurchaseId });
+    throw purchaseInProgress();
+  }
+
+  let updated: Stripe.Subscription;
+  try {
+    updated = await gateway.updateSubscription(
+      ctx.subscription.id,
+      {
+        ...switchChange(ctx, plan.price),
+        payment_behavior: "pending_if_incomplete",
+        metadata: { plan: "web_yearly", tier: plan.quote.tier, purchaseId },
+        expand: ["latest_invoice.payments"],
+      },
+      `switch_${purchaseId}`
+    );
+  } catch (error) {
+    if (isCardError(error)) {
+      const category = declineCategory(error);
+      await settleUnstarted(ctx, purchaseId, "failed", category);
+      throw cardDeclined(category);
+    }
+    if (isInvalidRequestError(error)) {
+      // Stripe refused the change itself, so nothing was charged.
+      await settleUnstarted(ctx, purchaseId, "failed", `update_${stripeErrorCode(error) ?? "invalid_request"}`);
+    }
+    // Anything else may have charged: the entry stays pending for the sweep.
+    throw error;
+  }
+  const invoice = typeof updated.latest_invoice === "object" ? updated.latest_invoice : undefined;
+  if (!invoice?.id || invoice.billing_reason !== "subscription_update") {
+    // Not the switch's invoice: left pending, and the sweep resolves it from the subscription.
+    throw new Error("switch without its invoice");
+  }
+  const paymentIntentId = paymentIntentOfInvoice(invoice);
+  entry.stripe.invoiceId = invoice.id;
+  if (paymentIntentId) entry.stripe.paymentIntentId = paymentIntentId;
+  // The invoice's amounts are final once it exists, and may differ from the preview by the cent
+  // the credit moved; recorded now, so a webhook's sync after a bank step emails what was charged.
+  const charged = invoiceAmounts(invoice);
+  Object.assign(entry, { amount: charged.amount, credit: charged.credit, tax: charged.tax, total: charged.total });
+  await ledgerRef.update({
+    "stripe.invoiceId": invoice.id,
+    ...(paymentIntentId ? { "stripe.paymentIntentId": paymentIntentId } : {}),
+    amount: charged.amount,
+    credit: charged.credit,
+    tax: charged.tax,
+    total: charged.total,
+    updatedAt: Timestamp.fromDate(ctx.deps.now()),
+  });
+  logWebInfo("web_subscription_switch_updated", ctx.operationId, {
+    uid: ctx.uid,
+    purchaseId,
+    invoiceId: invoice.id,
+    invoiceStatus: invoice.status,
+    pendingUpdate: Boolean(updated.pending_update),
+  });
+  return outcomeOfSwitch(ctx, entry, invoice);
+}
+
+/** The PaymentIntent paying an invoice, from its default payment row. */
+function paymentIntentOfInvoice(invoice: Stripe.Invoice): string | undefined {
+  const payments = invoice.payments?.data ?? [];
+  const payment = payments.find((row) => row.is_default) ?? payments[0];
+  return idOf(payment?.payment?.payment_intent ?? null);
+}
+
+/**
+ * Voids the open invoice an earlier switch left, which drops the change Stripe holds for it and
+ * the retry Stripe scheduled on it, so the new attempt starts from the monthly plan. The sync
+ * then marks that attempt's entry.
+ */
+async function voidEarlierSwitch(ctx: ManageContext): Promise<void> {
+  if (!ctx.subscription.pending_update) return;
+  const { gateway } = ctx.gate;
+  const invoiceId = idOf(ctx.subscription.latest_invoice as string | { id: string } | null);
+  if (!invoiceId) return;
+  const invoice = await gateway.retrieveInvoice(invoiceId);
+  if (invoice.status !== "open" || invoice.billing_reason !== "subscription_update") return;
+  await gateway.voidInvoice(invoiceId);
+  logWebInfo("web_subscription_switch_earlier_voided", ctx.operationId, { uid: ctx.uid, invoiceId });
+  await sync(ctx, "switch_yearly");
+}
+
+/** Where the switch stands from its invoice: paid, waiting for the bank, or declined. */
+async function outcomeOfSwitch(ctx: ManageContext, entry: WebPurchaseEntry, invoice: Stripe.Invoice): Promise<SwitchResult> {
+  if (invoice.status === "paid") return settleSwitchPaid(ctx, entry, invoice);
+  const intentId = entry.stripe.paymentIntentId;
+  const intent = intentId ? await ctx.gate.gateway.retrievePaymentIntent(intentId) : undefined;
+  if (invoice.status === "open" && intent?.status === "requires_action" && intent.client_secret) {
+    logWebInfo("web_subscription_switch_requires_action", ctx.operationId, { uid: ctx.uid, purchaseId: entry.purchaseId });
+    return { status: "requires_action", purchaseId: entry.purchaseId, clientSecret: intent.client_secret };
+  }
+  const category: DeclineCategory = intent?.last_payment_error
+    ? categoryOfLastError(intent.last_payment_error)
+    : intent?.status === "requires_payment_method"
+      ? "declined"
+      : "authentication_failed";
+  return failSwitch(ctx, entry, category);
+}
+
+/**
+ * A switch whose payment did not go through: the entry is marked failed with its category, then
+ * its open invoice is voided, so Stripe drops the pending change and never retries the charge.
+ *
+ * The failure is recorded before the void because the void's `invoice.voided` webhook syncs the
+ * account, and a sync that came first would mark the entry abandoned with no category. A payment
+ * that went through after all settles as paid; the sync then heals the entry from its paid invoice.
+ */
+async function failSwitch(ctx: ManageContext, entry: WebPurchaseEntry, category: DeclineCategory): Promise<SwitchResult> {
+  const { gateway } = ctx.gate;
+  const invoiceId = entry.stripe.invoiceId!;
+  const intent = entry.stripe.paymentIntentId ? await gateway.retrievePaymentIntent(entry.stripe.paymentIntentId) : undefined;
+  if (intent?.status === "succeeded" || intent?.status === "processing") {
+    return settleSwitchPaid(ctx, entry, await gateway.retrieveInvoice(invoiceId, ["payments"]));
+  }
+  await settleUnstarted(ctx, entry.purchaseId, "failed", category);
+  let invoice = await gateway.retrieveInvoice(invoiceId, ["payments"]);
+  if (invoice.status === "open") {
+    try {
+      invoice = await gateway.voidInvoice(invoiceId);
+    } catch (error) {
+      // Paid between the read and the void: Stripe refuses to void it.
+      if (!isInvalidRequestError(error)) throw error;
+      invoice = await gateway.retrieveInvoice(invoiceId, ["payments"]);
+    }
+  }
+  if (invoice.status === "paid") return settleSwitchPaid(ctx, entry, invoice);
+  await sync(ctx, "switch_yearly");
+  logWebInfo("web_subscription_switch_declined", ctx.operationId, { uid: ctx.uid, purchaseId: entry.purchaseId, category });
+  throw cardDeclined(category);
+}
+
+/**
+ * Records what the paid invoice charged on the entry, so the ledger and the email carry the
+ * amounts taken rather than the quote's, then syncs. A sync failure is logged and the answer is
+ * still success: the payment is taken, and the webhook and the sweep sync again.
+ */
+async function settleSwitchPaid(ctx: ManageContext, entry: WebPurchaseEntry, invoice: Stripe.Invoice): Promise<SwitchResult> {
+  const amounts = invoiceAmounts(invoice);
+  const paymentIntentId = paymentIntentOfInvoice(invoice);
+  await ctx.deps.firestore.collection(WEB_PURCHASES_COLLECTION).doc(entry.purchaseId).update({
+    "stripe.invoiceId": invoice.id,
+    ...(paymentIntentId ? { "stripe.paymentIntentId": paymentIntentId } : {}),
+    amount: amounts.amount,
+    credit: amounts.credit,
+    tax: amounts.tax,
+    total: amounts.total,
+    updatedAt: Timestamp.fromDate(ctx.deps.now()),
+  });
+  try {
+    await sync(ctx, "switch_yearly");
+  } catch (error) {
+    functions.logger.warn("web_subscription_switch_after_payment_failure", {
+      operationId: ctx.operationId,
+      uid: ctx.uid,
+      purchaseId: entry.purchaseId,
+      code: stripeErrorCode(error) ?? (error instanceof Error ? error.name : typeof error),
+    });
+  }
+  logWebInfo("web_subscription_switch_paid", ctx.operationId, { uid: ctx.uid, purchaseId: entry.purchaseId, total: amounts.total });
+  return { status: "succeeded", purchaseId: entry.purchaseId };
+}
+
+/** After the page's bank step: the switch's outcome read again from its invoice. */
+async function finishSwitchYearly(ctx: ManageContext, purchaseId: string): Promise<SwitchResult> {
+  const entry = ledgerEntryFromData(
+    purchaseId,
+    (await ctx.deps.firestore.collection(WEB_PURCHASES_COLLECTION).doc(purchaseId).get()).data()
+  );
+  return settleSwitchAttempt(ctx, entry, "finish");
+}
+
+const DECLINE_CATEGORIES: readonly string[] = ["declined", "insufficient_funds", "expired_card", "incorrect_details", "authentication_failed"];
+
+/**
+ * The outcome of a switch already started, for a repeated `attemptId` or `finish_switch_yearly`;
+ * never a new charge. Someone else's attempt reads exactly like a missing one.
+ */
+async function settleSwitchAttempt(
+  ctx: ManageContext,
+  entry: WebPurchaseEntry | undefined,
+  why: "retried" | "finish"
+): Promise<SwitchResult> {
+  if (!entry || entry.uid !== ctx.uid || entry.livemode !== ctx.gate.gateway.livemode || entry.kind !== "switch") {
+    throw switchNotFound();
+  }
+  logWebInfo("web_subscription_switch_settle", ctx.operationId, { uid: ctx.uid, purchaseId: entry.purchaseId, why, status: entry.status });
+  switch (entry.status) {
+    case "pending":
+      break;
+    case "failed":
+    case "abandoned":
+      throw cardDeclined(DECLINE_CATEGORIES.includes(entry.failure ?? "") ? (entry.failure as DeclineCategory) : "declined");
+    default:
+      // Paid, and anything that followed a payment: the switch went through.
+      return { status: "succeeded", purchaseId: entry.purchaseId };
+  }
+  if (!entry.stripe.invoiceId) {
+    // The first call may still be inside Stripe's update: while the lock lasts nothing is written
+    // or voided, and only a subscription that already names the switch (Stripe applies its
+    // metadata with the payment) settles it.
+    if (ctx.deps.now().getTime() - entry.createdAt.getTime() < PURCHASE_LOCK_MS) {
+      const subscription = await ctx.gate.gateway.retrieveSubscription(entry.stripe.subscriptionId ?? ctx.subscription.id);
+      const invoiceId = idOf(subscription.latest_invoice as string | { id: string } | null);
+      if (subscription.metadata?.purchaseId !== entry.purchaseId || !invoiceId) throw purchaseInProgress();
+      const invoice = await ctx.gate.gateway.retrieveInvoice(invoiceId, ["payments"]);
+      if (invoice.status !== "paid") throw purchaseInProgress();
+      return settleSwitchPaid(ctx, entry, invoice);
+    }
+    // Past the lock, the first call has ended: resolved as the sweep does.
+    if (await stopPendingStripeSide(ctx.syncDeps, entry)) {
+      await sync(ctx, "switch_yearly");
+      return { status: "succeeded", purchaseId: entry.purchaseId };
+    }
+    await settleUnstarted(ctx, entry.purchaseId, "failed", "not_completed");
+    throw refusal("failed-precondition", "The switch did not complete.", "switch_incomplete");
+  }
+  const invoice = await ctx.gate.gateway.retrieveInvoice(entry.stripe.invoiceId, ["payments"]);
+  if (idOf(invoice.customer as string | { id: string } | null) !== ctx.customerId) throw switchNotFound();
+  return outcomeOfSwitch(ctx, entry, invoice);
 }

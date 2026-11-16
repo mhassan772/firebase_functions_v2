@@ -18,12 +18,15 @@ export type BillingKind =
   | "payment_failed_final"
   | "action_required"
   | "renewal_reminder"
-  | "cancellation_confirmed";
+  | "cancellation_confirmed"
+  | "switched_yearly";
 
 export interface BillingContent {
   plan?: string;
   /** Integer cents. */
   amount?: number;
+  /** The plan switch's credit for unused days, a positive number. */
+  credit?: number;
   tax?: number;
   total?: number;
   currency?: string;
@@ -84,6 +87,7 @@ interface Copy {
     action_required: { subject: string; body: string; how: string; stops: (date: string) => string; note: string };
     renewal_reminder: { subject: (date: string) => string; body: (date: string, amount: string) => string; cancel: string; cardExpires: string };
     cancellation_confirmed: { subject: string; body: string; until: (date: string) => string; resume: string; note: string };
+    switched_yearly: { subject: string; body: string; yearlyPrice: string; credit: string; renewsEveryYear: string };
   };
 }
 
@@ -147,6 +151,13 @@ const COPY: Record<BillingLang, Copy> = {
         resume: "يمكنك استئناف التجديد قبل ذلك من صفحة إدارة الاشتراك.",
         note: "إن لم تكن أنت من ألغى الاشتراك، فردّ على هذه الرسالة.",
       },
+      switched_yearly: {
+        subject: "أصبح اشتراكك في منطوق بريميوم سنويًا",
+        body: "حوّلت اشتراكك إلى الاشتراك السنوي، ويستمر بريميوم مفعّلًا دون انقطاع. تبدأ السنة من يوم التحويل.",
+        yearlyPrice: "السعر السنوي:",
+        credit: "خصم الأيام المتبقية من الاشتراك الشهري:",
+        renewsEveryYear: "يتجدد الاشتراك تلقائيًا كل سنة بالسعر السنوي حتى تلغيه.",
+      },
     },
   },
   en: {
@@ -207,6 +218,13 @@ const COPY: Record<BillingLang, Copy> = {
         until: (date) => `Premium stays on until ${date}, then stops.`,
         resume: "You can resume the renewal before then on the manage page.",
         note: "If you didn't cancel it, reply to this email.",
+      },
+      switched_yearly: {
+        subject: "Your Mantooq Premium subscription is now yearly",
+        body: "You switched your subscription to the yearly plan, and Premium stays on without a break. The year starts on the day you switched.",
+        yearlyPrice: "Yearly price:",
+        credit: "Credit for the unused days of your monthly plan:",
+        renewsEveryYear: "Your subscription renews automatically every year at the yearly price until you cancel.",
       },
     },
   },
@@ -308,6 +326,24 @@ function body(kind: BillingKind, lang: BillingLang, content: BillingContent): Bo
         paragraphs: [k.body, k.until(date(content.endsAt, "endsAt")), k.resume, t.noRefunds],
         button: t.manageButton,
         note: k.note,
+      };
+    }
+    case "switched_yearly": {
+      const k = t.kinds.switched_yearly;
+      const details = [
+        `${t.labels.plan} ${planName}`,
+        `${k.yearlyPrice} ${money(content.amount, "amount")}`,
+        // The credit is a deduction, so it is shown with a minus sign.
+        `${k.credit} ${money(-need(content.credit, "credit"), "credit")}`,
+      ];
+      if (content.tax) details.push(`${t.labels.tax} ${money(content.tax, "tax")}`);
+      details.push(`${t.labels.paid} ${money(content.total, "total")}`, `${t.labels.renews} ${date(content.renewsAt, "renewsAt")}`);
+      return {
+        subject: k.subject,
+        paragraphs: [k.body, k.renewsEveryYear, `${t.noRefunds} ${t.whereToCancel}`],
+        details,
+        button: t.manageButton,
+        note: t.notYou,
       };
     }
   }

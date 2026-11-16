@@ -72,6 +72,19 @@ describe("decideSlotEmails", () => {
     assert.equal(lifetime[0].fields.renewsAt, undefined);
   });
 
+  test("a paid plan switch queues switched_yearly with its credit, never purchase_confirmed, renewed or anything for the renewal it turned back on", () => {
+    const switched = entry("p2", "web_yearly", "ar", { kind: "switch", switchedFrom: "web_monthly", amount: 4999, credit: 333, total: 4666 });
+    const previous = slot("canceled", { purchaseId: "p1", lastPaidInvoiceId: "in_1", paidThrough: at(20), cancelAtPeriodEnd: true }, { productId: "web_monthly" });
+    const next = slot("active", { purchaseId: "p2", lastPaidInvoiceId: "in_2", paidThrough: at(365) });
+    const facts = { id: "sub_1", latestPaid: { id: "in_2", billingReason: "subscription_update", amountPaid: 4666, currency: "usd" } };
+    const emails = decideSlotEmails(notice({ previous, next, becamePaid: [switched], subscription: facts, entries: [entry("p1", "web_monthly"), switched] }));
+    assert.deepEqual(kinds(emails), ["switched_yearly:switched_p2"]);
+    assert.equal(emails[0].lang, "ar");
+    assert.deepEqual(emails[0].fields, {
+      plan: "web_yearly", amount: 4999, credit: 333, tax: 0, total: 4666, currency: "usd", renewsAt: at(365).toDate(),
+    });
+  });
+
   test("renewed only for a subscription_cycle invoice on the same subscription", () => {
     const previous = slot("active");
     const next = slot("active", { lastPaidInvoiceId: "in_2", paidThrough: at(665) });
@@ -142,16 +155,16 @@ describe("templates", () => {
     plan: "web_yearly", amount: 4999, tax: 650, total: 5649, currency: "usd",
     renewsAt: date, endsAt: date, graceEndsAt: date, cardExpiresFirst: true, livemode: true,
   };
-  const all = ["purchase_confirmed", "renewed", "payment_failed", "payment_failed_final", "action_required", "renewal_reminder", "cancellation_confirmed"];
+  const all = ["purchase_confirmed", "renewed", "payment_failed", "payment_failed_final", "action_required", "renewal_reminder", "cancellation_confirmed", "switched_yearly"];
 
   test("every kind renders in both languages, with the manage button and no placeholder or raw cents", () => {
     for (const kind of all) {
       for (const lang of ["ar", "en"]) {
         for (const plan of kind === "purchase_confirmed" ? ["web_monthly", "web_yearly", "web_lifetime"] : ["web_yearly"]) {
-          const email = renderBillingEmail(kind, lang, { ...content, plan });
+          const email = renderBillingEmail(kind, lang, { ...content, plan, credit: 333 });
           for (const part of [email.subject, email.text, email.html]) {
             assert.doesNotMatch(part, /undefined|NaN|null|\{|\$\{|\u0000/, `${kind}/${lang}`);
-            assert.doesNotMatch(part, /4999|5649|\b650\b/, `${kind}/${lang}: raw cents`);
+            assert.doesNotMatch(part, /4999|5649|\b650\b|\b333\b/, `${kind}/${lang}: raw cents`);
           }
           assert.ok(email.text.includes(`https://accounts.mantooq.com/manage?lang=${lang}`), `${kind}/${lang}: button`);
           assert.ok(!email.subject.startsWith("[TEST]"));
@@ -176,6 +189,16 @@ describe("templates", () => {
     assert.match(en("renewal_reminder"), /renews automatically on December 14, 2026 for \$56\.49[\s\S]*cancel it on the manage page before that date[\s\S]*expires before that date/);
     assert.doesNotMatch(en("renewal_reminder", { cardExpiresFirst: false }), /expires/);
     assert.match(en("cancellation_confirmed"), /won't renew[\s\S]*until December 14, 2026[\s\S]*resume/);
+    const switched = { credit: 333, tax: 0, total: 4666 };
+    assert.match(en("switched_yearly", switched),
+      /to the yearly plan[\s\S]*starts on the day you switched[\s\S]*Plan: Yearly[\s\S]*Yearly price: \$49\.99[\s\S]*unused days of your monthly plan: -\$3\.33[\s\S]*Amount paid: \$46\.66[\s\S]*Next renewal: December 14, 2026[\s\S]*every year[\s\S]*until you cancel[\s\S]*not refundable/);
+    assert.doesNotMatch(en("switched_yearly", switched), /Tax:/, "no tax line when there is none");
+    assert.match(en("switched_yearly", { credit: 333, tax: 650, total: 5316 }), /Tax: \$6\.50[\s\S]*Amount paid: \$53\.16/);
+    assert.match(ar("switched_yearly", switched), /الخطة: سنوي[\s\S]*السعر السنوي: [\s\S]*خصم الأيام المتبقية من الاشتراك الشهري: [\s\S]*المبلغ المدفوع: [\s\S]*١٤ ديسمبر ٢٠٢٦[\s\S]*كل سنة[\s\S]*لا تُسترد/);
+    assert.equal(renderBillingEmail("switched_yearly", "en", { ...content, ...switched }).subject, "Your Mantooq Premium subscription is now yearly");
+    assert.ok(renderBillingEmail("switched_yearly", "ar", { ...content, ...switched, livemode: false }).subject.startsWith("[TEST] "));
+    assert.throws(() => renderBillingEmail("switched_yearly", "en", { ...content, credit: undefined }),
+      (error) => error instanceof BillingEmailIncompleteError && error.field === "credit");
   });
 
   test("a sandbox email's subject starts with [TEST]; a missing field refuses to render", () => {

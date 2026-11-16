@@ -353,15 +353,26 @@ async function chargeOfInvoice(gateway: StripeGateway, invoice: Stripe.Invoice):
   return facts;
 }
 
-async function readInvoiceFacts(gateway: StripeGateway, invoice: Stripe.Invoice): Promise<InvoiceFacts> {
+/**
+ * The end of the service an invoice pays for: the latest `period.end` across its lines.
+ *
+ * Never the first line's, nor the invoice's own period: a plan switch's invoice lists the credit
+ * for the unused monthly days first, and only its yearly line runs to the new period's end.
+ */
+export function servicePeriodEnd(invoice: Pick<Stripe.Invoice, "lines">): Date | undefined {
   const ends = (invoice.lines?.data ?? []).map((line) => line.period?.end).filter((end): end is number => typeof end === "number");
+  return ends.length > 0 ? new Date(Math.max(...ends) * 1000) : undefined;
+}
+
+async function readInvoiceFacts(gateway: StripeGateway, invoice: Stripe.Invoice): Promise<InvoiceFacts> {
+  const periodEnd = servicePeriodEnd(invoice);
   const paidAt = invoice.status_transitions?.paid_at;
   const facts: InvoiceFacts = { id: invoice.id!, status: invoice.status ?? null };
   if (typeof paidAt === "number") facts.paidAt = new Date(paidAt * 1000);
   if (invoice.billing_reason) facts.billingReason = invoice.billing_reason;
   if (typeof invoice.amount_paid === "number") facts.amountPaid = invoice.amount_paid;
   if (invoice.currency) facts.currency = invoice.currency;
-  if (ends.length > 0) facts.periodEnd = new Date(Math.max(...ends) * 1000);
+  if (periodEnd) facts.periodEnd = periodEnd;
   // Only a paid invoice's charge can carry a refund or a dispute.
   if (invoice.status === "paid") facts.charge = await chargeOfInvoice(gateway, invoice);
   return facts;
@@ -448,6 +459,9 @@ export async function readWebStripeFacts(
       expand: ["data.payments"],
     });
     let latestPaid: InvoiceFacts | undefined;
+    // Kept with the ledger's invoices, so any entry naming it is corrected, whatever its status:
+    // a plan switch marked failed or abandoned while its payment went through (a decline racing
+    // the payment, or the void's own webhook) becomes paid, at no extra read.
     if (latestPaidInvoice?.id) {
       latestPaid = facts.invoices.get(latestPaidInvoice.id) ?? (await readInvoiceFacts(gateway, latestPaidInvoice));
       facts.invoices.set(latestPaidInvoice.id, latestPaid);
@@ -457,7 +471,10 @@ export async function readWebStripeFacts(
     let latestOpen: WebSubscriptionFacts["latestOpen"];
     if (latestInvoiceId && latestInvoiceId !== latestPaid?.id) {
       const latest = await gateway.retrieveInvoice(latestInvoiceId, ["payments"]);
-      if (latest.status === "open") {
+      // A plan switch waiting for its payment leaves an open `subscription_update` invoice while
+      // the subscription stays as it was: that is not a renewal in trouble, and the page's
+      // verify button would otherwise act on the switch's payment under the older purchase.
+      if (latest.status === "open" && latest.billing_reason !== "subscription_update") {
         latestOpen = { id: latestInvoiceId, ...(latest.billing_reason ? { billingReason: latest.billing_reason } : {}) };
         const payment = (latest.payments?.data ?? []).find((row) => row.status === "open" || row.is_default);
         const paymentIntentId = idOf(payment?.payment?.payment_intent ?? null);

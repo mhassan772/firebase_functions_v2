@@ -11,6 +11,7 @@ import {
 } from "../subscriptions/persistence";
 import { customerIdFor, readCustomerMapping } from "./customers";
 import { isWebPlan, ledgerEntryFromData, WEB_PURCHASES_COLLECTION, WebPurchaseEntry } from "./ledger";
+import { savedCardOf } from "./pricing";
 import { idOf, stripeErrorCode } from "./stripeGateway";
 import { syncWebEntitlement, WebSyncDeps, WebSyncNotice } from "./sync";
 
@@ -33,6 +34,7 @@ export const BILLING_EMAIL_KINDS = [
   "action_required",
   "renewal_reminder",
   "cancellation_confirmed",
+  "switched_yearly",
 ] as const;
 export type BillingEmailKind = (typeof BILLING_EMAIL_KINDS)[number];
 export type BillingEmailLang = "ar" | "en";
@@ -41,6 +43,8 @@ export type BillingEmailLang = "ar" | "en";
 export interface BillingEmailFields {
   plan?: string;
   amount?: number;
+  /** The plan switch's credit for the unused monthly days, a positive number. */
+  credit?: number;
   tax?: number;
   total?: number;
   currency?: string;
@@ -69,6 +73,7 @@ export const outboxIds = {
   action: (invoiceId: string) => `action_${invoiceId}`,
   reminder: (subscriptionId: string, renewsAt: Date) => `reminder_${subscriptionId}_${epochSeconds(renewsAt)}`,
   cancelled: (subscriptionId: string, paidThrough: Date) => `cancelled_${subscriptionId}_${epochSeconds(paidThrough)}`,
+  switched: (purchaseId: string) => `switched_${purchaseId}`,
 };
 
 export function outboxData(email: BillingEmail, now: Date): DocumentData {
@@ -172,7 +177,9 @@ export function langOfEntry(entry: Pick<WebPurchaseEntry, "lang"> | undefined): 
  * Nothing is queued once access is revoked (a refund or a dispute), and a change on a different
  * subscription than before (a rebuilt or replaced slot) queues only first-payment confirmations.
  * A renewal that needs the bank's confirmation gets `action_required` instead of
- * `payment_failed`, and neither is sent once the grace has passed.
+ * `payment_failed`, and neither is sent once the grace has passed. A paid plan switch gets
+ * `switched_yearly` in place of `purchase_confirmed`; the renewal it turns back on sends nothing
+ * more, since the switch's own email says the plan renews.
  */
 export function decideSlotEmails(notice: WebSyncNotice): BillingEmail[] {
   const previous = slotView(notice.previous);
@@ -187,6 +194,24 @@ export function decideSlotEmails(notice: WebSyncNotice): BillingEmail[] {
     const subscriptionPlan = entry.plan !== "web_lifetime";
     const sameSubscription = subscriptionPlan && next.subscriptionId !== undefined &&
       (next.subscriptionId === entry.stripe.subscriptionId || next.purchaseId === entry.purchaseId);
+    if (entry.kind === "switch") {
+      emails.push({
+        ...base,
+        id: outboxIds.switched(entry.purchaseId),
+        kind: "switched_yearly",
+        lang: langOfEntry(entry),
+        fields: {
+          plan: entry.plan,
+          amount: entry.amount,
+          credit: entry.credit ?? 0,
+          tax: entry.tax,
+          total: entry.total,
+          currency: entry.currency,
+          ...(sameSubscription && next.paidThrough ? { renewsAt: next.paidThrough } : {}),
+        },
+      });
+      continue;
+    }
     emails.push({
       ...base,
       id: outboxIds.confirmed(entry.purchaseId),
@@ -320,12 +345,8 @@ export async function queueRenewalReminder(
     : new Date((item.current_period_end ?? 0) * 1000);
   if (renewsAt.getTime() <= now.getTime()) return "renewal_passed";
 
-  let cardExpiresFirst = false;
-  const paymentMethodId = idOf(subscription.default_payment_method as string | { id: string } | null);
-  if (paymentMethodId) {
-    const method = await gateway.retrievePaymentMethod(paymentMethodId);
-    cardExpiresFirst = cardExpiresBefore(method.card?.exp_month, method.card?.exp_year, renewsAt);
-  }
+  const card = await savedCardOf(gateway, idOf(subscription.default_payment_method as string | { id: string } | null), customerId);
+  const cardExpiresFirst = cardExpiresBefore(card?.expMonth ?? undefined, card?.expYear ?? undefined, renewsAt);
   const amount = typeof upcoming.total === "number" ? upcoming.total : item.price?.unit_amount ?? undefined;
   const email: BillingEmail = {
     id: outboxIds.reminder(subscription.id, renewsAt),

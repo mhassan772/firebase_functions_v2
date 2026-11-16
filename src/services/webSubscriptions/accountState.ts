@@ -1,6 +1,8 @@
 import { DocumentData, Firestore } from "firebase-admin/firestore";
+import { MANUAL_SLOT_ENABLED } from "../../config/constants";
 import { StorePlatform } from "../../types/subscriptions";
 import {
+  MANUAL_SLOT,
   STATE_SLOTS,
   SUBSCRIPTION_STATE_COLLECTION,
   stateDataToNormalized,
@@ -8,17 +10,18 @@ import {
   timestampDate,
   webSlotIndex,
 } from "../subscriptions/persistence";
-import { WebPlan } from "./ledger";
+import { isWebPlan, WebPlan } from "./ledger";
 
 /**
  * What the purchase callables read about an account's entitlement: its web slot for the key's
- * mode and its production store slots. Slots are read directly, not the master, because the
- * master shows only the winning source and the guards need every one.
+ * mode, its production store slots and its manual slot. Slots are read directly, not the master,
+ * because the master shows only the winning source and the guards need every one.
  */
 export interface WebAccountSlots {
   web?: DocumentData;
   apple?: DocumentData;
   google?: DocumentData;
+  manual?: DocumentData;
 }
 
 const STORE_PRODUCTION_SLOTS: ReadonlyArray<{ platform: StorePlatform; key: "apple" | "google" }> = [
@@ -29,15 +32,20 @@ const STORE_PRODUCTION_SLOTS: ReadonlyArray<{ platform: StorePlatform; key: "app
 export async function readWebAccountSlots(db: Firestore, uid: string, livemode: boolean): Promise<WebAccountSlots> {
   const slots = db.collection(SUBSCRIPTION_STATE_COLLECTION);
   const web = STATE_SLOTS[webSlotIndex(livemode)];
-  const [webSnap, ...storeSnaps] = await db.getAll(
+  // With the manual kill switch off the slot is not even read, as the projection ignores it.
+  const [webSnap, ...otherSnaps] = await db.getAll(
     slots.doc(stateDocumentId(uid, web.platform, web.environment)),
-    ...STORE_PRODUCTION_SLOTS.map((slot) => slots.doc(stateDocumentId(uid, slot.platform, "production")))
+    ...STORE_PRODUCTION_SLOTS.map((slot) => slots.doc(stateDocumentId(uid, slot.platform, "production"))),
+    ...(MANUAL_SLOT_ENABLED ? [slots.doc(stateDocumentId(uid, MANUAL_SLOT.platform, MANUAL_SLOT.environment))] : [])
   );
+  const storeSnaps = otherSnaps.slice(0, STORE_PRODUCTION_SLOTS.length);
+  const manualSnap = otherSnaps[STORE_PRODUCTION_SLOTS.length];
   const result: WebAccountSlots = {};
   if (webSnap.exists) result.web = webSnap.data();
   storeSnaps.forEach((snapshot, index) => {
     if (snapshot.exists) result[STORE_PRODUCTION_SLOTS[index].key] = snapshot.data();
   });
+  if (manualSnap?.exists) result.manual = manualSnap.data();
   return result;
 }
 
@@ -150,4 +158,62 @@ export function purchaseBlockers(
   }
   if (recurring && storeSubscription?.autoRenewing) blockers.push("store_subscription_active");
   return { blockers, storeSubscription };
+}
+
+/** One source of premium the account holds now, as `/subscribe` lists it. */
+export interface PremiumSource {
+  source: "web" | StorePlatform | "manual";
+  /** `lifetime` is web only; `grant` is manual only. */
+  kind: "subscription" | "lifetime" | "grant";
+  /** Web only. */
+  plan?: WebPlan;
+  state: "active" | "cancelling" | "payment_failed" | "needs_action";
+  /** True only when it will charge again on its own. */
+  renews: boolean;
+  /** ISO 8601: the renewal date when `renews`, else the day premium ends. Absent for lifetime. */
+  until?: string;
+}
+
+const LISTED_WEB_STATES: ReadonlyArray<WebAccountState> = ["active", "cancelling", "payment_failed", "needs_action"];
+
+/**
+ * Every source of premium the account holds now, in the order web, Apple, Google, manual.
+ *
+ * The one reader of the slots for what the purchase page lists and what a purchase must be
+ * confirmed over. A source is listed only while it gives premium, except a web subscription
+ * whose renewal failed or waits for authentication: it still renews once paid. The web date is
+ * `paidThrough`, not `expiresAt`, which carries the grace margin the buyer never paid for.
+ */
+export function existingPremium(slots: WebAccountSlots, now: Date): PremiumSource[] {
+  const sources: PremiumSource[] = [];
+  const view = webSlotView(slots.web, now);
+  if (view.state === "lifetime") {
+    sources.push({ source: "web", kind: "lifetime", plan: "web_lifetime", state: "active", renews: false });
+  } else if (LISTED_WEB_STATES.includes(view.state)) {
+    sources.push({
+      source: "web",
+      kind: "subscription",
+      ...(isWebPlan(view.plan) ? { plan: view.plan } : {}),
+      state: view.state as PremiumSource["state"],
+      renews: view.state !== "cancelling",
+      ...(view.paidThrough ? { until: view.paidThrough.toISOString() } : {}),
+    });
+  }
+  for (const { platform, key } of STORE_PRODUCTION_SLOTS) {
+    const state = normalized(slots[key], now);
+    if (!state?.active) continue;
+    const renews = state.autoRenewing === true;
+    sources.push({
+      source: platform,
+      kind: "subscription",
+      state: renews ? "active" : "cancelling",
+      renews,
+      until: state.expiresAt.toISOString(),
+    });
+  }
+  const manual = normalized(slots.manual, now);
+  if (manual?.active) {
+    sources.push({ source: "manual", kind: "grant", state: "active", renews: false, until: manual.expiresAt.toISOString() });
+  }
+  return sources;
 }

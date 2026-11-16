@@ -2,7 +2,8 @@ import { Timestamp } from "firebase-admin/firestore";
 import * as functions from "firebase-functions";
 import { safeErrorCode } from "../subscriptions/errors";
 import { ledgerEntryFromData, listPendingEntries, WEB_PURCHASES_COLLECTION, WebPurchaseEntry } from "./ledger";
-import { isResourceMissing, stripeErrorCode } from "./stripeGateway";
+import { invoiceAmounts } from "./pricing";
+import { idOf, isResourceMissing, stripeErrorCode } from "./stripeGateway";
 import { syncWebEntitlement, WebSyncDeps } from "./sync";
 
 /** A purchase still pending this long is synced; the purchase callable settles most within seconds. */
@@ -29,6 +30,10 @@ export interface PendingSweepSummary {
  * Stripe has since been paid for. An entry still pending after 24 hours has its incomplete
  * subscription cancelled or its one-off invoice voided, so a payment can no longer complete
  * behind it, and becomes `abandoned`.
+ *
+ * A plan switch still unpaid after the 15 minutes is stopped at once and becomes `failed`: its
+ * open invoice holds a change to a subscription the buyer is still using, and the page that could
+ * finish its bank step has long since given up.
  */
 export async function sweepPendingWebPurchases(
   deps: WebSyncDeps,
@@ -52,10 +57,12 @@ export async function sweepPendingWebPurchases(
         await syncWebEntitlement(uid, deps, { operationId: options.operationId, trigger: "pending_sweep" });
         summary.synced += 1;
       }
-      if (options.now.getTime() - entry.createdAt.getTime() < PENDING_ABANDON_AFTER_MS) continue;
-      if (await abandonPendingPurchase(deps, entry.purchaseId, options.now)) {
+      const isSwitch = entry.kind === "switch";
+      if (!isSwitch && options.now.getTime() - entry.createdAt.getTime() < PENDING_ABANDON_AFTER_MS) continue;
+      const settled = isSwitch ? { status: "failed" as const, failure: "not_completed" } : undefined;
+      if (await abandonPendingPurchase(deps, entry.purchaseId, options.now, settled)) {
         summary.abandoned += 1;
-        functions.logger.info("web_purchase_abandoned", {
+        functions.logger.info(isSwitch ? "web_switch_failed" : "web_purchase_abandoned", {
           operationId: options.operationId,
           uid,
           purchaseId: entry.purchaseId,
@@ -76,11 +83,16 @@ export async function sweepPendingWebPurchases(
 }
 
 /**
- * Stops the Stripe side of a pending purchase and marks it abandoned; false when it is no longer
- * pending or turned out paid. Shared with the purchase callable, which abandons an account's
- * older pending purchases before charging a new one.
+ * Stops the Stripe side of a pending purchase and marks it abandoned (or as `settled` says); false
+ * when it is no longer pending or turned out paid. Shared with the purchase callable, which
+ * abandons an account's older pending purchases before charging a new one.
  */
-export async function abandonPendingPurchase(deps: WebSyncDeps, purchaseId: string, now: Date): Promise<boolean> {
+export async function abandonPendingPurchase(
+  deps: WebSyncDeps,
+  purchaseId: string,
+  now: Date,
+  settled: { status: "abandoned" | "failed"; failure?: string } = { status: "abandoned" }
+): Promise<boolean> {
   const { firestore } = deps;
   const ref = firestore.collection(WEB_PURCHASES_COLLECTION).doc(purchaseId);
   const current = ledgerEntryFromData(purchaseId, (await ref.get()).data());
@@ -93,7 +105,7 @@ export async function abandonPendingPurchase(deps: WebSyncDeps, purchaseId: stri
   return firestore.runTransaction(async (transaction) => {
     const entry = ledgerEntryFromData(purchaseId, (await transaction.get(ref)).data());
     if (!entry || entry.status !== "pending") return false;
-    transaction.update(ref, { status: "abandoned", updatedAt: Timestamp.fromDate(now) });
+    transaction.update(ref, { status: settled.status, ...(settled.failure ? { failure: settled.failure } : {}), updatedAt: Timestamp.fromDate(now) });
     return true;
   });
 }
@@ -120,6 +132,7 @@ export async function stopPendingStripeSide(deps: WebSyncDeps, entry: WebPurchas
       if (!isResourceMissing(error)) throw error;
     }
   }
+  if (entry.kind === "switch") return stopPendingSwitch(deps, entry);
   const invoiceId = entry.stripe.invoiceId;
   if (!invoiceId) return false;
   let invoice;
@@ -140,5 +153,65 @@ export async function stopPendingStripeSide(deps: WebSyncDeps, entry: WebPurchas
   }
   if (invoice.status === "open") await gateway.voidInvoice(invoiceId);
   else if (invoice.status === "draft") await gateway.deleteInvoice(invoiceId);
+  return false;
+}
+
+/**
+ * The plan switch's part of `stopPendingStripeSide`: true when its invoice is paid, otherwise the
+ * open invoice is voided, which also drops the change Stripe holds for it.
+ *
+ * The subscription it changes is already running, so the subscription's status says nothing about
+ * the switch; only the invoice does. An entry without an invoice id (the call ended between
+ * Stripe's answer and the write) is named by the subscription only once paid, since Stripe applies
+ * the switch's metadata with the payment: the invoice and its amounts are then recorded, so the
+ * sync can mark the entry paid. Every caller passes only entries past the purchase lock, whose
+ * call has ended, so an unnamed open switch invoice can be voided as theirs.
+ */
+async function stopPendingSwitch(deps: WebSyncDeps, entry: WebPurchaseEntry): Promise<boolean> {
+  const { firestore, gateway } = deps;
+  let invoiceId = entry.stripe.invoiceId;
+  const resolved = !invoiceId;
+  if (!invoiceId) {
+    if (!entry.stripe.subscriptionId) return false;
+    const subscription = await gateway.retrieveSubscription(entry.stripe.subscriptionId);
+    invoiceId = idOf(subscription.latest_invoice as string | { id: string } | null);
+    if (subscription.metadata?.purchaseId !== entry.purchaseId) {
+      // Not paid. An open switch invoice raised since this entry was made is its own, left by the
+      // call that ended: voided, so Stripe does not hold the change for its 23 hours.
+      if (subscription.pending_update && invoiceId) {
+        const open = await gateway.retrieveInvoice(invoiceId);
+        if (open.status === "open" && open.billing_reason === "subscription_update" && open.created * 1000 >= entry.createdAt.getTime()) {
+          await gateway.voidInvoice(invoiceId);
+        }
+      }
+      return false;
+    }
+    if (!invoiceId) return false;
+  }
+  let invoice;
+  try {
+    invoice = await gateway.retrieveInvoice(invoiceId, ["payments"]);
+  } catch (error) {
+    if (isResourceMissing(error)) return false;
+    throw error;
+  }
+  if (invoice.status === "paid") {
+    if (resolved) {
+      const amounts = invoiceAmounts(invoice);
+      const payment = (invoice.payments?.data ?? []).find((row) => row.status === "paid") ?? invoice.payments?.data[0];
+      const paymentIntentId = idOf(payment?.payment?.payment_intent ?? null);
+      await firestore.collection(WEB_PURCHASES_COLLECTION).doc(entry.purchaseId).update({
+        "stripe.invoiceId": invoiceId,
+        ...(paymentIntentId ? { "stripe.paymentIntentId": paymentIntentId } : {}),
+        amount: amounts.amount,
+        credit: amounts.credit,
+        tax: amounts.tax,
+        total: amounts.total,
+        updatedAt: Timestamp.fromDate(deps.now?.() ?? new Date()),
+      });
+    }
+    return true;
+  }
+  if (invoice.status === "open") await gateway.voidInvoice(invoiceId);
   return false;
 }

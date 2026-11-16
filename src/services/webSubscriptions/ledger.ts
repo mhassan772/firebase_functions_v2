@@ -63,6 +63,14 @@ export interface WebPurchaseEntry {
   lang: string | null;
   status: WebPurchaseStatus;
   failure?: string;
+  /**
+   * `switch` for a monthly subscription moved to yearly, which charges the subscription already
+   * held instead of starting one; absent for a purchase.
+   */
+  kind?: "switch";
+  switchedFrom?: WebPlan;
+  /** Cents credited for the unused days of the plan switched from, a positive number; a switch only. */
+  credit?: number;
   /** Cents refunded when a refund did not cover the whole charge. */
   partialRefund?: number;
   stripe: WebPurchaseStripeRefs;
@@ -111,6 +119,9 @@ export function ledgerEntryToData(entry: WebPurchaseEntry): DocumentData {
   if (entry.uid) data.uid = entry.uid;
   if (entry.failure) data.failure = entry.failure;
   if (entry.partialRefund !== undefined) data.partialRefund = entry.partialRefund;
+  if (entry.kind) data.kind = entry.kind;
+  if (entry.switchedFrom) data.switchedFrom = entry.switchedFrom;
+  if (entry.credit !== undefined) data.credit = entry.credit;
   return data;
 }
 
@@ -155,6 +166,9 @@ export function ledgerEntryFromData(purchaseId: string, data: DocumentData | und
   if (typeof data.uid === "string" && data.uid) entry.uid = data.uid;
   if (typeof data.failure === "string") entry.failure = data.failure;
   if (typeof data.partialRefund === "number") entry.partialRefund = data.partialRefund;
+  if (data.kind === "switch") entry.kind = "switch";
+  if (isWebPlan(data.switchedFrom)) entry.switchedFrom = data.switchedFrom;
+  if (typeof data.credit === "number" && Number.isFinite(data.credit)) entry.credit = data.credit;
   return entry;
 }
 

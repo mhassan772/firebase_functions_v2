@@ -49,6 +49,8 @@ function createFakeStripe(options = {}) {
     prices: new Map(),
     events: [],
     idempotency: new Map(),
+    /** Subscription id to the update params Stripe holds until the switch's invoice is paid. */
+    pendingUpdates: new Map(),
   };
   const calls = [];
   const fake = {
@@ -280,6 +282,8 @@ function createFakeStripe(options = {}) {
       metadata,
       default_payment_method: null,
       latest_invoice: null,
+      billing_cycle_anchor: start,
+      pending_update: null,
       items: {
         object: "list",
         data: [
@@ -300,6 +304,97 @@ function createFakeStripe(options = {}) {
     sub.latest_invoice = invoice.id;
     emit("customer.subscription.created", sub);
     return { sub, invoice };
+  }
+
+  /**
+   * The lines of the invoice a price change with `always_invoice` raises, as the sandbox showed
+   * them: the credit for the unused part of the current period first, then the new price. With
+   * `billing_cycle_anchor: {type: "now"}` the new line is the full price for a period from now;
+   * otherwise it is prorated to the old anchor's period.
+   */
+  function changeLines(sub, params) {
+    const item = sub.items.data.find((row) => row.id === params.items[0].id);
+    if (!item) throw stripeError("resource_missing", `No such subscription item: '${params.items[0].id}'`);
+    const oldPrice = priceById(item.price.id);
+    const newPrice = priceById(params.items[0].price);
+    const now = fake.nowSec;
+    const { current_period_start: start, current_period_end: end } = item;
+    const anchorNow = params.billing_cycle_anchor?.type === "now";
+    const newEnd = anchorNow ? periodEnd(now, newPrice.recurring.interval) : periodEnd(start, newPrice.recurring.interval);
+    const line = (amount, price, from, to, proration) => ({
+      id: nextId("il"),
+      object: "line_item",
+      amount,
+      period: { start: from, end: to },
+      parent: {
+        type: "subscription_item_details",
+        subscription_item_details: { subscription: sub.id, subscription_item: item.id, proration },
+      },
+      pricing: { price_details: { price: price.id, product: price.product } },
+    });
+    const credit = -Math.round((oldPrice.unit_amount * Math.max(0, end - now)) / (end - start));
+    const charge = anchorNow ? newPrice.unit_amount : Math.round((newPrice.unit_amount * (newEnd - now)) / (newEnd - start));
+    return [line(credit, oldPrice, now, end, true), line(charge, newPrice, now, newEnd, !anchorNow)];
+  }
+
+  /** Applies a price change: what a plain update does at once, and a pending one once paid. */
+  function applyChange(sub, params) {
+    const item = sub.items.data.find((row) => row.id === params.items[0].id);
+    const price = priceById(params.items[0].price);
+    item.price = clone(price);
+    if (params.billing_cycle_anchor?.type === "now") {
+      item.current_period_start = fake.nowSec;
+      item.current_period_end = periodEnd(fake.nowSec, price.recurring.interval);
+      sub.billing_cycle_anchor = fake.nowSec;
+    } else if (params.proration_behavior === "always_invoice") {
+      item.current_period_end = periodEnd(item.current_period_start, price.recurring.interval);
+    }
+    if (params.cancel_at_period_end !== undefined) {
+      sub.cancel_at_period_end = params.cancel_at_period_end;
+      sub.cancel_at = params.cancel_at_period_end ? item.current_period_end : null;
+    }
+    if (params.metadata) sub.metadata = { ...sub.metadata, ...params.metadata };
+    sub.pending_update = null;
+    state.pendingUpdates.delete(sub.id);
+  }
+
+  /**
+   * `payment_behavior: "pending_if_incomplete"` with a price change: raises the change's invoice
+   * and charges the default card off session. Paid, the change applies at once; declined or
+   * waiting for the bank, the subscription keeps its price, dates and metadata, and holds the
+   * change in `pending_update` until the invoice is paid or voided.
+   */
+  function pendingChange(sub, params) {
+    const invoice = newInvoice({
+      customer: sub.customer,
+      subscription: sub.id,
+      lines: changeLines(sub, params),
+      billingReason: "subscription_update",
+      automaticTax: sub.automatic_tax?.enabled === true,
+    });
+    sub.latest_invoice = invoice.id;
+    const pi = state.paymentIntents.get(invoice.payments[0].payment.payment_intent);
+    const method = sub.default_payment_method ? state.paymentMethods.get(sub.default_payment_method) : undefined;
+    if (method && !method.failsCharges && !method.requiresAction) {
+      payInvoiceNow(invoice, { paymentMethod: method.id, cardCountry: method.card.country });
+      applyChange(sub, params);
+    } else {
+      if (method?.requiresAction) {
+        Object.assign(pi, { status: "requires_action", next_action: { type: "use_stripe_sdk" }, payment_method: method.id });
+        emit("invoice.payment_action_required", invoice);
+      } else {
+        pi.last_payment_error = { type: "card_error", code: "card_declined", decline_code: method?.declineCode ?? "generic_decline" };
+        emit("invoice.payment_failed", invoice);
+      }
+      sub.pending_update = {
+        expires_at: fake.nowSec + 23 * 3600,
+        billing_cycle_anchor: null,
+        subscription_items: [{ id: params.items[0].id, price: clone(priceById(params.items[0].price)) }],
+      };
+      state.pendingUpdates.set(sub.id, clone(params));
+    }
+    emit("customer.subscription.updated", sub);
+    return subscriptionView(sub, params.expand ?? []);
   }
 
   function cancelNow(sub) {
@@ -397,9 +492,15 @@ function createFakeStripe(options = {}) {
       record("retrieveSubscription", { id });
       return subscriptionView(must(state.subscriptions, id, "subscription"), expand);
     },
-    async updateSubscription(id, params) {
-      record("updateSubscription", { id, params });
+    async updateSubscription(id, params, key) {
+      record("updateSubscription", { id, params, key });
       const sub = must(state.subscriptions, id, "subscription");
+      if (params.payment_behavior === "pending_if_incomplete") {
+        if (params.default_payment_method) {
+          throw stripeError(undefined, "When `payment_behavior` is set to `pending_if_incomplete`, you can only pass supported params.");
+        }
+        return clone(idempotent(key, () => pendingChange(sub, params)));
+      }
       if (params.cancel_at_period_end !== undefined) {
         sub.cancel_at_period_end = params.cancel_at_period_end;
         sub.cancel_at = params.cancel_at_period_end ? sub.items.data[0].current_period_end : null;
@@ -482,6 +583,17 @@ function createFakeStripe(options = {}) {
       if (invoice.status !== "open") throw stripeError("invoice_not_open", "Only open invoices can be voided.");
       invoice.status = "void";
       invoice.status_transitions.voided_at = fake.nowSec;
+      for (const payment of invoice.payments) {
+        const pi = state.paymentIntents.get(payment.payment.payment_intent);
+        if (pi && pi.status !== "succeeded") pi.status = "canceled";
+      }
+      // Voiding a pending update's invoice drops the update, as Stripe does at once.
+      const sub = invoice.parent && state.subscriptions.get(invoice.parent.subscription_details.subscription);
+      if (sub?.pending_update && sub.latest_invoice === invoice.id) {
+        sub.pending_update = null;
+        state.pendingUpdates.delete(sub.id);
+        emit("customer.subscription.pending_update_expired", sub);
+      }
       emit("invoice.voided", invoice);
       return invoiceView(invoice);
     },
@@ -525,6 +637,26 @@ function createFakeStripe(options = {}) {
     },
     async createInvoicePreview(params) {
       record("createInvoicePreview", { params });
+      if (params.subscription) {
+        const sub = must(state.subscriptions, params.subscription, "subscription");
+        if (params.subscription_details?.billing_cycle_anchor && params.subscription_details?.proration_date) {
+          throw stripeError(undefined, "You cannot specify `proration_date` when `billing_cycle_anchor=now`");
+        }
+        const lines = changeLines(sub, params.subscription_details).map((line) => ({ ...line, id: line.id.replace("il_", "il_tmp_") }));
+        const subtotal = lines.reduce((sum, line) => sum + line.amount, 0);
+        const tax = taxOf(sub.customer, sub.automatic_tax?.enabled === true);
+        return {
+          object: "invoice",
+          billing_reason: "upcoming",
+          status: "draft",
+          total: subtotal + tax,
+          subtotal,
+          currency: "usd",
+          total_taxes: tax ? [{ amount: tax }] : [],
+          lines: { object: "list", data: lines, has_more: false },
+          automatic_tax: { enabled: sub.automatic_tax?.enabled === true, status: null },
+        };
+      }
       const priceId = params.subscription_details?.items?.[0]?.price ?? params.invoice_items?.[0]?.price;
       const price = priceById(priceId);
       const address = params.customer_details?.address ?? {};
@@ -807,9 +939,13 @@ function createFakeStripe(options = {}) {
         return;
       }
       const token = [...state.tokens.values()].find((row) => row.payment_intent === paymentIntentId);
-      const pm = token ? paymentMethodFromToken(token, pi.customer) : "pm_fake_card";
+      const pm = token ? paymentMethodFromToken(token, pi.customer) : pi.payment_method ?? "pm_fake_card";
       payInvoiceNow(invoice, { paymentMethod: pm, cardCountry: token?.payment_method_preview.card.country ?? "US" });
       const sub = invoice.parent && state.subscriptions.get(invoice.parent.subscription_details.subscription);
+      if (sub && sub.latest_invoice === invoice.id && state.pendingUpdates.has(sub.id)) {
+        applyChange(sub, state.pendingUpdates.get(sub.id));
+        emit("customer.subscription.updated", sub);
+      }
       if (sub && (sub.status === "incomplete" || sub.status === "past_due")) {
         sub.status = "active";
         if (!sub.default_payment_method) sub.default_payment_method = pm;
@@ -836,6 +972,27 @@ function createFakeStripe(options = {}) {
         total: price.unit_amount,
         parent: { type: "subscription_details", subscription_details: { subscription: sub.id } },
       });
+    },
+
+    /**
+     * Makes a new saved card the subscription's default: one that `failsCharges` declines off
+     * session, one that `requiresAction` waits for the bank's check.
+     */
+    setDefaultCard(subscriptionId, { country = "US", brand = "visa", last4 = "4242", funding = "credit", failsCharges = false, requiresAction = false, declineCode, expMonth = 12, expYear = 2040 } = {}) {
+      const sub = must(state.subscriptions, subscriptionId, "subscription");
+      const id = nextId("pm");
+      state.paymentMethods.set(id, {
+        id,
+        object: "payment_method",
+        type: "card",
+        customer: sub.customer,
+        card: { country, brand, last4, funding, exp_month: expMonth, exp_year: expYear, wallet: null },
+        failsCharges,
+        requiresAction,
+        declineCode,
+      });
+      sub.default_payment_method = id;
+      return id;
     },
 
     setSubscription(subscriptionId, patch) {

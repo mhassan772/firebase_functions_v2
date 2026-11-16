@@ -399,6 +399,70 @@ describe("derivation", () => {
     assert.equal(derivation.slot.web.lastPaidInvoiceId, renewal.invoiceId);
     assert.equal(derivation.slot.web.paidThrough.getTime(), (await paidPeriodEnd(fake, renewal.invoiceId)).getTime());
   });
+
+  /** A monthly subscription ten days in, switched to yearly with the stage I update. */
+  async function switched(fake, customer, card = {}) {
+    const paid = fake.paySubscription({ customer, metadata: { tier: "standard", purchaseId: "p1" } });
+    fake.setDefaultCard(paid.subscriptionId, card);
+    fake.advance(10 * DAY);
+    const sub = await fake.retrieveSubscription(paid.subscriptionId);
+    const updated = await fake.updateSubscription(paid.subscriptionId, {
+      items: [{ id: sub.items.data[0].id, price: "price_web_yearly_standard" }],
+      proration_behavior: "always_invoice",
+      billing_cycle_anchor: { type: "now" },
+      cancel_at_period_end: false,
+      payment_behavior: "pending_if_incomplete",
+      metadata: { plan: "web_yearly", tier: "standard", purchaseId: "p2" },
+      expand: ["latest_invoice.payments"],
+    }, "switch_p2");
+    return { paid, updated, invoice: updated.latest_invoice };
+  }
+
+  test("a plan switch: paid until the yearly line's end, though the credit line comes first; the slot is yearly", async () => {
+    const { fake, customer } = setup();
+    const { invoice } = await switched(fake, customer);
+    assert.equal(invoice.status, "paid");
+    assert.ok(invoice.lines.data[0].amount < 0, "the credit line first");
+    const yearlyEnd = new Date(invoice.lines.data[1].period.end * 1000);
+    assert.ok(yearlyEnd.getTime() > new Date(invoice.lines.data[0].period.end * 1000).getTime());
+    const { derivation } = await derive(fake, customer);
+    assert.equal(derivation.slot.productId, "web_yearly");
+    assert.equal(derivation.slot.web.purchaseId, "p2");
+    assert.equal(derivation.slot.web.lastPaidInvoiceId, invoice.id);
+    assert.equal(derivation.slot.web.paidThrough.getTime(), yearlyEnd.getTime());
+    assert.equal(derivation.slot.status, "active");
+  });
+
+  test("an open subscription_update invoice waiting for the bank is not a renewal needing action; the slot stays monthly", async () => {
+    const { fake, customer } = setup();
+    const { paid, updated } = await switched(fake, customer, { requiresAction: true });
+    assert.ok(updated.pending_update, "the change waits");
+    const { derivation } = await derive(fake, customer);
+    assert.equal(derivation.slot.web.needsAction, false);
+    assert.equal(derivation.slot.productId, "web_monthly");
+    assert.equal(derivation.slot.web.lastPaidInvoiceId, paid.invoiceId);
+    assert.equal(derivation.slot.web.purchaseId, "p1", "the switch's metadata waits for the payment too");
+  });
+
+  test("the slot's tier is the subscription's metadata tier, which every price change writes with the price", async () => {
+    const { fake, customer } = setup();
+    fake.paySubscription({ customer, lookupKey: "web_monthly_reduced", metadata: { tier: "reduced" } });
+    assert.equal((await derive(fake, customer)).derivation.slot.web.tier, "reduced");
+    const { fake: other, customer: otherCustomer } = setup();
+    await switched(other, otherCustomer);
+    assert.equal((await derive(other, otherCustomer)).derivation.slot.web.tier, "standard");
+  });
+
+  test("a full refund of the switch payment revokes access and cancels the subscription", async () => {
+    const { fake, customer } = setup();
+    const { paid, invoice } = await switched(fake, customer);
+    const pi = fake.state.paymentIntents.get(invoice.payments.data[0].payment.payment_intent);
+    fake.refund(pi.latest_charge);
+    const { derivation } = await derive(fake, customer);
+    assert.equal(derivation.slot.status, "revoked");
+    assert.equal(derivation.slot.active, false);
+    assert.deepEqual(derivation.cancel, [paid.subscriptionId]);
+  });
 });
 
 describe("ledger", () => {
