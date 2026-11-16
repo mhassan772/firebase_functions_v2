@@ -260,7 +260,7 @@ describe("syncWebEntitlement", () => {
     assert.ok(slot.expiresAt.toMillis() <= Date.now());
   });
 
-  test("lifetime bought over an active subscription cancels the subscription and holds for 50 years", async () => {
+  test("lifetime bought over an active subscription cancels the subscription and holds for 99 years", async () => {
     const { fake, deps, customer } = await setup();
     const sub = fake.paySubscription({ customer });
     const life = fake.payLifetime({ customer });
@@ -269,7 +269,7 @@ describe("syncWebEntitlement", () => {
     assert.deepEqual(result.cancelled, [sub.subscriptionId]);
     const master = await read(masterRef(UID));
     assert.equal(master.productId, "web_lifetime");
-    assert.equal(master.expiresAt.toDate().getUTCFullYear(), new Date().getUTCFullYear() + 50);
+    assert.equal(master.expiresAt.toDate().getUTCFullYear(), new Date().getUTCFullYear() + 99);
     assert.equal((await read(db().collection(WEB_PURCHASES_COLLECTION).doc("life"))).status, "paid");
   });
 });

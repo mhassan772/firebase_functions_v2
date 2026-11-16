@@ -1,6 +1,21 @@
 /// Page strings in Arabic and English, keyed by the same names.
 
+// The address the account emails take replies at, so the terms name the mailbox someone reads.
+import { AUTH_EMAIL_REPLY_TO_ADDRESS as CONTACT_ADDRESS } from "../../src/config/constants";
+
 export type Lang = "ar" | "en";
+
+/// One clause of the subscription terms: its numbered title and its paragraph.
+export interface TermsClause {
+  title: string;
+  body: string;
+}
+
+/// When the terms below last changed, shown at the top of `/terms`. Change it with the text.
+export const TERMS_UPDATED = "2026-11-16";
+
+/// The contact address the terms name; `/terms` makes it a mail link wherever it appears.
+export const TERMS_CONTACT = CONTACT_ADDRESS;
 
 /// How a store is named in each place of a sentence; Arabic uses the name alone everywhere.
 export interface StoreWords {
@@ -250,9 +265,11 @@ const ar = {
   payNoteYearly: (today: string) =>
     `تدفع اليوم ${today}، ثم يتجدد الاشتراك كل سنة بالمبلغ نفسه حتى تلغيه. لا تُسترد المبالغ المدفوعة.`,
   payNoteLifetime: (today: string) =>
-    `تدفع اليوم ${today} مرة واحدة، ولا يتجدد. «مدى الحياة» تعني ٥٠ سنة، أو طوال مدة تقديم الخدمة إن كانت أقصر. لا تُسترد المبالغ المدفوعة.`,
+    `تدفع اليوم ${today} مرة واحدة، ولا يتجدد. لا تُسترد المبالغ المدفوعة.`,
   noticeNoRefunds: "لا تُسترد المبالغ المدفوعة.",
-  noticeLifetime: "«مدى الحياة» تعني ٥٠ سنة، أو طوال مدة تقديم الخدمة إن كانت أقصر.",
+  // The sentence under every pay and confirm button; `terms` is the link's own text.
+  termsAccept: (terms: string) => `بالدفع توافق على ${terms}.`,
+  termsLinkText: "شروط الاشتراك",
   pay: (amount: string) => `ادفع ${amount}`,
   paying: (amount: string) => `جارٍ دفع ${amount}…`,
   verifyingPayment: "يطلب مصرفك تأكيد الدفع. أكمله في النافذة التي فُتحت.",
@@ -361,6 +378,48 @@ const ar = {
   upgradedAnnouncement: "أصبح لديك بريميوم مدى الحياة.",
   lifetimeUnavailableAnnouncement: "لم تعد الترقية إلى مدى الحياة متاحة لهذا الاشتراك.",
   lifetimeVerifyNotCompleted: "لم يكتمل تأكيد الدفع، ولم يُخصم أي مبلغ، وما زال اشتراكك كما هو. حاول مرة أخرى.",
+
+  // /terms, a legal text the owner reviews before it is deployed: change it only with them.
+  termsFooterLink: "شروط الاشتراك",
+  termsTitle: "شروط الاشتراك في منطوق بريميوم",
+  termsUpdated: (date: string) => `آخر تحديث: ${date}`,
+  termsClauses: [
+    { title: "١. من نحن", body: `منطوق خدمة تقدّمها مؤسسة بصيرة الإسلامية في كندا. للتواصل: ${CONTACT_ADDRESS}` },
+    {
+      title: "٢. ما الذي تشتريه",
+      body: "بريميوم يفتح مزايا إضافية في تطبيق منطوق على حسابك. يُفعَّل على الحساب الذي اشتريت به، ولا يُنقل إلى حساب آخر.",
+    },
+    {
+      title: "٣. الخطط والأسعار",
+      body: "الخطة الشهرية والخطة السنوية تتجددان تلقائيًا حتى تلغيهما. خطة «مدى الحياة» دفعة واحدة دون تجديد. الأسعار بالدولار الأمريكي، وقد تختلف بحسب بلدك، ويظهر لك السعر كاملًا قبل الدفع. تُضاف الضريبة حيث يوجبها القانون، وتظهر لك قبل الدفع.",
+    },
+    {
+      title: "٤. التجديد والإلغاء",
+      body: "عند كل تجديد يُخصم سعر خطتك من بطاقتك المحفوظة. يمكنك إيقاف التجديد في أي وقت من صفحة اشتراكك، ويبقى بريميوم مفعّلًا حتى نهاية المدة التي دفعت ثمنها.",
+    },
+    {
+      title: "٥. إذا لم تنجح دفعة التجديد",
+      body: "نعيد المحاولة عدة مرات خلال أسبوعين، ويبقى بريميوم مفعّلًا سبعة أيام بعد موعد التجديد. إن لم تنجح أي محاولة ينتهي الاشتراك.",
+    },
+    {
+      title: "٦. تغيير الخطة",
+      body: "يمكنك التحويل من الشهري إلى السنوي، أو الترقية إلى «مدى الحياة»، من صفحة اشتراكك. تدفع الفرق اليوم بعد خصم قيمة المدة غير المستخدمة من خطتك الحالية.",
+    },
+    {
+      title: "٧. خطة «مدى الحياة»",
+      body: "يستمر بريميوم «مدى الحياة» على حسابك ما دام الحساب قائمًا وخدمة منطوق مقدَّمة، ولمدة أقصاها ٩٩ سنة من تاريخ الشراء.",
+    },
+    { title: "٨. لا استرداد", body: "جميع المدفوعات نهائية ولا تُسترد، إلا حيث يوجب القانون غير ذلك." },
+    {
+      title: "٩. الاشتراك عبر App Store أو Google Play",
+      body: "الاشتراك الذي اشتريته من أحد المتجرين يُدار من ذلك المتجر. شراء خطة من هذا الموقع لا يلغيه، وعليك إيقاف تجديده هناك بنفسك.",
+    },
+    { title: "١٠. حذف الحساب", body: "حذف حسابك ينهي بريميوم ويوقف أي اشتراك اشتريته من هذا الموقع، دون استرداد." },
+    {
+      title: "١١. تغيير هذه الشروط",
+      body: "قد نحدّث هذه الشروط، ويظهر تاريخ آخر تحديث أعلى الصفحة. أي تغيير في سعر خطتك يسري من التجديد التالي، ونبلّغك به قبل ذلك.",
+    },
+  ] as readonly TermsClause[],
   provinces: {
     AB: "ألبرتا",
     BC: "كولومبيا البريطانية",
@@ -622,9 +681,10 @@ const en: Strings = {
   payNoteMonthly: (today: string) => `You pay ${today} today. It renews every month for the same amount until you cancel. Payments are not refundable.`,
   payNoteYearly: (today: string) => `You pay ${today} today. It renews every year for the same amount until you cancel. Payments are not refundable.`,
   payNoteLifetime: (today: string) =>
-    `You pay ${today} once, today, and it never renews. “Lifetime” means 50 years, or for as long as the service runs if that is shorter. Payments are not refundable.`,
+    `You pay ${today} once, today, and it never renews. Payments are not refundable.`,
   noticeNoRefunds: "Payments are not refundable.",
-  noticeLifetime: "“Lifetime” means 50 years, or for as long as the service runs if that is shorter.",
+  termsAccept: (terms: string) => `By paying, you accept the ${terms}.`,
+  termsLinkText: "subscription terms",
   pay: (amount: string) => `Pay ${amount}`,
   paying: (amount: string) => `Paying ${amount}…`,
   verifyingPayment: "Your bank is asking you to confirm the payment. Complete it in the window that opened.",
@@ -734,6 +794,47 @@ const en: Strings = {
   upgradedAnnouncement: "You now have lifetime Premium.",
   lifetimeUnavailableAnnouncement: "Upgrading to lifetime is no longer available for this subscription.",
   lifetimeVerifyNotCompleted: "The payment wasn't confirmed. Nothing was charged, and your subscription is unchanged. Try again.",
+
+  termsFooterLink: "Subscription terms",
+  termsTitle: "Mantooq Premium subscription terms",
+  termsUpdated: (date: string) => `Last updated: ${date}`,
+  termsClauses: [
+    { title: "1. Who we are", body: `Mantooq is a service of Basira Islamic Foundation, Canada. Contact: ${CONTACT_ADDRESS}` },
+    {
+      title: "2. What you buy",
+      body: "Premium unlocks extra features in the Mantooq app for your account. It applies to the account you bought it with and can't be moved to another account.",
+    },
+    {
+      title: "3. Plans and prices",
+      body: "The monthly and yearly plans renew automatically until you cancel. The lifetime plan is one payment with no renewal. Prices are in US dollars and may differ by country; you see the full price before you pay. Tax is added where the law requires it, and you see it before you pay.",
+    },
+    {
+      title: "4. Renewal and cancelling",
+      body: "At each renewal your plan's price is charged to your saved card. You can turn off renewal at any time on your subscription page, and Premium stays on until the end of the period you paid for.",
+    },
+    {
+      title: "5. If a renewal payment fails",
+      body: "We try again several times over two weeks, and Premium stays on for seven days after the renewal date. If no attempt succeeds, the subscription ends.",
+    },
+    {
+      title: "6. Changing your plan",
+      body: "You can switch from monthly to yearly, or upgrade to lifetime, on your subscription page. You pay the difference today, after a credit for the unused time of your current plan.",
+    },
+    {
+      title: "7. The lifetime plan",
+      body: "Lifetime Premium stays on your account for as long as the account exists and Mantooq is offered, up to 99 years from the date of purchase.",
+    },
+    { title: "8. No refunds", body: "All payments are final and are not refunded, except where the law requires otherwise." },
+    {
+      title: "9. Subscriptions through the App Store or Google Play",
+      body: "A subscription bought in one of the stores is managed in that store. Buying a plan on this site doesn't cancel it; you need to turn off its renewal there yourself.",
+    },
+    { title: "10. Deleting your account", body: "Deleting your account ends Premium and stops any subscription bought on this site, with no refund." },
+    {
+      title: "11. Changes to these terms",
+      body: "We may update these terms; the date of the last update is at the top of the page. A change to your plan's price applies from the next renewal, and we tell you before then.",
+    },
+  ],
   provinces: {
     AB: "Alberta",
     BC: "British Columbia",

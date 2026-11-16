@@ -193,7 +193,7 @@ try {
         `payment_method_types ${JSON.stringify(intent.payment_method_types)}, setup_future_usage ${intent.setup_future_usage}`);
       if (plan === 'web_lifetime') {
         const years = slot.expiresAt.toDate().getUTCFullYear() - new Date().getUTCFullYear();
-        check('lifetime: expires 50 years from payment, invoice is one-off', years === 50, `expires ${iso(slot.expiresAt)}`);
+        check('lifetime: expires 99 years from payment, invoice is one-off', years === 99, `expires ${iso(slot.expiresAt)}`);
       }
     }
     const state = await handleGetWebSubscription({}, caller(A), deps);

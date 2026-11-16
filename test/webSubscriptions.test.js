@@ -342,7 +342,7 @@ describe("derivation", () => {
     assert.deepEqual(lost.derivation.cancel, [paid.subscriptionId]);
   });
 
-  test("lifetime: active for 50 years from payment, and every open subscription is cancelled", async () => {
+  test("lifetime: active for 99 years from payment, and every open subscription is cancelled", async () => {
     const { fake, customer } = setup();
     const sub = fake.paySubscription({ customer });
     fake.advance(DAY);
@@ -353,7 +353,7 @@ describe("derivation", () => {
     assert.equal(derivation.slot.status, "active");
     assert.equal(derivation.slot.autoRenewing, false);
     assert.equal(derivation.slot.purchaseReference, life.invoiceId);
-    assert.equal(derivation.slot.expiresAt.toISOString(), new Date((START + DAY) * 1000).toISOString().replace("2026", "2076"));
+    assert.equal(derivation.slot.expiresAt.toISOString(), new Date((START + DAY) * 1000).toISOString().replace("2026", "2125"));
     assert.deepEqual(derivation.cancel, [sub.subscriptionId]);
   });
 

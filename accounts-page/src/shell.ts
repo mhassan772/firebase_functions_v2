@@ -11,6 +11,8 @@ export interface ShellOptions {
   busy?: boolean;
   /// Moves focus to the first heading inside the card; the route decides which views warrant it.
   focusHeading?: boolean;
+  /// A link under the footer's line, such as the account page's link to the terms.
+  footerLink?: Node;
   onSwitchLanguage: () => void;
 }
 
@@ -37,7 +39,7 @@ export function renderShell(options: ShellOptions): void {
   );
 
   const main = h("main", { class: "card", "aria-busy": options.busy ? "true" : undefined }, ...options.body);
-  const footer = h("footer", { class: "foot" }, s.footer);
+  const footer = h("footer", { class: "foot" }, s.footer, options.footerLink ?? null);
 
   root().replaceChildren(header, main, footer);
 

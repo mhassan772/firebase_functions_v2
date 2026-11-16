@@ -1,6 +1,6 @@
 /// Which page a path shows, kept apart from the DOM so it can be tested.
 
-export type Route = "action" | "delete" | "account" | "notFound";
+export type Route = "action" | "delete" | "account" | "terms" | "notFound";
 
 const ROUTES: Readonly<Record<string, Route>> = {
   "/action": "action",
@@ -8,6 +8,7 @@ const ROUTES: Readonly<Record<string, Route>> = {
   // Both addresses of the account page, so older links and the billing emails keep working.
   "/subscribe": "account",
   "/manage": "account",
+  "/terms": "terms",
 };
 
 /// Matches the paths Hosting rewrites to this page; a trailing slash is tolerated, case is not.

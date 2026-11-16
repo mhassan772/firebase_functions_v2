@@ -1,3 +1,7 @@
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { describe, expect, it } from "vitest";
 
 import {
@@ -38,6 +42,8 @@ import {
   statusText,
   switchRequest,
   switchSummary,
+  termsHref,
+  termsSentence,
   type AccountView,
   type LifetimeQuote,
   type PlanOffer,
@@ -49,7 +55,7 @@ import {
   type SubscriptionResponse,
   type SwitchQuote,
 } from "../src/billing/logic";
-import { STRINGS } from "../src/i18n";
+import { STRINGS, TERMS_CONTACT, TERMS_UPDATED } from "../src/i18n";
 import { routeFor } from "../src/router";
 
 const MONTHLY: PlanOffer = { plan: "web_monthly", amount: 499, currency: "usd", interval: "month" };
@@ -72,6 +78,12 @@ describe("routes", () => {
     expect(routeFor("/subscribe")).toBe("account");
     expect(routeFor("/manage/")).toBe("account");
     expect(routeFor("/Subscribe")).toBe("notFound");
+  });
+
+  it("shows the terms at /terms", () => {
+    expect(routeFor("/terms")).toBe("terms");
+    expect(routeFor("/terms/")).toBe("terms");
+    expect(routeFor("/Terms")).toBe("notFound");
   });
 });
 
@@ -228,7 +240,79 @@ describe("the note above the pay button", () => {
     expect(payNote(MONTHLY, 499, STRINGS.en, "en")).toBe(
       "You pay $4.99 (US dollars) today. It renews every month for the same amount until you cancel. Payments are not refundable.",
     );
-    expect(payNote(LIFETIME, 14999, STRINGS.ar, "ar")).toContain("ولا يتجدد");
+    expect(payNote(LIFETIME, 14999, STRINGS.ar, "ar")).toBe(`تدفع اليوم ${iso("١٤٩٫٩٩ دولار أمريكي")} مرة واحدة، ولا يتجدد. لا تُسترد المبالغ المدفوعة.`);
+    expect(payNote(LIFETIME, 14999, STRINGS.en, "en")).toBe("You pay $149.99 (US dollars) once, today, and it never renews. Payments are not refundable.");
+  });
+
+  it("is followed by one sentence accepting the terms, whose link is the words that name them", () => {
+    expect(termsSentence(STRINGS.ar)).toEqual({ before: "بالدفع توافق على ", link: "شروط الاشتراك", after: "." });
+    expect(termsSentence(STRINGS.en)).toEqual({ before: "By paying, you accept the ", link: "subscription terms", after: "." });
+    expect(termsHref("ar")).toBe("/terms?lang=ar");
+    expect(termsHref("en")).toBe("/terms?lang=en");
+  });
+});
+
+describe("the terms", () => {
+  it("has the same eleven numbered clauses in both languages, each with a title and a body", () => {
+    for (const lang of ["ar", "en"] as const) {
+      const clauses = STRINGS[lang].termsClauses;
+      expect(clauses).toHaveLength(11);
+      clauses.forEach((clause, index) => {
+        const number = lang === "ar" ? (index + 1).toLocaleString("ar-u-nu-arab") : String(index + 1);
+        expect(clause.title.startsWith(`${number}. `)).toBe(true);
+        expect(clause.body.length).toBeGreaterThan(0);
+      });
+    }
+  });
+
+  it("names the contact address in the first clause, and lifetime as up to 99 years in the seventh", () => {
+    expect(TERMS_CONTACT).toBe("mantooq@basira.ca");
+    for (const lang of ["ar", "en"] as const) {
+      expect(STRINGS[lang].termsClauses[0].body.endsWith(TERMS_CONTACT)).toBe(true);
+      expect(STRINGS[lang].termsClauses.filter((clause) => clause.body.includes(TERMS_CONTACT))).toHaveLength(1);
+    }
+    expect(STRINGS.ar.termsClauses[6].body).toContain("لمدة أقصاها ٩٩ سنة من تاريخ الشراء");
+    expect(STRINGS.en.termsClauses[6].body).toContain("up to 99 years from the date of purchase");
+  });
+
+  it("dates the last update through the page's date format", () => {
+    expect(STRINGS.en.termsUpdated(formatDate(TERMS_UPDATED, "en")!)).toBe("Last updated: November 16, 2026");
+    expect(STRINGS.ar.termsUpdated(formatDate(TERMS_UPDATED, "ar")!)).toBe(`آخر تحديث: ${iso("١٦ نوفمبر ٢٠٢٦")}`);
+  });
+
+  it("loads no Firebase or Stripe code, so its page needs no other origin", () => {
+    const root = resolve(dirname(fileURLToPath(import.meta.url)), "../src");
+    const seen = new Set<string>();
+    const visit = (file: string) => {
+      if (seen.has(file)) return;
+      seen.add(file);
+      const source = readFileSync(file, "utf8");
+      for (const [, spec] of source.matchAll(/^import[^"]*"([^"]+)"/gm)) {
+        expect(spec, `${file} imports ${spec}`).not.toMatch(/firebase|stripe/i);
+        if (spec.startsWith(".")) visit(resolve(dirname(file), `${spec}.ts`));
+      }
+    };
+    visit(resolve(root, "routes/terms.ts"));
+    expect(seen.has(resolve(root, "billing/logic.ts"))).toBe(true);
+  });
+});
+
+describe("what lifetime means", () => {
+  /// Every string the page can show: plain values, and each sentence built with placeholder words.
+  function allText(value: unknown): string[] {
+    if (typeof value === "string") return [value];
+    if (typeof value === "function") return allText(value("X", "X", "X"));
+    if (Array.isArray(value)) return value.flatMap(allText);
+    if (value && typeof value === "object") return Object.values(value).flatMap(allText);
+    return [];
+  }
+
+  it("is no longer a number of years anywhere on the page outside the terms", () => {
+    for (const lang of ["ar", "en"] as const) {
+      const { termsClauses, ...rest } = STRINGS[lang];
+      expect(termsClauses.length).toBe(11);
+      for (const text of allText(rest)) expect(text).not.toMatch(/\b50\b|٥٠|fifty|خمسين|\b99\b|٩٩|as long as the service|مدة تقديم الخدمة/i);
+    }
   });
 });
 
@@ -436,7 +520,7 @@ describe("the lifetime upgrade panel", () => {
     creditedPlan: "web_yearly", card: { brand: "visa", last4: "4242" },
   };
 
-  it("lists the lifetime price, the credit of the named plan, the total and the card; then what lifetime means, the stop, no refunds", () => {
+  it("lists the lifetime price, the credit of the named plan, the total and the card; then one payment, the stop, no refunds", () => {
     const summary = lifetimeSummary(quote, STRINGS.en, "en");
     expect(summary.rows).toEqual([
       { label: "Lifetime price:", value: "$149.99" },
@@ -446,7 +530,6 @@ describe("the lifetime upgrade panel", () => {
     ]);
     expect(summary.notes).toEqual([
       STRINGS.en.lifetimeHint,
-      STRINGS.en.noticeLifetime,
       "Your yearly subscription stops now. It won't renew, and nothing more is charged for it.",
       STRINGS.en.noticeNoRefunds,
     ]);

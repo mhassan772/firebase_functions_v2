@@ -2,7 +2,7 @@
 
 Premium bought on `accounts.mantooq.com` with a card through Stripe. The contract shared with the pages is `docs/ai/plans/26-11-10/web-accounts-stage-d-spec.md` in the Mantooq_Mobile repo, and the verified Stripe behaviour is `docs/ai/research/26-11-14/stripe-web-purchase-api-facts.md` there (stripe-node 23.1.0, API `2026-10-28.endive`). This page covers the backend.
 
-Plans are `web_monthly`, `web_yearly` and `web_lifetime`, which are also the Stripe product ids and the slot's `productId`. Lifetime means 50 years from payment.
+Plans are `web_monthly`, `web_yearly` and `web_lifetime`, which are also the Stripe product ids and the slot's `productId`. Lifetime means 99 years from payment (`WEB_LIFETIME_YEARS`), the limit the terms state; the page and the emails define lifetime only by linking to the terms. A lifetime slot written with the earlier 50 years is rewritten with the new date by its next sync.
 
 ## Code
 
@@ -70,7 +70,7 @@ Access comes only from the line periods of paid invoices (`lines.data[].period.e
 
 Derivation, first match wins:
 
-1. **Lifetime.** A ledger entry for `web_lifetime` whose invoice is paid and whose charge is neither refunded in full nor disputed (`needs_response`, `under_review`, `lost`, or an appeal): `active` until payment + 50 years, not renewing. Every subscription of the customer not yet ended is cancelled at Stripe, with no refund.
+1. **Lifetime.** A ledger entry for `web_lifetime` whose invoice is paid and whose charge is neither refunded in full nor disputed (`needs_response`, `under_review`, `lost`, or an appeal): `active` until payment + 99 years, not renewing. Every subscription of the customer not yet ended is cancelled at Stripe, with no refund.
    A lifetime entry's invoice is read whatever the entry's status, so a paid invoice wins over an entry marked `abandoned` or `failed`, and the sync corrects the entry to `paid`.
 2. **Subscription.** The customer's newest started subscription not yet ended (active, trialing, past due, unpaid, paused), else the newest that ended after starting, with `paidThrough` the period end of its latest paid invoice. Every other started, open subscription is cancelled at Stripe and logged at error level as `web_duplicate_subscription_cancelled`: the customer paid twice and a person must refund. An incomplete subscription is never cancelled this way; it belongs to a purchase in flight.
 
@@ -143,7 +143,7 @@ The first six come from `syncWebEntitlement`: after its transaction commits (whe
 
 **Sender `sendWebBillingEmail`** (`onCreate` on `web_email_outbox/{id}`, europe-west2, SES secrets, retries on): leaves a document that is not `queued` alone, and marks it `skipped` with a reason when `emailsEnabled` is false (`emails_disabled`), the account has a tombstone (`account_deleted`), the Auth user is gone (`no_user`) or has no address (`no_email`), or it was queued more than 24 hours ago (`stale`). Otherwise it renders with `billingEmailTemplates.ts` and sends through SES with the sender name of the language, then marks `sent`. A transient SES failure counts an attempt and throws so the platform retries; the fifth failed attempt, a permanent SES answer (`ses_<name>`) or a missing field (`incomplete_<field>`) marks `failed`. A send that succeeded but could not be marked may be sent again on the retry: a duplicate receipt is preferred over a lost one.
 
-**Templates** (`src/services/email/billingEmailTemplates.ts`): one copy record per language on the shared frame, with the plan names and terms of the accounts pages, and every email carries the manage button (`https://accounts.mantooq.com/manage?lang=<lang>`). `formatMoney` and `formatDate` format as the page does: US dollars as `$4.99` in English and as the number then «دولار» in Arabic (`٤٫٩٩ دولار`, no symbol), another currency in the platform's format, Arabic digits and month names for Arabic, dates in UTC. A credit is written under a label that says it is taken off, so it carries no minus sign. A sandbox email's subject starts with `[TEST] `.
+**Templates** (`src/services/email/billingEmailTemplates.ts`): one copy record per language on the shared frame, with the plan names and terms of the accounts pages, and every email carries the manage button (`https://accounts.mantooq.com/manage?lang=<lang>`) with a line under it linking to the terms (`https://accounts.mantooq.com/terms?lang=<lang>`, «شروط الاشتراك» / “Subscription terms”). The lifetime `purchase_confirmed` says one payment with no renewals and leaves what lifetime means to the terms. `formatMoney` and `formatDate` format as the page does: US dollars as `$4.99` in English and as the number then «دولار» in Arabic (`٤٫٩٩ دولار`, no symbol), another currency in the platform's format, Arabic digits and month names for Arabic, dates in UTC. A credit is written under a label that says it is taken off, so it carries no minus sign. A sandbox email's subject starts with `[TEST] `.
 
 **Logs**: `web_email_queue` (kind, id, outcome), `web_email_send_outcome` (outcome, reason), `web_email_send_retry`, `web_email_reminder_failure`, `web_final_warning_item_failure`. Never an address.
 
@@ -175,6 +175,12 @@ The first six come from `syncWebEntitlement`: after its transaction commits (whe
 | Nothing | No Premium | The purchase's pay button | The purchase |
 
 Further sources of premium follow the status as plain lines. Card change, the switch to yearly, the upgrade to lifetime and the lifetime purchases open in place of the section that opened them and close with Back. After a payment or a change the page loads again into its new state and announces it. A purchase that succeeded, is still confirming or got no final answer is remembered with its plan for the tab (in `sessionStorage`, keyed by the uid, for fifteen minutes): until the account shows premium from this site (lifetime, for a lifetime purchase made over a failed renewal), `accountView` answers a "confirming" state with a "check again" control (`finishWebPurchase`) and no purchase, and forgets it when that call says the purchase failed or does not exist. `startWebPurchase` holds the same line for another tab (`purchase_in_progress`, below). When the two calls disagree about the web subscription (`getWebPlans` read the slots before `getWebSubscription`'s sync), the page asks for the plans once more. A refused `getWebPlans` shows only inside the part that sells, with its own retry. Upgrading and the purchases are hidden while sales are off.
+
+The note above every pay and confirm button (the purchase, the lifetime purchase panels, the switch and the upgrade) ends with «بالدفع توافق على شروط الاشتراك.» / “By paying, you accept the subscription terms.”, whose last words are a link to `/terms` in a new tab, inside the element the button's `aria-describedby` names. The page's footer links to the terms too. Lifetime is described on the page only as one payment with no renewal.
+
+## The terms page
+
+`/terms` (`accounts-page/src/routes/terms.ts`) shows the subscription terms: one heading, the last update date (`TERMS_UPDATED` beside the text, through the page's `formatDate`), then a heading and a paragraph per clause. The text of both languages is `termsClauses` in `accounts-page/src/i18n.ts`, and the contact address comes from `AUTH_EMAIL_REPLY_TO_ADDRESS`. It is public: no sign-in, and it imports no Firebase or Stripe code, so its Hosting policy allows only the site itself. It is a legal text; the owner reviews any change before it is deployed, and changes `TERMS_UPDATED` with it. Contract: `docs/ai/plans/26-11-10/web-accounts-stage-l-spec.md` in Mantooq_Mobile.
 
 ## Callables
 
@@ -262,7 +268,7 @@ Syncs first when the account has a Stripe customer.
 
 `publishableKey` is returned here as well as by `getWebPlans`, because managing a subscription on the account page must work while sales are off; it is left out when the configured key does not match the gateway's mode.
 
-`amount` is the next renewal's price before tax (after a card change to a dearer tier, the new price), or what lifetime cost. `renewsAt` is set while `active`; `endsAt` while `cancelling` (end of the paid period), `payment_failed` or `needs_action` (end of the grace), `ended`, and `lifetime` (50 years). `card` is the subscription's default card. `needs_action` (a renewal waiting for authentication) wins over `payment_failed`; past due beyond the grace still reads `payment_failed`.
+`amount` is the next renewal's price before tax (after a card change to a dearer tier, the new price), or what lifetime cost. `renewsAt` is set while `active`; `endsAt` while `cancelling` (end of the paid period), `payment_failed` or `needs_action` (end of the grace), `ended`, and `lifetime` (99 years). `card` is the subscription's default card. `needs_action` (a renewal waiting for authentication) wins over `payment_failed`; past due beyond the grace still reads `payment_failed`.
 
 ### `manageWebSubscription({action, …})`
 
@@ -339,6 +345,7 @@ It needs no Stripe key (Application Default Credentials, or the emulator with `F
 - Deploy `stripeWebEvents` by name, register its URL in the Stripe Dashboard for the handled types, and store the signing secret as `STRIPE_WEB_WEBHOOK_SECRET`.
 - Redeploy `reconcileSubscriptions`, `deleteAccount`, `accountDeletedCleanup` and `sweepDeletedAccounts` by name, since each now mounts `STRIPE_WEB_SECRET_KEY`.
 - Deploy `getWebPlans`, `startWebPurchase`, `finishWebPurchase`, `getWebSubscription` and `manageWebSubscription` by name.
+- **Order for stage L:** deploy the accounts page (with its `/terms` rewrite and headers) before the functions, so `/terms` exists before an email links to it. Nothing in a request or an answer changes.
 - **Stage K** (the one account page) changes no request or answer, so page and functions deploy in any order. The functions deploy changes how the billing emails write money and adds the paid-but-not-shown refusal to `startWebPurchase`, an existing reason every page already handles.
 - **Order for stage J:** deploy the accounts page before these functions too. `startWebPurchase` then refuses full-price lifetime to a running web subscriber, and only the new page offers the upgrade on `/manage` and hides lifetime from `/subscribe` for them.
 - **Order for stages H and I:** deploy the accounts page before these functions. `startWebPurchase` now refuses `existing_premium` unless the request carries `acknowledgeExisting`, which the live page does not send, so functions first would refuse every buyer who also holds store or manual premium. The plan switch adds actions only, so an older page keeps working with the new functions.

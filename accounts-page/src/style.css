@@ -333,10 +333,38 @@ a.action-link {
   padding: 12px 0;
 }
 
+/* A link inside a sentence, tall enough to tap without leaving the line. */
+a.tall-link {
+  display: inline-block;
+  padding: 12px 0;
+}
+
 ul.links a {
   display: inline-block;
   min-height: 48px;
   padding: 12px 0;
+}
+
+/* The sentence accepting the terms, its own line under a pay or confirm note; its link is a
+   full-height target inside the sentence. */
+.terms-line {
+  display: block;
+  margin-top: 4px;
+}
+
+a.terms-link {
+  display: inline-block;
+  min-height: 48px;
+  padding: 12px 0;
+}
+
+/* /terms: plain paragraphs under one heading per clause; the address may not fit a phone's line. */
+.terms-updated {
+  text-align: center;
+}
+
+.terms p {
+  overflow-wrap: anywhere;
 }
 
 /* A notice always pairs its colour with an icon and its own text, so it never relies on colour. */

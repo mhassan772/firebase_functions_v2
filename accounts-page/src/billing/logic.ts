@@ -308,8 +308,22 @@ export function onlyTaxAdded(offer: PlanOffer, quote: Quote): boolean {
   return quote.reason === "tax" && quote.amount === offer.amount && quote.currency === offer.currency;
 }
 
+/// The address of the terms in the page's language; the link that names it opens a new tab, so
+/// the card form beside it keeps what was typed.
+export function termsHref(lang: Lang): string {
+  return `/terms?lang=${lang}`;
+}
+
+/// The sentence accepting the terms, split around the link's text so the page can make that
+/// text a link without building the sentence from pieces in each language.
+export function termsSentence(s: Strings): { before: string; link: string; after: string } {
+  const marker = "\u0000";
+  const [before, after] = s.termsAccept(marker).split(marker);
+  return { before, link: s.termsLinkText, after };
+}
+
 /// The one note above the pay button: the total today, how it renews or that it never does, and
-/// no refunds.
+/// no refunds. The page follows it with the sentence accepting the terms.
 export function payNote(offer: PlanOffer, total: number, s: Strings, lang: Lang): string {
   const today = formatMoneyInFull(total, offer.currency, lang);
   switch (offer.interval) {
@@ -899,8 +913,8 @@ export function lifetimeRequest(quote: LifetimeQuote, attemptId: string, lang: L
 }
 
 /// What the upgrade panel says for a quote: the same rows as the switch panel, with the credit
-/// named after the plan it comes from, then what lifetime means, that the subscription stops now
-/// and never renews, and no refunds.
+/// named after the plan it comes from, then one payment with no renewal, that the subscription
+/// stops now, and no refunds. What lifetime means is said only in the terms.
 export function lifetimeSummary(quote: LifetimeQuote, s: Strings, lang: Lang): SwitchSummary {
   const money = (cents: number) => formatMoney(cents, quote.currency, lang);
   const total = money(quote.total);
@@ -911,7 +925,7 @@ export function lifetimeSummary(quote: LifetimeQuote, s: Strings, lang: Lang): S
   if (quote.card) rows.push({ label: s.labelCard, value: cardText(quote.card, s, lang) });
   return {
     rows,
-    notes: [s.lifetimeHint, s.noticeLifetime, s.lifetimeStops(planName(quote.creditedPlan, s)), s.noticeNoRefunds],
+    notes: [s.lifetimeHint, s.lifetimeStops(planName(quote.creditedPlan, s)), s.noticeNoRefunds],
     confirm: s.lifetimeConfirm(total),
   };
 }

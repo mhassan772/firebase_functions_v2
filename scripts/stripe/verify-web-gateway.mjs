@@ -183,8 +183,8 @@ try {
   derived = deriveWebSlot(facts, new Date());
   const paidAt = facts.invoices.get(draft.id)?.paidAt;
   const years = derived.slot ? derived.slot.expiresAt.getUTCFullYear() - paidAt.getUTCFullYear() : 0;
-  check('lifetime: active for 50 years from payment',
-    derived.slot?.productId === 'web_lifetime' && derived.slot.active && years === 50 &&
+  check('lifetime: active for 99 years from payment',
+    derived.slot?.productId === 'web_lifetime' && derived.slot.active && years === 99 &&
       derived.slot.expiresAt.getUTCMonth() === paidAt.getUTCMonth() && derived.slot.expiresAt.getUTCDate() === paidAt.getUTCDate(),
     `paid ${iso(paidAt)}, expires ${iso(derived.slot?.expiresAt)}`);
   check('lifetime: the subscription beside it is to be cancelled', derived.cancel.includes(subC.subscriptionId), `[${derived.cancel.join(',')}]`);

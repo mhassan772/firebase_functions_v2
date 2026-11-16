@@ -8,7 +8,7 @@ import { renderSignIn, type MountedView } from "../auth/signIn";
 import { STORE_SUBSCRIPTION_LINKS } from "../delete/storeSubscriptions";
 import { h, ltr } from "../dom";
 import { STRINGS, type Lang, type Strings } from "../i18n";
-import { storeWords, type StorePlatform } from "./logic";
+import { storeWords, termsHref, termsSentence, type StorePlatform } from "./logic";
 
 // ---------------------------------------------------------------------------
 // Sign-in gate, the same as `/delete`'s: session persistence, guests never count.
@@ -177,6 +177,13 @@ export function notice(tone: "info" | "warn" | "danger", s: Strings, ...content:
 
 export function externalLink(href: string, text: string, s: Strings, className?: string): Node {
   return h("a", { href, target: "_blank", rel: "noopener noreferrer", class: className }, text, h("span", { class: "sr-only" }, ` ${s.opensInNewTab}`));
+}
+
+/// The sentence accepting the terms, its own line under a pay or confirm note. The link opens a
+/// new tab, so a card form being filled in keeps its details, and is a full-height target.
+export function termsLine(s: Strings, lang: Lang): HTMLElement {
+  const sentence = termsSentence(s);
+  return h("span", { class: "terms-line" }, sentence.before, externalLink(termsHref(lang), sentence.link, s, "terms-link"), sentence.after);
 }
 
 /// The store's own page for its subscriptions, for whichever account is signed in to the store;

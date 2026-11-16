@@ -39,6 +39,7 @@ import {
   statusText,
   storeWords,
   switchRequest,
+  termsHref,
   switchSummary,
   type AccountView,
   type DeclineCategory,
@@ -63,6 +64,7 @@ import {
   accountLine,
   compact,
   createGate,
+  externalLink,
   gateStep,
   loadingStep,
   notice,
@@ -70,6 +72,7 @@ import {
   signOutButton,
   sleep,
   storeManageLink,
+  termsLine,
   type GateChange,
 } from "../billing/ui";
 
@@ -1259,6 +1262,8 @@ function render(options: { focus?: string } = {}) {
     lang,
     body: body(),
     busy: view.kind === "loading" || (view.kind === "gate" && gate.phase === "loading"),
+    // A new tab, so leaving for the terms never loses a card form being filled in.
+    footerLink: externalLink(termsHref(lang), t().termsFooterLink, t(), "action-link"),
     onSwitchLanguage: switchLanguage,
   });
   if (options.focus) focusSelector(options.focus);
@@ -1591,6 +1596,8 @@ function chargeBody(): (Node | null)[] {
           { id: "charge-summary", tabindex: -1 },
           h("ul", { class: "plain details" }, ...summary.rows.map((row) => h("li", {}, `${row.label} `, row.value))),
           ...summary.notes.map((note) => h("p", {}, note)),
+          // Inside the summary the confirm button points at, so the terms are part of what it says.
+          h("p", {}, termsLine(s, lang)),
         ),
       ];
     }
@@ -1796,7 +1803,8 @@ function payRegion(): (Node | null)[] {
     form.needProvince ? provinceField() : null,
     quote ? quoteView(offer, quote) : null,
     errorFor("pay"),
-    h("p", { id: "pay-note", class: "pay-note" }, payNote(offer, total, s, lang)),
+    // The terms sentence stays inside the note the pay button points at.
+    h("p", { id: "pay-note", class: "pay-note" }, payNote(offer, total, s, lang), termsLine(s, lang)),
     h(
       "button",
       {
