@@ -165,6 +165,24 @@ export function isResourceMissing(error: unknown): boolean {
   return stripeErrorCode(error) === "resource_missing";
 }
 
+/**
+ * Cancels a subscription, treating one Stripe no longer has as already cancelled.
+ *
+ * Two syncs can decide to stop the same subscription, such as the webhook for a paid lifetime
+ * invoice racing the callable that took the payment. Stripe answers the second with
+ * `resource_missing`, which is the outcome both wanted, not a failure. Returns whether this call
+ * was the one that cancelled it.
+ */
+export async function cancelSubscriptionOnce(gateway: StripeGateway, id: string): Promise<boolean> {
+  try {
+    await gateway.cancelSubscription(id);
+    return true;
+  } catch (error) {
+    if (isResourceMissing(error)) return false;
+    throw error;
+  }
+}
+
 /** The id of an expandable Stripe field, whether or not it was expanded. */
 export function idOf(value: string | { id: string } | null | undefined): string | undefined {
   if (!value) return undefined;

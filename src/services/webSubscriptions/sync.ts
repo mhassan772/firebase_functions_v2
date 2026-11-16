@@ -28,7 +28,7 @@ import {
   WEB_PURCHASES_COLLECTION,
   WebPurchaseEntry,
 } from "./ledger";
-import { idOf, shortId, stripeErrorCode, StripeGateway } from "./stripeGateway";
+import { cancelSubscriptionOnce, idOf, shortId, stripeErrorCode, StripeGateway } from "./stripeGateway";
 
 export const WEB_LIFETIME_YEARS = 99;
 const HOUR_MS = 60 * 60 * 1000;
@@ -733,7 +733,11 @@ export async function syncWebEntitlement(
     if (committed.outcome === "written" || committed.outcome === "unchanged") {
       const lifetime = derivation.kind === "slot" && derivation.slot.productId === "web_lifetime";
       for (const subscriptionId of derivation.cancel) {
-        await gateway.cancelSubscription(subscriptionId);
+        if (!(await cancelSubscriptionOnce(gateway, subscriptionId))) {
+          // A racing sync stopped it first, and logged it; this one has nothing left to do.
+          functions.logger.info("web_subscription_already_cancelled", { ...fields, subscriptionId: shortId(subscriptionId) });
+          continue;
+        }
         cancelled.push(subscriptionId);
         if (!lifetime && facts.duplicateSubscriptionIds.includes(subscriptionId)) {
           // A second paid subscription: the customer was charged twice, which needs a person.
