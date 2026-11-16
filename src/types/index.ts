@@ -52,6 +52,12 @@ export interface BookItem {
   bookGuid: string;
   quality: Quality;
   reason: Reason;
+  /**
+   * Lower qualities to sign along with `quality`, so a stream can step down without asking again.
+   *
+   * Optional; see `extraQualitiesOf` in `shared/getUrlsCore.ts` for what is honoured.
+   */
+  extraQualities?: number[];
 }
 
 export interface GetUrlsRequest {
@@ -73,6 +79,13 @@ export interface RecordingUrl {
 export interface BookUrlData {
   recordings: RecordingUrl[];
   expiresAt: string;
+  /**
+   * The links of each extra quality asked for, keyed by quality, in the order of `recordings`.
+   *
+   * Links only: the names and durations are those of `recordings`. Absent when none was asked
+   * for or none could be given.
+   */
+  extraUrls?: Record<string, string[]>;
 }
 
 /** A book the allowance policy refused; see `shared/urlPolicy.ts`. */
