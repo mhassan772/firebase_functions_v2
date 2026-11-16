@@ -272,6 +272,27 @@ describe("syncWebEntitlement", () => {
     assert.equal(master.expiresAt.toDate().getUTCFullYear(), new Date().getUTCFullYear() + 99);
     assert.equal((await read(db().collection(WEB_PURCHASES_COLLECTION).doc("life"))).status, "paid");
   });
+
+  test("a subscription that a racing sync stopped first is not an error", async () => {
+    const { fake, deps, customer } = await setup();
+    const sub = fake.paySubscription({ customer });
+    const life = fake.payLifetime({ customer });
+    await writeLedger("life", { plan: "web_lifetime", status: "pending", stripe: { customerId: customer, invoiceId: life.invoiceId } });
+    // The webhook and the callable that paid for lifetime both decide to stop the subscription.
+    // The other one gets there between this sync's read and its cancel, and Stripe then answers
+    // `resource_missing`, as it does for any subscription that is already cancelled.
+    const cancel = fake.cancelSubscription;
+    fake.cancelSubscription = async (id) => {
+      await cancel(id);
+      return cancel(id);
+    };
+    const result = await syncWebEntitlement(UID, deps);
+    assert.equal(result.outcome, "written");
+    assert.deepEqual(result.cancelled, []);
+    assert.equal(fake.state.subscriptions.get(sub.subscriptionId).status, "canceled");
+    assert.equal((await read(masterRef(UID))).productId, "web_lifetime");
+    assert.equal((await read(db().collection(WEB_PURCHASES_COLLECTION).doc("life"))).status, "paid");
+  });
 });
 
 describe("stripeWebEvents", () => {

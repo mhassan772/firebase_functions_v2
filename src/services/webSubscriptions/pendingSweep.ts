@@ -3,7 +3,7 @@ import * as functions from "firebase-functions";
 import { safeErrorCode } from "../subscriptions/errors";
 import { ledgerEntryFromData, listPendingEntries, WEB_PURCHASES_COLLECTION, WebPurchaseEntry } from "./ledger";
 import { invoiceAmounts } from "./pricing";
-import { idOf, isResourceMissing, stripeErrorCode } from "./stripeGateway";
+import { cancelSubscriptionOnce, idOf, isResourceMissing, stripeErrorCode } from "./stripeGateway";
 import { syncWebEntitlement, WebSyncDeps } from "./sync";
 
 /** A purchase still pending this long is synced; the purchase callable settles most within seconds. */
@@ -146,7 +146,8 @@ export async function stopPendingStripeSide(deps: WebSyncDeps, entry: WebPurchas
   if (entry.stripe.subscriptionId) {
     const subscription = await gateway.retrieveSubscription(entry.stripe.subscriptionId);
     if (subscription.status === "incomplete") {
-      await gateway.cancelSubscription(subscription.id);
+      // Already gone when a racing call or Stripe's own expiry stopped it between the two reads.
+      await cancelSubscriptionOnce(gateway, subscription.id);
       return false;
     }
     return STARTED_SUBSCRIPTION_STATUSES.has(subscription.status);
