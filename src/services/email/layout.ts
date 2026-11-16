@@ -51,6 +51,8 @@ export interface EmailParts {
   paragraphsText: string[];
   /** The call to action; an email that only informs has none. */
   button?: { label: string; link: string };
+  /** A plain link under the button, such as the terms beside the manage page. */
+  link?: { label: string; link: string };
   note: string;
 }
 
@@ -91,6 +93,14 @@ function renderHtml(lang: AuthEmailLang, t: FrameCopy, parts: EmailParts): strin
       </td>
     </tr>`
     : "";
+  const link = parts.link
+    ? `
+    <tr>
+      <td align="center" style="padding:8px 24px 0;font-size:14px;line-height:1.8;">
+        <a href="${escapeHtml(parts.link.link)}" style="color:${BRAND.deepGreen};font-weight:700;">${escapeHtml(parts.link.label)}</a>
+      </td>
+    </tr>`
+    : "";
 
   return `<!DOCTYPE html>
 <html dir="${dir}" lang="${lang}">
@@ -114,7 +124,7 @@ function renderHtml(lang: AuthEmailLang, t: FrameCopy, parts: EmailParts): strin
         <p style="margin:0 0 6px;font-size:18px;font-weight:700;">${escapeHtml(parts.greeting)}</p>
         ${intro}
       </td>
-    </tr>${button}
+    </tr>${button}${link}
     <tr>
       <td dir="${dir}" style="padding:14px 24px 24px;color:${BRAND.muted};font-size:13px;line-height:1.8;text-align:${align};">
         ${escapeHtml(parts.note)}
@@ -138,6 +148,7 @@ function renderText(t: FrameCopy, parts: EmailParts): string {
     ...parts.paragraphsText,
     "",
     ...(parts.button ? [`${parts.button.label}:`, parts.button.link, ""] : []),
+    ...(parts.link ? [`${parts.link.label}:`, parts.link.link, ""] : []),
     parts.note,
     "",
     `${t.team} · mantooq.com`,

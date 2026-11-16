@@ -168,7 +168,7 @@ describe("templates", () => {
   };
   const all = ["purchase_confirmed", "renewed", "payment_failed", "payment_failed_final", "action_required", "renewal_reminder", "cancellation_confirmed", "switched_yearly"];
 
-  test("every kind renders in both languages, with the manage button and no placeholder or raw cents", () => {
+  test("every kind renders in both languages, with the manage button, the terms link and no placeholder or raw cents", () => {
     for (const kind of all) {
       for (const lang of ["ar", "en"]) {
         for (const plan of kind === "purchase_confirmed" ? ["web_monthly", "web_yearly", "web_lifetime"] : ["web_yearly"]) {
@@ -178,6 +178,11 @@ describe("templates", () => {
             assert.doesNotMatch(part, /4999|5649|\b650\b|\b333\b/, `${kind}/${lang}: raw cents`);
           }
           assert.ok(email.text.includes(`https://accounts.mantooq.com/manage?lang=${lang}`), `${kind}/${lang}: button`);
+          const terms = `https://accounts.mantooq.com/terms?lang=${lang}`;
+          assert.ok(email.text.includes(`${lang === "ar" ? "شروط الاشتراك" : "Subscription terms"}:\n${terms}`), `${kind}/${lang}: terms line`);
+          assert.ok(email.html.includes(`<a href="${terms}"`), `${kind}/${lang}: terms link`);
+          // Lifetime is defined only in the terms, never by a number of years in an email.
+          assert.doesNotMatch(email.text, /\d+ years|[٠-٩]+ سنة|as long as the service|مدة تقديم الخدمة/, `${kind}/${lang}: no lifetime definition`);
           assert.ok(!email.subject.startsWith("[TEST]"));
         }
       }
@@ -189,9 +194,9 @@ describe("templates", () => {
     const ar = (kind, extra = {}) => renderBillingEmail(kind, "ar", { ...content, ...extra }).text;
     assert.match(en("purchase_confirmed"), /Plan: Yearly[\s\S]*Price: \$49\.99[\s\S]*Tax: \$6\.50[\s\S]*Total: \$56\.49[\s\S]*Next renewal: December 14, 2026/);
     assert.match(en("purchase_confirmed"), /renews automatically until you cancel[\s\S]*version 90\.7[\s\S]*not refundable[\s\S]*cancel the renewal/);
-    assert.match(en("purchase_confirmed", { plan: "web_lifetime", tax: 0, total: 4999 }), /one payment[\s\S]*50 years/);
+    assert.match(en("purchase_confirmed", { plan: "web_lifetime", tax: 0, total: 4999 }), /This is one payment, with no renewals\.\n/);
     assert.doesNotMatch(en("purchase_confirmed", { tax: 0, total: 4999 }), /Tax:/, "no tax line when there is none");
-    assert.match(ar("purchase_confirmed", { plan: "web_lifetime" }), /الخطة: مدى الحياة[\s\S]*٥٠ سنة/);
+    assert.match(ar("purchase_confirmed", { plan: "web_lifetime" }), /الخطة: مدى الحياة[\s\S]*هذه دفعة واحدة، دون تجديد\.\n/);
     assert.match(ar("purchase_confirmed"), /١٤ ديسمبر ٢٠٢٦/, "Arabic month name");
     assert.match(en("renewed"), /Amount paid: \$49\.99[\s\S]*Next renewal: December 14, 2026/);
     assert.match(en("payment_failed"), /didn't go through[\s\S]*until December 14, 2026[\s\S]*Replace the card[\s\S]*try your current card again/);
@@ -202,7 +207,7 @@ describe("templates", () => {
     assert.match(en("cancellation_confirmed"), /won't renew[\s\S]*until December 14, 2026[\s\S]*resume/);
     const upgrade = { plan: "web_lifetime", amount: 14999, credit: 2500, tax: 0, total: 12499, creditedPlan: "web_yearly" };
     assert.match(en("purchase_confirmed", upgrade),
-      /for life[\s\S]*Plan: Lifetime[\s\S]*Price: \$149\.99[\s\S]*unused time of your yearly plan: \$25\.00[\s\S]*Total: \$124\.99[\s\S]*yearly subscription has stopped[\s\S]*50 years/);
+      /for life[\s\S]*Plan: Lifetime[\s\S]*Price: \$149\.99[\s\S]*unused time of your yearly plan: \$25\.00[\s\S]*Total: \$124\.99[\s\S]*yearly subscription has stopped[\s\S]*one payment, with no renewals\./);
     assert.doesNotMatch(en("purchase_confirmed", upgrade), /Next renewal|renews automatically/);
     assert.match(en("purchase_confirmed", { ...upgrade, creditedPlan: "web_monthly", credit: 0, total: 14999 }), /monthly subscription has stopped/);
     assert.doesNotMatch(en("purchase_confirmed", { ...upgrade, credit: 0, total: 14999 }), /unused time/, "no credit line for a zero credit");

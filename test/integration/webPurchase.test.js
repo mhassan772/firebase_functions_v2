@@ -322,7 +322,7 @@ describe("startWebPurchase", () => {
     const slot = await read(webSlotRef(OTHER));
     assert.equal(slot.productId, "web_lifetime");
     assert.equal(slot.active, true);
-    assert.equal(slot.expiresAt.toDate().getUTCFullYear() - new Date().getUTCFullYear(), 50);
+    assert.equal(slot.expiresAt.toDate().getUTCFullYear() - new Date().getUTCFullYear(), 99);
     assert.equal((await read(ledgerRef(purchaseId))).status, "paid");
   });
 
@@ -782,7 +782,7 @@ describe("getWebSubscription", () => {
     const state = await get(env);
     assert.equal(state.state, "lifetime");
     assert.equal(state.amount, 14999);
-    assert.equal(new Date(state.endsAt).getUTCFullYear() - new Date().getUTCFullYear(), 50);
+    assert.equal(new Date(state.endsAt).getUTCFullYear() - new Date().getUTCFullYear(), 99);
     assert.deepEqual(state.storeSubscription, { platform: "apple", autoRenewing: true });
   });
 

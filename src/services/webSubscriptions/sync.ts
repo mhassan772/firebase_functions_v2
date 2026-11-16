@@ -30,7 +30,7 @@ import {
 } from "./ledger";
 import { idOf, shortId, stripeErrorCode, StripeGateway } from "./stripeGateway";
 
-export const WEB_LIFETIME_YEARS = 50;
+export const WEB_LIFETIME_YEARS = 99;
 const HOUR_MS = 60 * 60 * 1000;
 /** An active subscription stays on this long past its paid period, for the renewal invoice to be paid. */
 export const WEB_RENEWAL_SLACK_MS = 6 * HOUR_MS;
@@ -161,7 +161,7 @@ const addYears = (date: Date, years: number): Date => {
  * Derives the web slot from what Stripe holds now. First match wins:
  *
  * 1. A paid lifetime invoice whose charge is neither refunded in full nor disputed (open or
- *    lost): active for 50 years from payment. Every subscription not yet ended is cancelled.
+ *    lost): active for 99 years from payment. Every subscription not yet ended is cancelled.
  * 2. The newest subscription that started, by the table in the stage D spec. Access runs to
  *    the end of the latest paid invoice's line period, never to the item's current period,
  *    which Stripe advances at renewal whether or not the renewal is paid.

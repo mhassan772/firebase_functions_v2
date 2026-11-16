@@ -78,6 +78,11 @@ export function manageLink(lang: BillingLang): string {
   return `https://accounts.mantooq.com/manage?lang=${lang}`;
 }
 
+/** The subscription terms, which define lifetime and everything else the emails leave out. */
+export function termsLink(lang: BillingLang): string {
+  return `https://accounts.mantooq.com/terms?lang=${lang}`;
+}
+
 interface Copy {
   greeting: string;
   planName: Record<string, string>;
@@ -85,6 +90,7 @@ interface Copy {
   subscriptionOf: Record<string, string>;
   labels: { plan: string; price: string; tax: string; total: string; renews: string; paid: string };
   manageButton: string;
+  termsLabel: string;
   replaceCardButton: string;
   verifyButton: string;
   notYou: string;
@@ -120,6 +126,7 @@ const COPY: Record<BillingLang, Copy> = {
     subscriptionOf: { web_monthly: "اشتراكك الشهري", web_yearly: "اشتراكك السنوي" },
     labels: { plan: "الخطة:", price: "السعر:", tax: "الضريبة:", total: "الإجمالي:", renews: "التجديد القادم:", paid: "المبلغ المدفوع:" },
     manageButton: "إدارة اشتراكك",
+    termsLabel: "شروط الاشتراك",
     replaceCardButton: "غيّر البطاقة",
     verifyButton: "أكمل التحقق",
     notYou: "إن لم تكن أنت من دفع هذا المبلغ، فردّ على هذه الرسالة وسنساعدك.",
@@ -132,7 +139,7 @@ const COPY: Record<BillingLang, Copy> = {
         thanksSubscription: "شكرًا لاشتراكك. فُعّل بريميوم لحسابك في منطوق.",
         thanksLifetime: "شكرًا لشرائك. فُعّل بريميوم مدى الحياة لحسابك في منطوق.",
         renewsUntilCancelled: "يتجدد الاشتراك تلقائيًا حتى تلغيه.",
-        lifetimeTerms: "هذه دفعة واحدة، دون تجديد. «مدى الحياة» تعني ٥٠ سنة، أو طوال مدة تقديم الخدمة إن كانت أقصر.",
+        lifetimeTerms: "هذه دفعة واحدة، دون تجديد.",
         credit: {
           web_monthly: "خصم المدة غير المستخدمة من اشتراكك الشهري:",
           web_yearly: "خصم المدة غير المستخدمة من اشتراكك السنوي:",
@@ -196,6 +203,7 @@ const COPY: Record<BillingLang, Copy> = {
     subscriptionOf: { web_monthly: "Your monthly subscription", web_yearly: "Your yearly subscription" },
     labels: { plan: "Plan:", price: "Price:", tax: "Tax:", total: "Total:", renews: "Next renewal:", paid: "Amount paid:" },
     manageButton: "Manage your subscription",
+    termsLabel: "Subscription terms",
     replaceCardButton: "Replace card",
     verifyButton: "Complete verification",
     notYou: "If you didn't make this payment, reply to this email and we'll help.",
@@ -208,7 +216,7 @@ const COPY: Record<BillingLang, Copy> = {
         thanksSubscription: "Thank you for subscribing. Premium is now on for your Mantooq account.",
         thanksLifetime: "Thank you for your purchase. Premium is now on for your Mantooq account, for life.",
         renewsUntilCancelled: "Your subscription renews automatically until you cancel.",
-        lifetimeTerms: "This is one payment, with no renewals. Lifetime means 50 years, or for as long as the service runs if that is shorter.",
+        lifetimeTerms: "This is one payment, with no renewals.",
         credit: {
           web_monthly: "Credit for the unused time of your monthly plan:",
           web_yearly: "Credit for the unused time of your yearly plan:",
@@ -395,7 +403,8 @@ function body(kind: BillingKind, lang: BillingLang, content: BillingContent): Bo
 
 /**
  * Renders one billing email, or throws `BillingEmailIncompleteError` when a field it must state
- * is missing. Every email carries the manage page button.
+ * is missing. Every email carries the manage page button and, under it, the terms, where what
+ * lifetime means is defined.
  */
 export function renderBillingEmail(kind: BillingKind, lang: BillingLang, content: BillingContent): RenderedEmail {
   const parts = body(kind, lang, content);
@@ -410,6 +419,7 @@ export function renderBillingEmail(kind: BillingKind, lang: BillingLang, content
     paragraphsHtml: [escapeHtml(first), ...detailsHtml, ...rest.map(escapeHtml)],
     paragraphsText: [first, ...(parts.details ? ["", ...parts.details, ""] : []), ...rest],
     button: { label: parts.button, link: manageLink(lang) },
+    link: { label: COPY[lang].termsLabel, link: termsLink(lang) },
     note: parts.note,
   });
 }
