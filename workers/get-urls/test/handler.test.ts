@@ -508,6 +508,33 @@ describe("handleGetUrls", () => {
       expect(doc("url_grants/user-1")).toMatchObject({ anonymous: false, recentBooksCount: 2 });
     });
 
+    it("signs the lower extra qualities of a stream and ignores the rest", async () => {
+      await useFreeAccount();
+      google.recordings[0] = {
+        id: "rec-a",
+        fields: recordingFields("bookA", [
+          { key: "2", name: "Part 2", duration: 17865, urls: { "64kb_url": "/643/64/64_2.opus", "32kb_url": "/643/32/32_2.opus" } },
+          { key: "1", name: "Part 1", duration: 18874, urls: { "64kb_url": "643/64/64_1.opus", "32kb_url": "643/32/32_1.opus" } },
+        ]),
+      };
+
+      const { status, body } = await call({
+        books: [{ ...streamA, extraQualities: [128, 32, 16] }],
+        platform: "android",
+        build_number: "616",
+      });
+
+      expect(status).toBe(200);
+      expect(Object.keys(body.data.bookA.extraUrls)).toEqual(["32"]);
+      const paths = body.data.bookA.extraUrls["32"].map((link: string) => new URL(link).pathname);
+      expect(paths).toEqual(["/643/32/32_1.opus", "/643/32/32_2.opus"]);
+      expect(new URL(body.data.bookA.extraUrls["32"][0]).searchParams.get("verify")).toMatch(
+        new RegExp(`^${NOW_SECONDS}-[A-Za-z0-9_-]{43}$`)
+      );
+      expect(new URL(body.data.bookA.recordings[0].url).pathname).toBe("/643/64/64_1.opus");
+      expect(doc("url_grants/user-1")).toMatchObject({ recentBooksCount: 1 });
+    });
+
     it("signs Bunny links for EG", async () => {
       await useFreeAccount();
 

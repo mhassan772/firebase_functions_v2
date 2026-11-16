@@ -45,6 +45,26 @@ const VALID_REASONS = ["download", "stream", "sample"];
 /** The cap applies to every build; the policy block can lower it. */
 export const DEFAULT_MAX_BOOKS_PER_REQUEST = 40;
 
+/** The most extra qualities signed for one book; the catalogue has four. */
+export const MAX_EXTRA_QUALITIES = 3;
+
+/**
+ * The extra qualities honoured for [book], in the order asked.
+ *
+ * Only a stream has them: a download keeps one quality and a sample is one chapter. Only
+ * qualities below the main one count, so the extras never hand out more than the request
+ * already asked for. Anything else in the field is ignored, never an error, so the field can
+ * change without breaking a released app.
+ */
+export function extraQualitiesOf(book: BookItem): number[] {
+  if (book.reason !== "stream" || !Array.isArray(book.extraQualities)) return [];
+  const main = Number(book.quality);
+  const lower = book.extraQualities.filter(
+    (quality) => Number.isInteger(quality) && quality > 0 && quality < main
+  );
+  return [...new Set(lower)].slice(0, MAX_EXTRA_QUALITIES);
+}
+
 export interface ApiErrorBody {
   code: number;
   message: string;
@@ -270,18 +290,24 @@ export async function buildPolicyResponse(
     const recordings = Object.values(source.recordings);
     const wanted = decision.kind === "samples" ? recordings.slice(0, 1) : recordings;
     const plain = buildPublicUrls(wanted, bookItem.quality, request.platform, publicDomain);
+    const sign = (url: string) =>
+      signAudioUrl(publicDomain, url.slice(publicDomain.length + 1), options.signing, options.secrets);
     const signed = await Promise.all(
-      plain.map(async (recording) => ({
-        ...recording,
-        url: await signAudioUrl(
-          publicDomain,
-          recording.url.slice(publicDomain.length + 1),
-          options.signing,
-          options.secrets
-        ),
-      }))
+      plain.map(async (recording) => ({ ...recording, url: await sign(recording.url) }))
     );
-    result[bookItem.bookGuid] = { recordings: signed, expiresAt };
+
+    const extraUrls: Record<string, string[]> = {};
+    for (const quality of extraQualitiesOf(bookItem)) {
+      // A quality the book lacks is left out; the app then asks for it only if it ever needs it.
+      if (!wanted.every((recording) => recording.url_list?.[`${quality}kb_url`])) continue;
+      const links = buildPublicUrls(wanted, quality as Quality, request.platform, publicDomain);
+      extraUrls[String(quality)] = await Promise.all(links.map((recording) => sign(recording.url)));
+    }
+
+    result[bookItem.bookGuid] =
+      Object.keys(extraUrls).length > 0
+        ? { recordings: signed, expiresAt, extraUrls }
+        : { recordings: signed, expiresAt };
   }
 
   return result;

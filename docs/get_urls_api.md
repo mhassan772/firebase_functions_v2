@@ -411,6 +411,19 @@ When the request holds a single book and it is refused, the response is HTTP 400
 - **Signed query parameters**: on the Cloudflare host (`books.good-storage.click`) each URL carries `u`, `k` and `verify`; on the Bunny host (`good-storage.b-cdn.net`) it carries `token` and `expires`. Send the URL unchanged. The signature covers the path, so a URL cannot be rewritten to another quality or file; request the other quality instead.
 - **Samples**: a `sample` request returns chapter 1 only.
 
+### Extra qualities under the policy
+
+A stream may ask for lower qualities along with its own, so it can step down on a weak connection without another request. The field is optional, and a client that does not send it gets the response above.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `books[].extraQualities` (request) | Number[] | Qualities to sign besides `quality`. Honoured for `stream` only, and only for qualities below `quality`; at most 3. Anything else in the field is ignored, never an error |
+| `data[bookGuid].extraUrls` (response) | Object | Signed links per extra quality, keyed by quality (`"32"`), in the order of `recordings`. Names and durations are those of `recordings`. Absent when no extra quality was given |
+
+- A quality the book does not have is left out of `extraUrls`; the request still succeeds.
+- The extra links expire with `expiresAt`, and the book uses the allowance once, whatever the number of qualities.
+- A request below `minBuild`, a `download` and a `sample` never get `extraUrls`.
+
 ---
 
 ## Notes

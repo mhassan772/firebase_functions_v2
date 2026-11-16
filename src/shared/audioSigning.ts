@@ -53,7 +53,19 @@ function subtle(): SubtleLike {
 
 const encoder = new TextEncoder();
 
-async function hmacSha256(secret: string, message: string): Promise<Uint8Array> {
+/**
+ * The imported key of each secret, kept for the life of the process.
+ *
+ * One request signs every chapter of every quality it returns with the same secret, so the
+ * import is done once rather than per link. The key itself is kept, not the promise of it: a
+ * Worker must not await in one request a promise another request started. A rotated secret is
+ * a new entry, and there are two secrets per key version, so the map stays a handful of entries.
+ */
+const importedKeys = new Map<string, unknown>();
+
+async function hmacKey(secret: string): Promise<unknown> {
+  const cached = importedKeys.get(secret);
+  if (cached !== undefined) return cached;
   const key = await subtle().importKey(
     "raw",
     encoder.encode(secret),
@@ -61,6 +73,12 @@ async function hmacSha256(secret: string, message: string): Promise<Uint8Array> 
     false,
     ["sign"]
   );
+  importedKeys.set(secret, key);
+  return key;
+}
+
+async function hmacSha256(secret: string, message: string): Promise<Uint8Array> {
+  const key = await hmacKey(secret);
   return new Uint8Array(await subtle().sign("HMAC", key, encoder.encode(message)));
 }
 

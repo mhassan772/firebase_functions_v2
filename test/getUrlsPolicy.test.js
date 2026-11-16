@@ -216,3 +216,92 @@ test("buildPolicyResponse signs Bunny links and sets expiresAt from the TTL", as
   assert.match(data.b1.recordings[0].url, /^https:\/\/good-storage\.b-cdn\.net\/b1\/1\.opus\?u=c6c289e4&k=1&token=HS256-[\w-]+&expires=1762303600$/);
   assert.equal(data.b1.expiresAt, new Date(1762303600 * 1000).toISOString());
 });
+
+function seedQualities(guid, qualities) {
+  const urlList = (part) => Object.fromEntries(qualities.map((q) => [`${q}kb_url`, `/${guid}/${q}/${q}_${part}.opus`]));
+  store.set(`book_recordings/rec-${guid}`, {
+    book_guid: guid,
+    recordings: {
+      1: { name: "Part 1", duration: 10, url_list: urlList(1) },
+      2: { name: "Part 2", duration: 20, url_list: urlList(2) },
+    },
+  });
+}
+
+const verified = (path) => new RegExp(`^${DOMAIN}${path.replace(/\./g, "\\.")}\\?u=${UID_HASH}&k=1&verify=${Math.floor(NOW / 1000)}-[\\w-]+$`);
+
+test("a stream gets the lower extra qualities signed, in chapter order, for one allowance slot", async () => {
+  seed();
+  seedQualities("b1", [16, 32, 64, 128]);
+  const response = await handleGetUrls(
+    request([{ ...book("b1"), extraQualities: [32, 16] }]),
+    "user-1",
+    DOMAIN,
+    context(POLICY)
+  );
+  const data = response.data.b1;
+  assert.match(data.recordings[0].url, verified("/b1/64/64_1.opus"));
+  assert.deepEqual(Object.keys(data.extraUrls).sort(), ["16", "32"]);
+  assert.match(data.extraUrls["32"][0], verified("/b1/32/32_1.opus"));
+  assert.match(data.extraUrls["32"][1], verified("/b1/32/32_2.opus"));
+  assert.match(data.extraUrls["16"][1], verified("/b1/16/16_2.opus"));
+  assert.equal(store.get("url_grants/user-1").recentBooksCount, 1);
+});
+
+test("an extra quality at or above the main one is never signed", async () => {
+  seed();
+  seedQualities("b1", [32, 64, 128]);
+  const response = await handleGetUrls(
+    request([{ ...book("b1"), extraQualities: [128, 64, 32] }]),
+    "user-1",
+    DOMAIN,
+    context(POLICY)
+  );
+  assert.deepEqual(Object.keys(response.data.b1.extraUrls), ["32"]);
+});
+
+test("an extra quality the book lacks is left out and the request still succeeds", async () => {
+  seed();
+  seedQualities("b1", [32, 64]);
+  const response = await handleGetUrls(
+    request([{ ...book("b1"), extraQualities: [32, 16] }]),
+    "user-1",
+    DOMAIN,
+    context(POLICY)
+  );
+  assert.equal(response.code, 600);
+  assert.deepEqual(Object.keys(response.data.b1.extraUrls), ["32"]);
+
+  seed();
+  const none = await handleGetUrls(request([{ ...book("b1"), extraQualities: [32] }]), "user-1", DOMAIN, context(POLICY));
+  assert.equal(none.data.b1.recordings.length, 2);
+  assert.equal("extraUrls" in none.data.b1, false);
+});
+
+test("a download, a sample and a malformed field get no extra qualities", async () => {
+  for (const item of [
+    { ...book("b1", "download"), extraQualities: [32] },
+    { ...book("b1", "sample"), extraQualities: [32] },
+    { ...book("b1"), extraQualities: "32" },
+    { ...book("b1"), extraQualities: ["32", null, 31.5, -32, 0] },
+  ]) {
+    seed();
+    seedQualities("b1", [32, 64]);
+    const response = await handleGetUrls(request([item]), "user-1", DOMAIN, context(POLICY));
+    assert.ok(response.data.b1.recordings.length >= 1);
+    assert.equal("extraUrls" in response.data.b1, false);
+  }
+});
+
+test("the unsigned response carries no extra qualities", async () => {
+  seed();
+  seedQualities("b1", [32, 64]);
+  const response = await handleGetUrls(
+    request([{ ...book("b1"), extraQualities: [32] }], "615"),
+    "user-1",
+    DOMAIN,
+    context(POLICY)
+  );
+  assert.equal(response.data.b1.recordings[0].url, `${DOMAIN}/b1/64/64_1.opus`);
+  assert.equal("extraUrls" in response.data.b1, false);
+});
