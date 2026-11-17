@@ -264,6 +264,8 @@ export interface InvoiceFacts {
   /** Integer cents paid, for the renewal receipt. */
   amountPaid?: number;
   currency?: string;
+  /** The invoice carried tax (`total_taxes` above zero); its subscription's renewals are taxed. */
+  taxed?: boolean;
 }
 
 /**

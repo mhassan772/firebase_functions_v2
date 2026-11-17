@@ -27,9 +27,10 @@ function clone(value) {
 }
 
 /**
- * @param {{ livemode?: boolean, nowSec?: number, taxFor?: (address) => number }} options
- *   `taxFor` returns the tax in cents a preview adds for an address, for the tax path, which the
- *   sandbox cannot run.
+ * @param {{ livemode?: boolean, nowSec?: number, taxFor?: (address) => number, taxRates?: Record<string, number> }} options
+ *   `taxFor` returns the tax in cents an invoice or preview adds for an address, as one amount.
+ *   `taxRates` instead taxes each line at the rate of a Canadian address's province (`{ON: 0.13}`),
+ *   rounded per line as Stripe Tax does; it wins over `taxFor`.
  */
 function createFakeStripe(options = {}) {
   let counter = 0;
@@ -57,6 +58,7 @@ function createFakeStripe(options = {}) {
     livemode: options.livemode ?? false,
     nowSec: options.nowSec ?? Math.floor(Date.now() / 1000),
     taxFor: options.taxFor ?? (() => 0),
+    taxRates: options.taxRates ?? null,
     state,
     calls,
     /** Names of calls that fail with the given error, once each. */
@@ -137,14 +139,34 @@ function createFakeStripe(options = {}) {
     return view;
   };
 
-  /** Tax a Stripe-Tax invoice adds for the customer's address, from `taxFor`. */
-  const taxOf = (customer, automaticTax) =>
-    automaticTax ? fake.taxFor(state.customers.get(customer)?.address ?? {}) : 0;
+  const addressOf = (customer) => state.customers.get(customer)?.address ?? {};
+
+  /**
+   * The tax Stripe Tax adds to `lines` at `address`. With `taxRates`, each line carries its own
+   * tax in `taxes`, rounded on that line (a credit line's tax is negative), and the invoice's tax
+   * is their sum, as the sandbox showed; otherwise `taxFor`'s one amount.
+   */
+  function applyTax(lines, address, automaticTax) {
+    if (!automaticTax) return 0;
+    if (!fake.taxRates) return fake.taxFor(address ?? {});
+    const rate = address?.country === "CA" ? fake.taxRates[address.state] ?? 0 : 0;
+    let sum = 0;
+    for (const line of lines) {
+      const tax = Math.round(line.amount * rate);
+      line.taxes = tax ? [{ amount: tax }] : [];
+      sum += tax;
+    }
+    return sum;
+  }
+
+  /** Whether Stripe Tax can place an address: a country, and in Canada a province or postal code. */
+  const placeable = (address) =>
+    Boolean(address?.country) && (address.country !== "CA" || Boolean(address.state || address.postal_code));
 
   function newInvoice({ customer, subscription, lines, metadata = {}, status = "open", billingReason, automaticTax = false }) {
     const id = nextId("in");
     const subtotal = lines.reduce((sum, line) => sum + line.amount, 0);
-    const tax = status === "draft" ? 0 : taxOf(customer, automaticTax);
+    const tax = status === "draft" ? 0 : applyTax(lines, addressOf(customer), automaticTax);
     const total = subtotal + tax;
     const invoice = {
       id,
@@ -211,6 +233,7 @@ function createFakeStripe(options = {}) {
       type: "card",
       customer: customer ?? null,
       card: { country: card.country, brand: card.brand, last4: card.last4, funding: card.funding, exp_month: card.exp_month, exp_year: card.exp_year },
+      billing_details: clone(token.payment_method_preview.billing_details),
       failsCharges: token.failsCharges === true,
     });
     return id;
@@ -479,6 +502,9 @@ function createFakeStripe(options = {}) {
       record("updateCustomer", { id, params });
       const customer = must(state.customers, id, "customer");
       if (customer.deleted) throw stripeError("resource_missing", `No such customer: '${id}'`);
+      if (params.tax?.validate_location === "immediately" && !placeable(params.address ?? customer.address)) {
+        throw stripeError("customer_tax_location_invalid", "The customer's location is not recognized.");
+      }
       Object.assign(customer, clone(params));
       return clone(customer);
     },
@@ -554,6 +580,9 @@ function createFakeStripe(options = {}) {
         idempotent(key, () => {
           const invoice = newInvoice({ customer: params.customer, lines: [], metadata: { ...params.metadata }, status: "draft" });
           invoice.automatic_tax = { enabled: params.automatic_tax?.enabled === true, status: null };
+          // A customer coupon is inherited unless `discounts` is "", as Stripe documents.
+          const coupon = params.discounts !== "" ? state.customers.get(params.customer)?.discount?.coupon : undefined;
+          if (coupon?.amount_off) invoice.inheritedDiscount = coupon.amount_off;
           invoice.payment_settings = clone(params.payment_settings ?? null);
           return invoice;
         })
@@ -591,7 +620,11 @@ function createFakeStripe(options = {}) {
       record("finalizeInvoice", { id });
       const invoice = must(state.invoices, id, "invoice");
       if (invoice.status === "draft") {
-        const tax = taxOf(invoice.customer, invoice.automatic_tax?.enabled);
+        const tax = applyTax(invoice.lines.data, addressOf(invoice.customer), invoice.automatic_tax?.enabled);
+        if (invoice.inheritedDiscount) {
+          invoice.total -= invoice.inheritedDiscount;
+          invoice.subtotal -= invoice.inheritedDiscount;
+        }
         if (tax) {
           invoice.total += tax;
           invoice.total_taxes = [{ amount: tax }];
@@ -671,7 +704,7 @@ function createFakeStripe(options = {}) {
         }
         const lines = changeLines(sub, params.subscription_details).map((line) => ({ ...line, id: line.id.replace("il_", "il_tmp_") }));
         const subtotal = lines.reduce((sum, line) => sum + line.amount, 0);
-        const tax = taxOf(sub.customer, sub.automatic_tax?.enabled === true);
+        const tax = applyTax(lines, addressOf(sub.customer), sub.automatic_tax?.enabled === true);
         return {
           object: "invoice",
           billing_reason: "upcoming",
@@ -684,21 +717,77 @@ function createFakeStripe(options = {}) {
           automatic_tax: { enabled: sub.automatic_tax?.enabled === true, status: null },
         };
       }
-      const priceId = params.subscription_details?.items?.[0]?.price ?? params.invoice_items?.[0]?.price;
-      const price = priceById(priceId);
-      const extra = (params.invoice_items ?? []).slice(1).reduce((sum, item) => sum + (item.amount ?? 0), 0);
-      const address = params.customer_details?.address ?? (params.customer ? state.customers.get(params.customer)?.address : undefined) ?? {};
+      const address = params.customer_details?.address ?? (params.customer ? addressOf(params.customer) : undefined) ?? {};
       const automatic = params.automatic_tax?.enabled === true;
-      if (automatic && address.country === "CA" && !address.state && !address.postal_code) {
-        return { object: "invoice", total: price.unit_amount + extra, currency: "usd", total_taxes: [], automatic_tax: { enabled: true, status: "requires_location_inputs" } };
+      const lines = [];
+      for (const item of params.subscription_details?.items ?? []) {
+        const price = priceById(item.price);
+        lines.push({
+          id: nextId("il_tmp"),
+          object: "line_item",
+          amount: price.unit_amount,
+          period: { start: fake.nowSec, end: periodEnd(fake.nowSec, price.recurring.interval) },
+          parent: { type: "subscription_item_details", subscription_item_details: { subscription: null, subscription_item: null, proration: false } },
+          pricing: { price_details: { price: price.id, product: price.product } },
+        });
       }
-      const tax = automatic ? fake.taxFor(address) : 0;
+      for (const item of params.invoice_items ?? []) {
+        const price = item.price ? priceById(item.price) : null;
+        lines.push({
+          id: nextId("il_tmp"),
+          object: "line_item",
+          amount: price ? price.unit_amount : item.amount,
+          description: item.description ?? null,
+          period: { start: fake.nowSec, end: fake.nowSec },
+          parent: { type: "invoice_item_details", invoice_item_details: { invoice_item: nextId("ii_tmp") } },
+          pricing: price ? { price_details: { price: price.id, product: price.product } } : null,
+        });
+      }
+      if (params.customer) {
+        // Without `subscription`, Stripe adds the next renewal of each of the customer's running
+        // subscriptions to the preview (seen in the sandbox for active and past-due ones; one set
+        // to cancel, or ended, adds nothing).
+        for (const sub of state.subscriptions.values()) {
+          if (sub.customer !== params.customer || !["active", "past_due", "trialing"].includes(sub.status) || sub.cancel_at_period_end) continue;
+          const item = sub.items.data[0];
+          lines.push({ ...subscriptionLine(sub, item.current_period_end, periodEnd(item.current_period_end, item.price.recurring.interval)), id: nextId("il_tmp") });
+        }
+        // So do the customer's pending invoice items.
+        for (const item of state.invoiceItems.values()) {
+          if (item.customer !== params.customer || item.invoice) continue;
+          lines.push({
+            id: nextId("il_tmp"),
+            object: "line_item",
+            amount: item.amount,
+            period: { start: fake.nowSec, end: fake.nowSec },
+            parent: { type: "invoice_item_details", invoice_item_details: { invoice_item: item.id } },
+            pricing: null,
+          });
+        }
+      }
+      // A customer coupon is inherited unless `discounts` is "".
+      const coupon = params.customer && params.discounts !== "" ? state.customers.get(params.customer)?.discount?.coupon : undefined;
+      const discount = coupon?.amount_off ?? 0;
+      const subtotal = lines.reduce((sum, line) => sum + line.amount, 0) - discount;
+      if (automatic && !placeable(address)) {
+        return {
+          object: "invoice",
+          total: subtotal,
+          subtotal,
+          currency: "usd",
+          total_taxes: [],
+          lines: { object: "list", data: lines, has_more: false },
+          automatic_tax: { enabled: true, status: "requires_location_inputs" },
+        };
+      }
+      const tax = applyTax(lines, address, automatic);
       return {
         object: "invoice",
-        total: price.unit_amount + extra + tax,
-        subtotal: price.unit_amount + extra,
+        total: subtotal + tax,
+        subtotal,
         currency: "usd",
         total_taxes: tax ? [{ amount: tax }] : [],
+        lines: { object: "list", data: lines, has_more: false },
         automatic_tax: { enabled: automatic, status: automatic ? "complete" : null },
       };
     },
@@ -860,6 +949,13 @@ function createFakeStripe(options = {}) {
       calls.length = 0;
     },
 
+    /** A pending invoice item on the customer, attached to no invoice, as one added by hand. */
+    addPendingInvoiceItem(customer, amount) {
+      const id = nextId("ii");
+      state.invoiceItems.set(id, { id, object: "invoiceitem", customer, invoice: null, amount, description: "added by hand" });
+      return id;
+    },
+
     addCustomer(uid, extra = {}) {
       const customer = { id: nextId("cus"), object: "customer", metadata: uid ? { uid } : {}, livemode: fake.livemode, ...extra };
       state.customers.set(customer.id, customer);
@@ -910,8 +1006,8 @@ function createFakeStripe(options = {}) {
     },
 
     /** An active subscription whose first invoice was paid at `nowSec`. */
-    paySubscription({ customer, lookupKey = "web_monthly_standard", metadata = {} }) {
-      const { sub, invoice } = newSubscription({ customer, price: `price_${lookupKey}`, metadata });
+    paySubscription({ customer, lookupKey = "web_monthly_standard", metadata = {}, automaticTax = false }) {
+      const { sub, invoice } = newSubscription({ customer, price: `price_${lookupKey}`, metadata, automaticTax });
       const { charge, paymentIntent } = payInvoiceNow(invoice);
       sub.status = "active";
       emit("customer.subscription.updated", sub);
@@ -1007,7 +1103,7 @@ function createFakeStripe(options = {}) {
      * Makes a new saved card the subscription's default: one that `failsCharges` declines off
      * session, one that `requiresAction` waits for the bank's check.
      */
-    setDefaultCard(subscriptionId, { country = "US", brand = "visa", last4 = "4242", funding = "credit", failsCharges = false, requiresAction = false, declineCode, expMonth = 12, expYear = 2040 } = {}) {
+    setDefaultCard(subscriptionId, { country = "US", brand = "visa", last4 = "4242", funding = "credit", failsCharges = false, requiresAction = false, declineCode, expMonth = 12, expYear = 2040, billing = { country } } = {}) {
       const sub = must(state.subscriptions, subscriptionId, "subscription");
       const id = nextId("pm");
       state.paymentMethods.set(id, {
@@ -1016,6 +1112,7 @@ function createFakeStripe(options = {}) {
         type: "card",
         customer: sub.customer,
         card: { country, brand, last4, funding, exp_month: expMonth, exp_year: expYear, wallet: null },
+        billing_details: { address: { city: null, line1: null, line2: null, postal_code: null, state: null, ...billing } },
         failsCharges,
         requiresAction,
         declineCode,

@@ -52,9 +52,9 @@ export function hasAppCheck(context: CallerContext): boolean {
   return context.app !== undefined && context.app !== null;
 }
 
-/** A refusal the app tells apart from others with the same code by `details.reason`. */
-export function refusal(code: functions.https.FunctionsErrorCode, message: string, reason: string) {
-  return new functions.https.HttpsError(code, message, { reason });
+/** A refusal the app tells apart from others with the same code by `details.reason`; `extra` adds details it reads. */
+export function refusal(code: functions.https.FunctionsErrorCode, message: string, reason: string, extra: Record<string, unknown> = {}) {
+  return new functions.https.HttpsError(code, message, { reason, ...extra });
 }
 
 /** The `details.reason` of a refusal, when it has one. */

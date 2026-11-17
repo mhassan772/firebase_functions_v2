@@ -78,6 +78,8 @@ export interface WebSlotSummary {
   subscriptionId?: string;
   purchaseId?: string;
   lastPaidInvoiceId?: string;
+  /** `lastPaidInvoiceId` carried tax, so the renewal amount the page shows is before tax. */
+  lastPaidTaxed?: boolean;
   paidThrough?: Date;
   plan: string;
   tier?: string;
@@ -245,6 +247,7 @@ export function deriveWebSlot(facts: WebStripeFacts, now: Date): WebDerivation {
     subscriptionId: subscription.id,
     purchaseId: subscription.purchaseId,
     lastPaidInvoiceId: paid?.id,
+    lastPaidTaxed: paid?.taxed === true,
     paidThrough,
     plan: subscription.productId,
     tier: subscription.tier,
@@ -374,6 +377,7 @@ async function readInvoiceFacts(gateway: StripeGateway, invoice: Stripe.Invoice)
   if (typeof invoice.amount_paid === "number") facts.amountPaid = invoice.amount_paid;
   if (invoice.currency) facts.currency = invoice.currency;
   if (periodEnd) facts.periodEnd = periodEnd;
+  if ((invoice.total_taxes ?? []).some((row) => (row.amount ?? 0) > 0)) facts.taxed = true;
   // Only a paid invoice's charge can carry a refund or a dispute.
   if (invoice.status === "paid") facts.charge = await chargeOfInvoice(gateway, invoice);
   return facts;
@@ -520,6 +524,8 @@ export function webSummaryToData(web: WebSlotSummary, readAt: Timestamp): Docume
   if (web.subscriptionId) data.subscriptionId = web.subscriptionId;
   if (web.purchaseId) data.purchaseId = web.purchaseId;
   if (web.lastPaidInvoiceId) data.lastPaidInvoiceId = web.lastPaidInvoiceId;
+  // Written only when true, so an untaxed slot keeps the shape it had before the field existed.
+  if (web.lastPaidTaxed) data.lastPaidTaxed = true;
   if (web.paidThrough) data.paidThrough = Timestamp.fromDate(web.paidThrough);
   if (web.tier) data.tier = web.tier;
   return data;
@@ -543,6 +549,7 @@ export function comparableWebSlot(data: DocumentData | undefined): string | unde
     web.subscriptionId ?? null,
     web.purchaseId ?? null,
     web.lastPaidInvoiceId ?? null,
+    web.lastPaidTaxed === true,
     millis(web.paidThrough),
     web.plan ?? null,
     web.tier ?? null,

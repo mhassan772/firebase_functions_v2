@@ -23,9 +23,13 @@ import {
   keepsAttempt,
   keepsPending,
   lifetimePurchaseIn,
+  lifetimeQuoteRequest,
   lifetimeRequest,
   lifetimeSummary,
   loadAnnouncement,
+  provinceAnswer,
+  countryName,
+  countryNoticeText,
   onlyTaxAdded,
   payButtonState,
   payNote,
@@ -93,7 +97,8 @@ type ShownError =
         | "chargeVerifyNotCompleted"
         | "stripeUnavailable"
         | "authenticationNotCompleted"
-        | "provinceMissing";
+        | "provinceMissing"
+        | "provinceRefused";
     };
 
 /// A panel opens in place of the control or section that opened it, and only one at a time.
@@ -132,9 +137,13 @@ const replace = {
 
 /// The switch to yearly or the upgrade to lifetime, charged to the saved card.
 const charge = {
-  status: "loading" as "loading" | "failed" | "ready",
+  /// `province`: the upgrade's saved address needs a Canadian province before it can be quoted.
+  status: "loading" as "loading" | "failed" | "ready" | "province",
   quote: null as SwitchQuote | LifetimeQuote | null,
   loadError: null as Refusal | null,
+  /// The province select is shown, and `province` is sent with the quote and the upgrade.
+  needProvince: false,
+  province: "",
   /// The confirmation the server may already hold; see `keepsAttempt`.
   attemptId: null as string | null,
   loadId: 0,
@@ -371,6 +380,9 @@ function updateControls() {
     ...(account?.sections ?? []).map((section) => `slot-${section.kind}`),
     "replace-error",
     "replace-actions",
+    // The quote's province button sits in the body.
+    "charge-body",
+    "charge-province",
     "charge-error",
     "charge-actions",
     "acknowledge-region",
@@ -444,6 +456,8 @@ function closePanel() {
   charge.quote = null;
   charge.loadError = null;
   charge.attemptId = null;
+  charge.needProvince = false;
+  charge.province = "";
   panel.kind = null;
   panel.slot = "";
 }
@@ -675,20 +689,22 @@ function chargeKind(): ChargeKind {
   return panel.kind === "lifetime" ? "lifetime" : "switch";
 }
 
-/// Asks the server what the charge costs now; the panel's heading keeps focus meanwhile.
+/// Asks the server what the charge costs now; the panel's heading keeps focus meanwhile, or the
+/// province's button when the amount is worked out after choosing one.
 async function loadChargeQuote() {
   const session = gate.session;
   if (!session) return;
   const kind = chargeKind();
   const loadId = ++charge.loadId;
+  const province = charge.needProvince ? charge.province : null;
   charge.status = "loading";
   charge.loadError = null;
-  regions.update("charge-body", "charge-actions");
+  regions.update("charge-body", "charge-province", "charge-actions");
   let answer: SwitchResult | LifetimeResult;
   try {
     answer = kind === "switch"
       ? await manageWebSubscription(session.app, { action: "quote_switch_yearly" })
-      : await manageWebSubscription(session.app, { action: "quote_lifetime" });
+      : await manageWebSubscription(session.app, lifetimeQuoteRequest(province));
   } catch (error) {
     if (loadId !== charge.loadId) return;
     const refusal = refusalFrom(error);
@@ -700,18 +716,71 @@ async function loadChargeQuote() {
       await reloadAfter(unavailableText());
       return;
     }
+    const asked = provinceAnswer(refusal, province);
+    if (asked === "ask") {
+      // The saved Canadian address has no province: the same select as the purchase asks for it.
+      charge.needProvince = true;
+      charge.status = "province";
+      regions.update("charge-body", "charge-province", "charge-actions");
+      focusSelector("#province");
+      announce(t().provinceNeededUpgrade);
+      return;
+    }
+    if (asked === "refused") {
+      provinceRefused();
+      return;
+    }
     charge.status = "failed";
     charge.loadError = refusal;
-    regions.update("charge-body", "charge-actions");
+    regions.update("charge-body", "charge-province", "charge-actions");
     announce(quoteFailureText(refusal));
     return;
   }
   if (loadId !== charge.loadId || answer.status !== "quote") return;
   charge.quote = answer.quote;
   charge.status = "ready";
-  regions.update("charge-body", "charge-actions");
+  regions.update("charge-body", "charge-province", "charge-actions");
+  // The province's button is gone with the select; the amounts take focus instead.
+  if (province) focusSelector("#charge-summary");
   const total = formatMoney(answer.quote.total, answer.quote.currency, lang);
   announce(kind === "switch" ? t().switchQuoteReady(total) : t().lifetimeQuoteReady(total));
+}
+
+/// The province sent did not complete the address: back to the question, with the error at the select.
+function provinceRefused() {
+  charge.quote = null;
+  charge.attemptId = null;
+  charge.needProvince = true;
+  charge.status = "province";
+  regions.update("charge-body", "charge-province", "charge-actions");
+  showError({ kind: "provinceRefused" }, "province");
+}
+
+/// "Change" next to the quote's province: the select comes back and the quote is dropped, so
+/// nothing can be confirmed against a total worked out for another province.
+function onChangeProvince() {
+  if (page.busy) return;
+  charge.quote = null;
+  charge.attemptId = null;
+  charge.status = "province";
+  page.error = null;
+  regions.update("charge-body", "charge-province", "charge-error", "charge-actions");
+  focusSelector("#province");
+  announce(t().provinceNeededUpgrade);
+}
+
+/// "Work out the amount" after choosing a province: quotes again with it, or asks for it first.
+async function onProvinceQuote() {
+  if (page.busy) return;
+  if (!charge.province) {
+    showError({ kind: "provinceMissing" }, "province");
+    return;
+  }
+  page.error = null;
+  // The loading line in the panel says what is happening; the button only shows it is busy.
+  setBusy("charge");
+  await loadChargeQuote();
+  if (page.busy === "charge") setBusy(null);
 }
 
 function unavailableText(): string {
@@ -728,7 +797,7 @@ async function onConfirmCharge() {
   try {
     result = charge.quote.plan === "web_yearly"
       ? await manageWebSubscription(session.app, switchRequest(charge.quote, charge.attemptId, lang))
-      : await manageWebSubscription(session.app, lifetimeRequest(charge.quote, charge.attemptId, lang));
+      : await manageWebSubscription(session.app, lifetimeRequest(charge.quote, charge.attemptId, lang, charge.quote.billingState ?? null));
   } catch (error) {
     await chargeFailed(error);
     return;
@@ -789,6 +858,10 @@ async function afterChargeAnswer(result: SwitchResult | LifetimeResult) {
 
 async function chargeFailed(error: unknown) {
   const refusal = refusalFrom(error);
+  if (chargeKind() === "lifetime" && provinceAnswer(refusal, charge.quote?.plan === "web_lifetime" ? charge.quote.billingState ?? null : null) === "refused") {
+    provinceRefused();
+    return;
+  }
   if (refusal.kind === "switchUnavailable" || refusal.kind === "lifetimeUnavailable" || refusal.kind === "noSubscription") {
     charge.attemptId = null;
     await reloadAfter(unavailableText());
@@ -1026,9 +1099,12 @@ async function purchaseRefused(refusal: Refusal) {
       return;
     case "billingAddressIncomplete":
       if (asksForProvince(refusal, form.billingCountry)) {
+        // Not an error yet: the select appears with its hint, which is what is said.
         form.needProvince = true;
-        regions.update("pay-region");
-        showError({ kind: "provinceMissing" }, "province");
+        page.error = null;
+        setBusy(null);
+        focusSelector("#province");
+        announce(t().provinceNeeded);
         return;
       }
       showError(refusal, "card");
@@ -1152,6 +1228,10 @@ function quoteFailureText(refusal: Refusal): string {
       return s.salesDisabled;
     case "noAnswer":
       return s.actionNoAnswer;
+    case "billingAddressIncomplete":
+      return s.upgradeAddressMissing;
+    case "countryUnavailable":
+      return countryNoticeText({ country: refusal.country, subscribed: true }, s, lang);
     default:
       return s.switchQuoteFailed;
   }
@@ -1159,6 +1239,12 @@ function quoteFailureText(refusal: Refusal): string {
 
 function errorText(error: ShownError, place: Place): string {
   return isPurchasePlace(place) ? purchaseErrorText(error) : manageErrorText(error, place);
+}
+
+/// The account already has a subscription, from this site or a store, so it is not sent to subscribe in the app.
+function holdsSubscription(): boolean {
+  const held = subscription !== null && subscription.state !== "none" && subscription.state !== "ended";
+  return held || account?.status.kind === "storeRenews";
 }
 
 function purchaseErrorText(error: ShownError): string {
@@ -1171,7 +1257,11 @@ function purchaseErrorText(error: ShownError): string {
     case "authenticationNotCompleted":
       return s.authenticationNotCompleted;
     case "provinceMissing":
-      return s.provinceNeeded;
+      return s.provinceFirst;
+    case "provinceRefused":
+      return s.provinceRefused;
+    case "countryUnavailable":
+      return `${s.nothingCharged} ${countryNoticeText({ country: error.country, subscribed: holdsSubscription() }, s, lang)}`;
     case "tokenInvalid":
       return s.tokenExpired;
     case "cardRequired":
@@ -1238,6 +1328,11 @@ function manageErrorText(error: ShownError, place: Place): string {
       return s.noSubscriptionError;
     case "noActionRequired":
       return s.noActionRequiredError;
+    case "countryUnavailable":
+      // A saved card is refused for its country; a switch or an upgrade charged nothing.
+      return place === "replace"
+        ? s.countryUnavailableCard(countryName(error.country, lang))
+        : `${s.nothingCharged} ${countryNoticeText({ country: error.country, subscribed: true }, s, lang)}`;
     case "accountDeleted":
       return s.accountDeleted;
     case "noAnswer":
@@ -1317,7 +1412,8 @@ function readyView(v: AccountView): Node[] {
     statusBlock(v),
     regions.create("actions-error", () => [errorFor("actions")]),
     v.primary && v.primary.kind !== "pay" ? slot("primary", primaryControl) : null,
-    ...v.sections.map((section) => sectionView(section, slot)),
+    // The blocked-country notice is about selling; the card panel saves a card, which still works.
+    ...v.sections.filter((section) => !(section.kind === "countryUnavailable" && panel.kind === "card")).map((section) => sectionView(section, slot)),
     v.cancel ? regions.create("cancel-region", cancelLink, { class: "cancel-row" }) : null,
     signOutRegion(),
   ]);
@@ -1442,6 +1538,9 @@ function sectionView(section: Section, slot: (id: string, build: () => (Node | n
       return h("div", { class: "block" }, h("h2", {}, s.continueAfterHeading), ...purchaseView(section.purchase));
     case "purchase":
       return h("div", { class: "block" }, ...purchaseView(section.purchase));
+    case "countryUnavailable":
+      // In place of every sale: no card form and no pay button.
+      return h("div", { class: "block" }, notice("warn", s, h("p", {}, countryNoticeText(section, s, lang))));
   }
 }
 
@@ -1566,6 +1665,11 @@ function chargePanel(): Node {
     h("h2", { id: `${panel.kind}-heading`, tabindex: -1 }, lifetime ? s.upgradeLifetime : s.switchYearly),
     h("p", {}, lifetime ? s.lifetimeIntro : s.switchIntro),
     regions.create("charge-body", chargeBody),
+    regions.create("charge-province", () => [
+      charge.needProvince && charge.status !== "ready" && charge.status !== "failed"
+        ? provinceField(charge.province, s.provinceNeededUpgrade, "charge-province", (value) => (charge.province = value))
+        : null,
+    ]),
     regions.create("charge-error", () => [errorFor("charge")]),
     regions.create("charge-actions", chargeActions),
   );
@@ -1574,7 +1678,9 @@ function chargePanel(): Node {
 /// The quote's rows and notes, from the summary of the panel's kind.
 function chargeSummary(): SwitchSummary {
   const quote = charge.quote!;
-  return quote.plan === "web_yearly" ? switchSummary(quote, subscription?.state ?? "active", t(), lang) : lifetimeSummary(quote, t(), lang);
+  return quote.plan === "web_yearly"
+    ? switchSummary(quote, subscription?.state ?? "active", t(), lang, subscription?.renewalTaxed === true)
+    : lifetimeSummary(quote, t(), lang, subscription?.state ?? "active");
 }
 
 function chargeBody(): (Node | null)[] {
@@ -1582,11 +1688,21 @@ function chargeBody(): (Node | null)[] {
   switch (charge.status) {
     case "loading":
       return [h("p", { class: "muted", role: "status" }, s.loadingSwitchQuote)];
+    case "province":
+      // The select's label and hint say it all.
+      return [];
     case "failed":
       return [
         notice("danger", s, h("p", {}, quoteFailureText(charge.loadError ?? { kind: "generic" }))),
-        // The panel's only action besides Back, so the one filled control on screen.
-        h("button", { type: "button", id: "charge-retry", class: "btn", onclick: () => void loadChargeQuote() }, s.retry),
+        // The panel's only action besides Back, so the one filled control on screen; none when
+        // trying again cannot help.
+        charge.loadError?.kind === "countryUnavailable"
+          ? null
+          : h("button", { type: "button", id: "charge-retry", class: "btn", onclick: () => void loadChargeQuote() }, s.retry),
+        // No address to tax at: a card change saves the new card's address.
+        charge.loadError?.kind === "billingAddressIncomplete"
+          ? h("button", { type: "button", id: "charge-change-card", class: "btn secondary", onclick: () => changeCardAfterDecline() }, s.changeCard)
+          : null,
       ];
     case "ready": {
       const summary = chargeSummary();
@@ -1599,6 +1715,21 @@ function chargeBody(): (Node | null)[] {
           // Inside the summary the confirm button points at, so the terms are part of what it says.
           h("p", {}, termsLine(s, lang)),
         ),
+        // Outside the summary, so the confirm button's description never reads it.
+        charge.quote?.plan === "web_lifetime" && charge.quote.billingState
+          ? h(
+              "button",
+              {
+                type: "button",
+                id: "charge-change-province",
+                class: "btn secondary",
+                "aria-label": s.provinceChangeLabel,
+                "aria-disabled": page.busy !== null ? "true" : undefined,
+                onclick: () => onChangeProvince(),
+              },
+              s.provinceChange,
+            )
+          : null,
       ];
     }
   }
@@ -1610,7 +1741,22 @@ function chargeActions(): (Node | null)[] {
   const ready = charge.status === "ready" && charge.quote !== null;
   const declined = page.error?.place === "charge" && page.error.error.kind === "declined";
   const describedBy = [page.error?.place === "charge" ? "charge-error-text" : "", ready ? "charge-summary" : ""].filter(Boolean).join(" ");
+  const asking = charge.needProvince && (charge.status === "province" || charge.status === "loading");
   return [
+    asking
+      ? h(
+          "button",
+          {
+            type: "button",
+            id: "charge-quote",
+            class: "btn",
+            "aria-disabled": busy ? "true" : undefined,
+            "aria-busy": page.busy === "charge" ? "true" : undefined,
+            onclick: () => void onProvinceQuote(),
+          },
+          page.busy === "charge" ? page.progress || s.loadingSwitchQuote : s.provinceWorkOut,
+        )
+      : null,
     ready
       ? h(
           "button",
@@ -1800,7 +1946,7 @@ function payRegion(): (Node | null)[] {
   });
   const amount = formatMoney(total, offer.currency, lang);
   return [
-    form.needProvince ? provinceField() : null,
+    form.needProvince ? provinceField(form.province, s.provinceNeeded, "pay-region", (value) => (form.province = value)) : null,
     quote ? quoteView(offer, quote) : null,
     errorFor("pay"),
     // The terms sentence stays inside the note the pay button points at.
@@ -1821,7 +1967,9 @@ function payRegion(): (Node | null)[] {
   ];
 }
 
-function provinceField(): Node {
+/// The Canadian province select, in the purchase's pay region or the upgrade panel's own region,
+/// whichever `region` names; its hint says what it is for there.
+function provinceField(value: string, hint: string, region: string, onChoose: (value: string) => void): Node {
   const s = t();
   const invalid = page.error?.place === "province";
   const select = h(
@@ -1831,25 +1979,26 @@ function provinceField(): Node {
       name: "province",
       required: true,
       "aria-invalid": invalid ? "true" : undefined,
-      "aria-describedby": invalid ? "province-error-text" : "province-hint",
+      // The hint stays read with the error, which is short and says only what is missing.
+      "aria-describedby": invalid ? "province-hint province-error-text" : "province-hint",
       onchange: (event: Event) => {
-        form.province = (event.target as HTMLSelectElement).value;
+        onChoose((event.target as HTMLSelectElement).value);
         if (page.error?.place === "province") {
           page.error = null;
-          regions.update("pay-region");
+          regions.update(region);
         }
       },
     },
     h("option", { value: "" }, s.provinceChoose),
     ...Object.entries(s.provinces).map(([code, name]) => h("option", { value: code }, name)),
   );
-  select.value = form.province;
+  select.value = value;
   select.disabled = page.busy !== null;
   return h(
     "div",
     { class: "group" },
     h("label", { for: "province" }, s.provinceLabel),
-    h("p", { id: "province-hint", class: "muted small" }, s.provinceNeeded),
+    h("p", { id: "province-hint", class: "muted small" }, hint),
     h("div", { class: `field select${invalid ? " invalid" : ""}` }, select),
     errorFor("province"),
   );

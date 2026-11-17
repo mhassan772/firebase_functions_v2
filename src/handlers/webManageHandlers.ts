@@ -22,16 +22,20 @@ import {
 } from "../services/webSubscriptions/ledger";
 import { stopPendingStripeSide } from "../services/webSubscriptions/pendingSweep";
 import {
+  assertSaleAllowed,
   cardFromToken,
   chargedTier,
   dearerTier,
   invoiceAmounts,
+  knownCountryList,
   KnownTier,
   knownTier,
   lookupKeyFor,
   quoteTotal,
   savedCardOf,
   SavedCard,
+  saveTaxAddress,
+  TaxAddress,
   tierOfCountry,
   unusedTimeCredit,
   WebPrice,
@@ -70,6 +74,7 @@ import {
   awaitSettled,
   createLifetimeInvoice,
   createLockedEntry,
+  readBillingState,
   lockHolderNow,
   PURCHASE_ID_PATTERN,
   PURCHASE_LOCK_MS,
@@ -91,6 +96,13 @@ export interface WebSubscriptionResult {
   plan?: string;
   /** The amount the next renewal charges before tax, or what lifetime cost. Integer cents. */
   amount?: number;
+  /**
+   * True when the subscription's renewals are taxed, read from the slot's `web.lastPaidTaxed` (its
+   * latest paid invoice carried tax, recorded by the sync), so the page says `amount` is before tax
+   * ("plus tax"). False when it carried none or there is no subscription. Added after the first page shipped, which ignores it; the page reads
+   * a missing value as false.
+   */
+  renewalTaxed: boolean;
   currency?: string;
   /** ISO 8601. */
   renewsAt?: string;
@@ -142,6 +154,7 @@ export async function handleGetWebSubscription(
     const view = webSlotView(slots.web, now);
     const result: WebSubscriptionResult = {
       state: view.state,
+      renewalTaxed: (view.state === "active" || view.state === "cancelling") && view.lastPaidTaxed,
       storeSubscription: storeSubscriptionOf(slots, now),
       premium: existingPremium(slots, now),
       livemode: gateway.livemode,
@@ -235,12 +248,13 @@ export type SwitchResult = { status: "quote"; quote: SwitchQuote } | { status: "
 export type LifetimeResult = { status: "quote"; quote: LifetimeQuote } | { status: "reprice"; quote: LifetimeQuote } | ChargeOutcome;
 
 type ManageRequest =
-  | { action: "cancel" | "resume" | "authenticate" | "quote_switch_yearly" | "quote_lifetime" }
+  | { action: "cancel" | "resume" | "authenticate" | "quote_switch_yearly" }
+  | { action: "quote_lifetime"; billingState?: string }
   | { action: "replace_card"; confirmationToken: string; acceptedRenewalAmount?: number }
   | { action: "finish_replace_card"; setupIntentId: string }
   | { action: "switch_yearly"; acceptedTotal: number; attemptId: string; lang: "ar" | "en" }
   | { action: "finish_switch_yearly"; purchaseId: string }
-  | { action: "buy_lifetime"; acceptedTotal: number; attemptId: string; lang: "ar" | "en" }
+  | { action: "buy_lifetime"; acceptedTotal: number; attemptId: string; lang: "ar" | "en"; billingState?: string }
   | { action: "finish_lifetime"; purchaseId: string };
 
 /** A random id the page makes once per confirmation, such as a UUID. */
@@ -253,15 +267,32 @@ function readManageRequest(data: unknown): ManageRequest {
     case "resume":
     case "authenticate":
     case "quote_switch_yearly":
-    case "quote_lifetime":
       readRequestObject(data, ["action"]);
       return { action };
-    case "switch_yearly":
-    case "buy_lifetime": {
+    case "quote_lifetime": {
+      // `billingState`: the province the buyer chose after `billing_address_incomplete` with `province: true`.
+      const request = readRequestObject(data, ["action", "billingState"]);
+      const billingState = readBillingState(request.billingState);
+      return { action, ...(billingState ? { billingState } : {}) };
+    }
+    case "switch_yearly": {
       const request = readRequestObject(data, ["action", "acceptedTotal", "attemptId", "lang"]);
       const acceptedTotal = optionalCents(request.acceptedTotal);
       if (acceptedTotal === undefined) throw invalidRequest();
       return { action, acceptedTotal, attemptId: requiredString(request.attemptId, ATTEMPT_ID_PATTERN), lang: readWebLang(request.lang) };
+    }
+    case "buy_lifetime": {
+      const request = readRequestObject(data, ["action", "acceptedTotal", "attemptId", "lang", "billingState"]);
+      const acceptedTotal = optionalCents(request.acceptedTotal);
+      if (acceptedTotal === undefined) throw invalidRequest();
+      const billingState = readBillingState(request.billingState);
+      return {
+        action,
+        acceptedTotal,
+        attemptId: requiredString(request.attemptId, ATTEMPT_ID_PATTERN),
+        lang: readWebLang(request.lang),
+        ...(billingState ? { billingState } : {}),
+      };
     }
     case "finish_switch_yearly":
     case "finish_lifetime": {
@@ -360,6 +391,7 @@ export async function handleManageWebSubscription(
         break;
       case "quote_switch_yearly":
         assertSwitchable(ctx);
+        await assertChargeAllowed(ctx);
         result = { status: "quote", quote: (await planSwitch(ctx)).quote };
         break;
       case "switch_yearly":
@@ -370,7 +402,8 @@ export async function handleManageWebSubscription(
         break;
       case "quote_lifetime":
         assertUpgradable(ctx);
-        result = { status: "quote", quote: (await planLifetime(ctx)).quote };
+        await assertChargeAllowed(ctx);
+        result = { status: "quote", quote: (await planLifetime(ctx, "ar", request.billingState)).quote };
         break;
       case "buy_lifetime":
         result = await buyLifetime(ctx, request, context);
@@ -464,6 +497,22 @@ async function authenticate(ctx: ManageContext): Promise<ManageWebSubscriptionRe
   throw refusal("failed-precondition", "No payment is waiting for verification.", "no_action_required");
 }
 
+/**
+ * Refuses a switch or an upgrade when the buyer is in a country this site does not sell in, by
+ * the account's known countries, the saved card's country and the customer's address country.
+ * Called by the quote actions too, so a blocked buyer is told when the panel opens.
+ */
+async function assertChargeAllowed(ctx: ManageContext): Promise<void> {
+  const { config, gateway } = ctx.gate;
+  if (config.blockedCountries.length === 0) return;
+  const known = knownCountryList(await ctx.deps.storeCountry.knownCountries(ctx.uid));
+  assertSaleAllowed(config, { known });
+  const card = await savedCardOf(gateway, idOf(ctx.subscription.default_payment_method as string | { id: string } | null), ctx.customerId);
+  const customer = await gateway.retrieveCustomer(ctx.customerId);
+  const billing = "deleted" in customer && customer.deleted ? null : (customer as Stripe.Customer).address?.country ?? null;
+  assertSaleAllowed(config, { known, card: card?.country ?? null, billing });
+}
+
 /** The tier of the subscription's current price: the tier whose price for the plan has its lookup key. */
 function currentTier(config: WebPricingConfig, subscription: Stripe.Subscription, plan: WebPlan): string {
   const lookupKey = subscription.items.data[0]?.price?.lookup_key;
@@ -495,6 +544,12 @@ async function replaceCard(
     logWebInfo("web_subscription_manage_token_refused", ctx.operationId, { uid: ctx.uid, problem })
   );
   const card = cardFromToken(token);
+  // Before any SetupIntent: the saved card and the subscription stay as they are. Only the new
+  // card counts, never the account's known country: a card change keeps a subscription alive.
+  assertSaleAllowed(ctx.gate.config, {
+    card: card.country,
+    billing: token.payment_method_preview?.billing_details?.address?.country ?? null,
+  });
   const change = await priceChangeFor(ctx, card.country);
   if (change && acceptedRenewalAmount !== change.price.amount) {
     logWebInfo("web_subscription_manage_reprice", ctx.operationId, {
@@ -744,6 +799,8 @@ async function switchYearly(
 
   await consumeWebThrottle(ctx.deps, ctx.uid, context);
   assertSwitchable(ctx);
+  // Before the earlier switch's invoice is voided: a refused buyer changes nothing at Stripe.
+  await assertChargeAllowed(ctx);
   // Checked before voiding an earlier attempt's invoice, which may belong to a call still waiting
   // for its bank step; the lock itself is taken with the entry below.
   if (await lockHolderNow(ctx)) throw purchaseInProgress();
@@ -1093,6 +1150,8 @@ export interface LifetimeQuote {
   creditedPlan: WebPlan;
   /** Left out when the saved card cannot be read; nothing can then be charged. */
   card?: { brand: string; last4: string };
+  /** The province the buyer chose, when the quote was taxed with it; send it back with `buy_lifetime`. */
+  billingState?: string;
 }
 
 /** The credit's line on the invoice, in the buyer's language: Stripe shows it on the receipt. */
@@ -1127,6 +1186,8 @@ interface LifetimePlan {
   known: KnownTier;
   card: SavedCard | undefined;
   description: string;
+  /** With tax on: the address the quote was taxed at, saved by the purchase and recorded on its entry. */
+  taxAddress?: TaxAddress;
 }
 
 /**
@@ -1134,7 +1195,7 @@ interface LifetimePlan {
  * for the subscription's latest paid invoice at this moment. The credit moves with time, so
  * `buyLifetime` quotes again and compares.
  */
-async function planLifetime(ctx: ManageContext, lang: "ar" | "en" = "ar"): Promise<LifetimePlan> {
+async function planLifetime(ctx: ManageContext, lang: "ar" | "en" = "ar", billingState?: string): Promise<LifetimePlan> {
   const { config, gateway, prices } = ctx.gate;
   const card = await savedCardOf(gateway, idOf(ctx.subscription.default_payment_method as string | { id: string } | null), ctx.customerId);
   const known = knownTier(config, await ctx.deps.storeCountry.knownCountries(ctx.uid));
@@ -1151,6 +1212,8 @@ async function planLifetime(ctx: ManageContext, lang: "ar" | "en" = "ar"): Promi
     taxEnabled: config.taxEnabled,
     customer: ctx.customerId,
     ...(credit > 0 ? { credit: { amount: credit, description } } : {}),
+    ...(billingState ? { billingState } : {}),
+    ...(card?.billingAddress ? { fallbackAddress: card.billingAddress } : {}),
   });
   const quote: LifetimeQuote = {
     plan: "web_lifetime",
@@ -1164,7 +1227,8 @@ async function planLifetime(ctx: ManageContext, lang: "ar" | "en" = "ar"): Promi
   };
   const shown = shownCard(card);
   if (shown) quote.card = shown;
-  return { quote, price, known, card, description };
+  if (total.taxAddress?.billingState) quote.billingState = total.taxAddress.billingState;
+  return { quote, price, known, card, description, taxAddress: total.taxAddress };
 }
 
 /**
@@ -1178,7 +1242,7 @@ async function planLifetime(ctx: ManageContext, lang: "ar" | "en" = "ar"): Promi
  */
 async function buyLifetime(
   ctx: ManageContext,
-  request: { acceptedTotal: number; attemptId: string; lang: "ar" | "en" },
+  request: { acceptedTotal: number; attemptId: string; lang: "ar" | "en"; billingState?: string },
   context: WebCallerContext
 ): Promise<LifetimeResult> {
   const { gateway } = ctx.gate;
@@ -1190,11 +1254,12 @@ async function buyLifetime(
 
   await consumeWebThrottle(ctx.deps, ctx.uid, context);
   assertUpgradable(ctx);
+  await assertChargeAllowed(ctx);
   if (await lockHolderNow(ctx)) throw purchaseInProgress();
   // A switch left waiting would otherwise stay payable on a subscription about to stop.
   await voidEarlierSwitch(ctx);
 
-  const plan = await planLifetime(ctx, request.lang);
+  const plan = await planLifetime(ctx, request.lang, request.billingState);
   if (plan.quote.total !== request.acceptedTotal) {
     logWebInfo("web_subscription_lifetime_reprice", ctx.operationId, {
       uid: ctx.uid,
@@ -1233,8 +1298,9 @@ async function buyLifetime(
     cardCountry: plan.card.country,
     cardFunding: plan.card.funding,
     wallet: plan.card.wallet,
-    billingCountry: own?.billingCountry ?? null,
-    billingState: own?.billingState ?? null,
+    // The address the upgrade is taxed at, when tax is on; otherwise the subscription's own.
+    billingCountry: plan.taxAddress ? plan.taxAddress.address.country ?? null : own?.billingCountry ?? null,
+    billingState: plan.taxAddress ? plan.taxAddress.address.state ?? null : own?.billingState ?? null,
     livemode: gateway.livemode,
     lang: request.lang,
     status: "pending",
@@ -1250,6 +1316,14 @@ async function buyLifetime(
   }
   const superseded = await clearOlderAttempts(ctx, entry);
   if (superseded) return superseded;
+
+  try {
+    // The only write of a chosen province or a copied card address, now that the buyer confirmed.
+    await saveTaxAddress(gateway, ctx.customerId, plan.taxAddress);
+  } catch (error) {
+    await settleUnstarted(ctx, purchaseId, "abandoned", "billing_address_incomplete");
+    throw error;
+  }
 
   const created = await createLifetimeInvoice(
     ctx,

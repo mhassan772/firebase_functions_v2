@@ -57,13 +57,15 @@ const TEST_COUNTRIES = { EG: "low", TR: "low", SA: "low", AE: "reduced", JO: "re
  * A fake Stripe, the pricing config and the callable dependencies. `known` stands in for the
  * account's known countries (store country has its own tests).
  */
-async function setup({ livemode = false, config = {}, known = { storePurchase: [] }, limits, taxFor } = {}) {
-  const fake = createFakeStripe({ livemode, nowSec: Math.floor(Date.now() / 1000) - 60, taxFor });
+async function setup({ livemode = false, config = {}, known = { storePurchase: [] }, limits, taxFor, taxRates } = {}) {
+  const fake = createFakeStripe({ livemode, nowSec: Math.floor(Date.now() / 1000) - 60, taxFor, taxRates });
   await db().collection("web_pricing").doc("config").set({
     salesEnabled: true,
     taxEnabled: false,
     testers: [UID, OTHER],
     countries: TEST_COUNTRIES,
+    // Many scenarios bill in Canada for tax; the blocked-country tests set their own list.
+    blockedCountries: [],
     ...config,
   });
   const deps = {
@@ -708,10 +710,11 @@ describe("getWebSubscription", () => {
 
   test("none, then active with its renewal, amount and card", async () => {
     const env = await setup();
-    assert.deepEqual(await get(env), { state: "none", storeSubscription: null, premium: [], livemode: false, publishableKey: "pk_test_fake" });
+    assert.deepEqual(await get(env), { state: "none", renewalTaxed: false, storeSubscription: null, premium: [], livemode: false, publishableKey: "pk_test_fake" });
     // A key of the other mode is never handed to the page; the state is still readable.
     assert.deepEqual(await handleGetWebSubscription({}, caller(), { ...env.deps, publishableKey: "pk_live_wrong" }), {
       state: "none",
+      renewalTaxed: false,
       storeSubscription: null,
       premium: [],
       livemode: false,
@@ -725,6 +728,7 @@ describe("getWebSubscription", () => {
       purchaseId: result.purchaseId,
       renewsAt: slot.web.paidThrough.toDate().toISOString(),
       amount: 499,
+      renewalTaxed: false,
       currency: "usd",
       card: { brand: "mastercard", last4: "4242" },
       storeSubscription: null,
@@ -1783,6 +1787,297 @@ describe("upgrade to lifetime", () => {
     ]) {
       await refused(manage(env, data), "invalid-argument", "invalid_request");
     }
+  });
+});
+
+describe("tax on the upgrade, the renewal and the saved address", () => {
+  const manage = (env, data, uid = UID) => handleManageWebSubscription(data, caller(uid), env.deps);
+  const outboxRows = async () => (await db().collection(WEB_EMAIL_OUTBOX_COLLECTION).get()).docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+  let attempts = 0;
+  const attemptId = () => `taxed-${Date.now()}-${++attempts}-aaaaaaaa`;
+  const RATES = { ON: 0.13, AB: 0.05 };
+  const ONTARIO = { country: "CA", state: "ON", postal_code: "M5V 3L9" };
+  /** What Stripe Tax charges at `rate` on these lines: each line's tax rounded on its own. */
+  const taxed = (rate, ...lines) => lines.reduce((sum, amount) => sum + amount + Math.round(amount * rate), 0);
+
+  /** A subscription bought at `billing`, ten days in; `taxEnabled` is the config at purchase. */
+  async function subscribed(plan, { billing = ONTARIO, taxEnabled = true } = {}) {
+    const env = await setup({ config: { taxEnabled }, taxRates: RATES });
+    env.deps.notify = billingNotifier(db());
+    const rate = taxEnabled && billing.country === "CA" ? RATES[billing.state] ?? 0 : 0;
+    const { result } = await buy(env, plan, { token: { country: billing.country, billing }, acceptedTotal: taxed(rate, PRICES[plan]) });
+    assert.equal(result.status, "succeeded", JSON.stringify(result));
+    const subscriptionId = (await read(ledgerRef(result.purchaseId))).stripe.subscriptionId;
+    env.fake.advance(10 * DAY);
+    env.deps.now = () => new Date(env.fake.nowSec * 1000);
+    return { env, firstId: result.purchaseId, subscriptionId, sub: () => env.fake.state.subscriptions.get(subscriptionId) };
+  }
+  const customerOf = (env, subscriptionId) => env.fake.state.customers.get(env.fake.state.subscriptions.get(subscriptionId).customer);
+
+  for (const [label, plan, before] of [
+    ["monthly", "web_monthly"],
+    ["yearly", "web_yearly"],
+    ["a subscription set to cancel", "web_yearly", (env) => manage(env, { action: "cancel" })],
+  ]) {
+    test(`an upgrade from ${label} with tax on: the quote is the invoice's total, paid on the first confirmation, recorded and emailed`, async () => {
+      const { env, subscriptionId } = await subscribed(plan);
+      if (before) await before(env);
+      const { quote } = await manage(env, { action: "quote_lifetime" });
+      const tax = Math.round(14999 * 0.13) + Math.round(-quote.credit * 0.13);
+      assert.ok(quote.credit > 0, `credit ${quote.credit}`);
+      assert.deepEqual([quote.amount, quote.tax, quote.total], [14999, tax, 14999 - quote.credit + tax]);
+      const answer = await manage(env, { action: "buy_lifetime", acceptedTotal: quote.total, attemptId: attemptId(), lang: "en" });
+      assert.equal(answer.status, "succeeded", "no reprice: the quote is what the invoice charges");
+      const invoice = [...env.fake.state.invoices.values()].find((row) => row.billing_reason === "manual");
+      assert.deepEqual([invoice.total, invoice.total_taxes[0].amount, invoice.status], [quote.total, tax, "paid"]);
+      assert.equal(env.fake.state.subscriptions.get(subscriptionId).status, "canceled");
+      const entry = await read(ledgerRef(answer.purchaseId));
+      assert.deepEqual([entry.amount, entry.credit, entry.tax, entry.total], [14999, quote.credit, tax, quote.total]);
+      const email = (await outboxRows()).find((row) => row.id === `confirmed_${answer.purchaseId}`);
+      assert.deepEqual([email.amount, email.credit, email.tax, email.total], [14999, quote.credit, tax, quote.total]);
+    });
+  }
+
+  test("a buyer whose saved Canadian address has no province is asked for one; the quote saves nothing, the purchase saves it and records it", async () => {
+    const { env, subscriptionId } = await subscribed("web_monthly", { billing: { country: "CA" }, taxEnabled: false });
+    assert.deepEqual(customerOf(env, subscriptionId).address, { country: "CA" }, "the purchase saved the address while tax was off");
+    await db().collection("web_pricing").doc("config").update({ taxEnabled: true });
+    const asked = await refused(manage(env, { action: "quote_lifetime" }), "invalid-argument", "billing_address_incomplete");
+    assert.equal(asked.details.province, true);
+    await refused(manage(env, { action: "quote_lifetime", billingState: null }), "invalid-argument", "billing_address_incomplete");
+    for (const billingState of ["<b>", "Ontario", "on", "XX", 13]) {
+      await refused(manage(env, { action: "quote_lifetime", billingState }), "invalid-argument", "invalid_request");
+    }
+    env.fake.resetCalls();
+    const { quote } = await manage(env, { action: "quote_lifetime", billingState: "ON" });
+    assert.deepEqual(customerOf(env, subscriptionId).address, { country: "CA" }, "a quote writes nothing");
+    assert.equal(env.fake.callNames().includes("updateCustomer"), false);
+    assert.equal(quote.billingState, "ON", "the quote names the province it was taxed at");
+    assert.equal(quote.tax, Math.round(14999 * 0.13) + Math.round(-quote.credit * 0.13));
+    const preview = env.fake.calls.find((call) => call.name === "createInvoicePreview").args.params;
+    assert.deepEqual([preview.customer, preview.customer_details.address], [undefined, { country: "CA", state: "ON" }]);
+    const answer = await manage(env, { action: "buy_lifetime", acceptedTotal: quote.total, attemptId: attemptId(), lang: "ar", billingState: "ON" });
+    assert.equal(answer.status, "succeeded");
+    assert.deepEqual(customerOf(env, subscriptionId).address, { country: "CA", state: "ON" }, "saved by the purchase");
+    const names = env.fake.callNames();
+    assert.ok(names.lastIndexOf("updateCustomer") < names.indexOf("createInvoice"), "saved just before the invoice");
+    assert.deepEqual(env.fake.calls.filter((call) => call.name === "updateCustomer").at(-1).args.params.tax, { validate_location: "immediately" });
+    const entry = await read(ledgerRef(answer.purchaseId));
+    assert.deepEqual([entry.total, entry.billingCountry, entry.billingState], [quote.total, "CA", "ON"]);
+  });
+
+  test("billingState is ignored where Stripe can place the address: a postal code on file, or outside Canada", async () => {
+    for (const billing of [{ country: "CA", postal_code: "T2P 1J9" }, { country: "US", postal_code: "10001" }]) {
+      const { env, subscriptionId } = await subscribed("web_yearly", { billing, taxEnabled: false });
+      await db().collection("web_pricing").doc("config").update({ taxEnabled: true });
+      const before = structuredClone(customerOf(env, subscriptionId).address);
+      const { quote } = await manage(env, { action: "quote_lifetime", billingState: "AB" });
+      assert.equal(quote.billingState, undefined);
+      const preview = env.fake.calls.filter((call) => call.name === "createInvoicePreview").at(-1).args.params;
+      assert.deepEqual(preview.customer_details.address, before, "taxed at the address on file");
+      const answer = await manage(env, { action: "buy_lifetime", acceptedTotal: quote.total, attemptId: attemptId(), lang: "en", billingState: "AB" });
+      assert.equal(answer.status, "succeeded");
+      assert.deepEqual(customerOf(env, subscriptionId).address, before, "nothing saved");
+      assert.equal(env.fake.callNames().filter((name) => name === "updateCustomer").length, 1, "only the first purchase's");
+      const entry = await read(ledgerRef(answer.purchaseId));
+      assert.deepEqual([entry.billingCountry, entry.billingState], [billing.country, null]);
+      await clearFirestore();
+    }
+  });
+
+  test("a pending invoice item and a customer coupon change neither the quote nor the charge, so the purchase never loops", async () => {
+    const { env, subscriptionId } = await subscribed("web_yearly");
+    const customer = env.fake.state.subscriptions.get(subscriptionId).customer;
+    env.fake.addPendingInvoiceItem(customer, 700);
+    env.fake.state.customers.get(customer).discount = { coupon: { amount_off: 1000 } };
+    const { quote } = await manage(env, { action: "quote_lifetime" });
+    const tax = Math.round(14999 * 0.13) + Math.round(-quote.credit * 0.13);
+    assert.deepEqual([quote.tax, quote.total], [tax, 14999 - quote.credit + tax]);
+    // What a preview naming the customer would have said, to show the difference matters.
+    const withCustomer = await env.fake.createInvoicePreview({
+      customer, automatic_tax: { enabled: true }, currency: "usd",
+      invoice_items: [{ price: "price_web_lifetime_standard" }, { amount: -quote.credit, currency: "usd" }],
+    });
+    assert.notEqual(withCustomer.total, quote.total);
+    const answer = await manage(env, { action: "buy_lifetime", acceptedTotal: quote.total, attemptId: attemptId(), lang: "en" });
+    assert.equal(answer.status, "succeeded", "no reprice");
+    const invoice = [...env.fake.state.invoices.values()].find((row) => row.billing_reason === "manual");
+    assert.deepEqual([invoice.total, invoice.lines.data.length], [quote.total, 2]);
+    assert.equal(env.fake.calls.find((call) => call.name === "createInvoice").args.params.discounts, "");
+  });
+
+  test("no country on file: the saved card's billing address is quoted, then saved and recorded by the purchase; without one either, nothing is charged and no province is asked", async () => {
+    const { env, subscriptionId } = await subscribed("web_yearly");
+    customerOf(env, subscriptionId).address = undefined;
+    const { quote } = await manage(env, { action: "quote_lifetime" });
+    assert.equal(quote.tax, Math.round(14999 * 0.13) + Math.round(-quote.credit * 0.13));
+    assert.equal(customerOf(env, subscriptionId).address, undefined, "a quote writes nothing");
+    const answer = await manage(env, { action: "buy_lifetime", acceptedTotal: quote.total, attemptId: attemptId(), lang: "en" });
+    assert.equal(answer.status, "succeeded");
+    assert.deepEqual(customerOf(env, subscriptionId).address, ONTARIO);
+    const entry = await read(ledgerRef(answer.purchaseId));
+    assert.deepEqual([entry.billingCountry, entry.billingState], ["CA", "ON"]);
+    await clearFirestore();
+
+    const second = await subscribed("web_yearly");
+    customerOf(second.env, second.subscriptionId).address = undefined;
+    second.env.fake.setDefaultCard(second.subscriptionId, { country: "US", billing: { country: null } });
+    const refusal = await refused(manage(second.env, { action: "quote_lifetime" }), "invalid-argument", "billing_address_incomplete");
+    assert.equal(refusal.details.province, false);
+    assert.equal([...second.env.fake.state.invoices.values()].filter((row) => row.billing_reason === "manual").length, 0);
+  });
+
+  test("a plain lifetime purchase by a subscriber whose renewal failed is quoted at the card form's address, without the renewal", async () => {
+    const { env, subscriptionId } = await subscribed("web_monthly");
+    env.fake.advance(25 * DAY);
+    env.fake.renew(subscriptionId, { paid: false });
+    const total = taxed(0.13, 14999);
+    const { result } = await buy(env, "web_lifetime", { token: { country: "CA", billing: ONTARIO }, acceptedTotal: total });
+    assert.equal(result.status, "succeeded", JSON.stringify(result));
+    const preview = env.fake.calls.filter((call) => call.name === "createInvoicePreview").at(-1).args.params;
+    assert.deepEqual([preview.customer, preview.customer_details.address.state], [undefined, "ON"]);
+    assert.equal((await read(ledgerRef(result.purchaseId))).total, total);
+  });
+
+  test("renewalTaxed: true once a renewal carried tax, false for an untaxed address, with tax off, and with no subscription", async () => {
+    const get = (env) => handleGetWebSubscription({}, caller(), env.deps);
+    const ontario = await subscribed("web_yearly");
+    assert.deepEqual([(await get(ontario.env)).renewalTaxed, (await get(ontario.env)).amount], [true, 4999]);
+    assert.equal((await read(webSlotRef())).web.lastPaidTaxed, true, "recorded by the sync from the invoice it already reads");
+    // Read from the slot: the page's load adds no Stripe call to the sync's own.
+    ontario.env.fake.resetCalls();
+    await syncWebEntitlement(UID, { firestore: db(), gateway: ontario.env.fake, now: ontario.env.deps.now });
+    const syncCalls = ontario.env.fake.callNames().length;
+    ontario.env.fake.resetCalls();
+    await get(ontario.env);
+    assert.equal(ontario.env.fake.callNames().length, syncCalls + 2, "the sync, the subscription and its card only");
+    await manage(ontario.env, { action: "cancel" });
+    assert.equal((await get(ontario.env)).renewalTaxed, true, "still said while cancelling, for the switch panel");
+    await clearFirestore();
+    const us = await subscribed("web_yearly", { billing: { country: "US", postal_code: "10001" } });
+    assert.equal((await get(us.env)).renewalTaxed, false);
+    // An untaxed slot never carries the field, so a sync finds nothing changed and does not rewrite it.
+    const untaxedSlot = await read(webSlotRef());
+    assert.equal("lastPaidTaxed" in untaxedSlot.web, false);
+    await syncWebEntitlement(UID, { firestore: db(), gateway: us.env.fake, now: us.env.deps.now });
+    assert.equal((await read(webSlotRef())).updatedAt.toMillis(), untaxedSlot.updatedAt.toMillis());
+    await clearFirestore();
+    const off = await subscribed("web_yearly", { taxEnabled: false });
+    assert.equal((await get(off.env)).renewalTaxed, false);
+    await clearFirestore();
+    assert.equal((await get(await setup())).renewalTaxed, false);
+  });
+});
+
+describe("countries where the site does not sell", () => {
+  const manage = (env, data, uid = UID) => handleManageWebSubscription(data, caller(uid), env.deps);
+  let attempts = 0;
+  const attemptId = () => `blocked-${Date.now()}-${++attempts}-aaaaaaaa`;
+  const BLOCKED = { blockedCountries: ["CA"] };
+  const unavailable = async (promise) => {
+    const error = await refused(promise, "failed-precondition", "country_unavailable");
+    assert.deepEqual(error.details, { reason: "country_unavailable", country: "CA" });
+  };
+  const knowAs = (env, appReport) => {
+    env.deps.storeCountry = { knownCountries: async () => ({ appReport, storePurchase: [] }) };
+  };
+
+  test("getWebPlans names a blocked known country, additively; the list's default is Canada, and an empty list blocks nobody", async () => {
+    const env = await setup({ config: BLOCKED, known: { appReport: "CA", storePurchase: [] } });
+    assert.equal((await handleGetWebPlans({}, caller(), env.deps)).blockedCountry, "CA");
+    knowAs(env, "US");
+    assert.equal("blockedCountry" in (await handleGetWebPlans({}, caller(), env.deps)), false);
+    knowAs(env, undefined);
+    env.deps.storeCountry = { knownCountries: async () => ({ storePurchase: ["US", "CA"] }) };
+    assert.equal((await handleGetWebPlans({}, caller(), env.deps)).blockedCountry, "CA", "a store purchase country counts too");
+    await db().collection("web_pricing").doc("config").update({ blockedCountries: admin.firestore.FieldValue.delete() });
+    assert.equal((await handleGetWebPlans({}, caller(), env.deps)).blockedCountry, "CA", "missing: the default list");
+    await db().collection("web_pricing").doc("config").update({ blockedCountries: [] });
+    assert.equal("blockedCountry" in (await handleGetWebPlans({}, caller(), env.deps)), false);
+  });
+
+  test("startWebPurchase: blocked by the known country before the token is read, by the card or the billing country after; nothing written or created", async () => {
+    const env = await setup({ config: BLOCKED, known: { appReport: "CA", storePurchase: [] } });
+    await unavailable(buy(env, "web_yearly", { token: { country: "US" } }));
+    assert.equal(env.fake.callNames().includes("retrieveConfirmationToken"), false, "the token is never read");
+    knowAs(env, "US");
+    await unavailable(buy(env, "web_yearly", { token: { country: "CA", billing: { country: "US", postal_code: "10001" } } }));
+    await unavailable(buy(env, "web_lifetime", { token: { country: "US", billing: { country: "CA", state: "ON" } } }));
+    assert.deepEqual(creates(env.fake), []);
+    assert.deepEqual(await ledgerDocs(), []);
+    assert.equal(await read(db().collection(WEB_CUSTOMERS_COLLECTION).doc(UID)), undefined, "no customer, no lock");
+    const { result } = await buy(env, "web_yearly", { token: { country: "US" } });
+    assert.equal(result.status, "succeeded", "an unblocked buyer is unaffected");
+  });
+
+  test("replace_card: a card or billing country that is blocked is refused before any SetupIntent; the saved card stays", async () => {
+    const env = await setup({ config: BLOCKED });
+    const { result } = await buy(env, "web_monthly");
+    const subscriptionId = (await read(ledgerRef(result.purchaseId))).stripe.subscriptionId;
+    const before = env.fake.state.subscriptions.get(subscriptionId).default_payment_method;
+    for (const token of [{ country: "CA" }, { country: "US", billing: { country: "CA", postal_code: "M5V 3L9" } }]) {
+      const confirmationToken = env.fake.addToken({ setupFutureUsage: "off_session", ...token });
+      await unavailable(manage(env, { action: "replace_card", confirmationToken }));
+    }
+    assert.equal(env.fake.callNames().includes("createSetupIntent"), false);
+    assert.equal(env.fake.state.subscriptions.get(subscriptionId).default_payment_method, before);
+
+    // A subscriber whose account now reads as Canadian can still fix the card, but not with a Canadian one.
+    knowAs(env, "CA");
+    await unavailable(manage(env, { action: "replace_card", confirmationToken: env.fake.addToken({ setupFutureUsage: "off_session", country: "CA" }) }));
+    assert.equal(env.fake.state.subscriptions.get(subscriptionId).default_payment_method, before);
+    const fixed = await manage(env, { action: "replace_card", confirmationToken: env.fake.addToken({ setupFutureUsage: "off_session", country: "US" }) });
+    assert.equal(fixed.status, "succeeded");
+    assert.notEqual(env.fake.state.subscriptions.get(subscriptionId).default_payment_method, before);
+  });
+
+  test("the switch and the upgrade: refused by the known country, the saved card or the customer's address, at the quote and at the charge; nothing quoted or charged", async () => {
+    const env = await setup({ config: BLOCKED });
+    const { result } = await buy(env, "web_monthly");
+    const { stripe: { subscriptionId, customerId } } = await read(ledgerRef(result.purchaseId));
+    const actions = [
+      { action: "quote_switch_yearly" },
+      { action: "switch_yearly", acceptedTotal: 4666, attemptId: attemptId(), lang: "en" },
+      { action: "quote_lifetime" },
+      { action: "buy_lifetime", acceptedTotal: 14000, attemptId: attemptId(), lang: "en" },
+    ];
+    const signals = [
+      () => knowAs(env, "CA"),
+      () => env.fake.setDefaultCard(subscriptionId, { country: "CA", billing: { country: "US" } }),
+      () => Object.assign(env.fake.state.customers.get(customerId), { address: { country: "CA", state: "ON" } }),
+    ];
+    const entries = (await ledgerDocs()).length;
+    env.fake.resetCalls();
+    for (const signal of signals) {
+      knowAs(env, "US");
+      env.fake.setDefaultCard(subscriptionId, { country: "US" });
+      env.fake.state.customers.get(customerId).address = { country: "US", postal_code: "10001" };
+      signal();
+      for (const data of actions) await unavailable(manage(env, data));
+    }
+    for (const name of ["createInvoicePreview", "updateSubscription", "voidInvoice", "createInvoice", "confirmPaymentIntent"]) {
+      assert.equal(env.fake.callNames().includes(name), false, name);
+    }
+    assert.equal((await ledgerDocs()).length, entries);
+    knowAs(env, "US");
+    env.fake.setDefaultCard(subscriptionId, { country: "US" });
+    env.fake.state.customers.get(customerId).address = { country: "US", postal_code: "10001" };
+    assert.equal((await manage(env, { action: "quote_lifetime" })).status, "quote", "an unblocked buyer is unaffected");
+  });
+
+  test("an existing subscription is never touched: cancel, resume, the renewal and its sync carry on for a blocked buyer", async () => {
+    const env = await setup({ config: BLOCKED });
+    const { result } = await buy(env, "web_monthly");
+    const subscriptionId = (await read(ledgerRef(result.purchaseId))).stripe.subscriptionId;
+    knowAs(env, "CA");
+    env.fake.setDefaultCard(subscriptionId, { country: "CA", billing: { country: "CA" } });
+    assert.equal((await manage(env, { action: "cancel" })).status, "succeeded");
+    assert.equal((await manage(env, { action: "resume" })).status, "succeeded");
+    env.fake.advance(31 * DAY);
+    env.fake.renew(subscriptionId);
+    const view = await handleGetWebSubscription({}, caller(), env.deps);
+    assert.equal(view.state, "active");
+    assert.equal(Date.parse(view.renewsAt) > Date.now() + 20 * DAY * 1000, true, "the renewal moved the slot on");
   });
 });
 

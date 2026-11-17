@@ -10,6 +10,8 @@ import {
   cardBrandName,
   cardText,
   confirmationFor,
+  countryName,
+  countryNoticeText,
   defaultPlan,
   doubleSubscriptionStore,
   elementsKindFor,
@@ -18,6 +20,7 @@ import {
   formatMoney,
   formatMoneyInFull,
   keepsAttempt,
+  lifetimeQuoteRequest,
   lifetimeRequest,
   lifetimeSummary,
   keepsPending,
@@ -26,6 +29,7 @@ import {
   payButtonState,
   PENDING_PURCHASE_MS,
   pendingAfterLoad,
+  provinceAnswer,
   plansDisagree,
   savedPercent,
   storeWords,
@@ -376,6 +380,12 @@ describe("refusalFrom", () => {
     }
   });
 
+  it("says whether a province would complete an incomplete billing address", () => {
+    expect(refusalFrom(httpsError("invalid-argument", { reason: "billing_address_incomplete", province: true }))).toEqual({ kind: "billingAddressIncomplete", province: true });
+    expect(refusalFrom(httpsError("invalid-argument", { reason: "billing_address_incomplete", province: false }))).toEqual({ kind: "billingAddressIncomplete", province: false });
+    expect(refusalFrom(httpsError("invalid-argument", { reason: "billing_address_incomplete" }))).toEqual({ kind: "billingAddressIncomplete", province: false });
+  });
+
   it("carries the store of a store subscription", () => {
     expect(refusalFrom(httpsError("failed-precondition", { reason: "store_subscription_active", platform: "google" }))).toEqual({
       kind: "storeSubscriptionActive",
@@ -451,6 +461,68 @@ describe("requests leave optional keys out", () => {
     noUndefined(switchRequest(switchQuote, "attempt-0001-aaaaaaaa", "ar"));
     noUndefined(lifetimeRequest(lifetimeQuote, "attempt-0001-aaaaaaaa", "en"));
   });
+
+  it("an upgrade's quote and purchase carry the province only once one was chosen", () => {
+    const lifetimeQuote: LifetimeQuote = { plan: "web_lifetime", tier: "standard", amount: 14999, credit: 4998, tax: 1300, total: 11301, currency: "usd", creditedPlan: "web_yearly" };
+    expect(lifetimeQuoteRequest(null)).toEqual({ action: "quote_lifetime" });
+    expect(lifetimeQuoteRequest("")).toEqual({ action: "quote_lifetime" });
+    expect(lifetimeQuoteRequest("ON")).toEqual({ action: "quote_lifetime", billingState: "ON" });
+    expect(lifetimeRequest(lifetimeQuote, "attempt-0002-aaaaaaaa", "ar", "ON")).toEqual({
+      action: "buy_lifetime", acceptedTotal: 11301, attemptId: "attempt-0002-aaaaaaaa", lang: "ar", billingState: "ON",
+    });
+    expect(Object.keys(lifetimeRequest(lifetimeQuote, "attempt-0002-aaaaaaaa", "ar", null))).not.toContain("billingState");
+    noUndefined(lifetimeQuoteRequest(null));
+    noUndefined(lifetimeRequest(lifetimeQuote, "attempt-0002-aaaaaaaa", "ar", null));
+  });
+});
+
+describe("the province's hint and its error", () => {
+  it("are different sentences: the error is short and says only what is missing", () => {
+    expect(STRINGS.ar.provinceFirst).toBe("اختر المقاطعة أو الإقليم أولًا.");
+    expect(STRINGS.en.provinceFirst).toBe("Choose your province or territory first.");
+    expect(STRINGS.ar.provinceNeeded).toBe("اختر مقاطعتك أو إقليمك في كندا لنحسب الضريبة، ثم اضغط زر الدفع.");
+    for (const s of [STRINGS.ar, STRINGS.en]) {
+      expect(s.provinceFirst).not.toBe(s.provinceNeeded);
+      expect(s.provinceFirst).not.toBe(s.provinceNeededUpgrade);
+      expect(s.provinceFirst.length).toBeLessThan(s.provinceNeeded.length);
+    }
+  });
+});
+
+describe("the upgrade's province", () => {
+  const quote: LifetimeQuote = {
+    plan: "web_lifetime", tier: "standard", amount: 14999, credit: 4998, tax: 1300, total: 11301, currency: "usd",
+    creditedPlan: "web_yearly", billingState: "ON",
+  };
+
+  it("asks once; a province sent and refused again stays on the question instead of a retry", () => {
+    expect(provinceAnswer({ kind: "billingAddressIncomplete", province: true }, null)).toBe("ask");
+    expect(provinceAnswer({ kind: "billingAddressIncomplete", province: true }, "ON")).toBe("refused");
+    expect(provinceAnswer({ kind: "billingAddressIncomplete", province: false }, null)).toBeNull();
+    expect(provinceAnswer({ kind: "billingAddressIncomplete", province: false }, "ON")).toBeNull();
+    expect(provinceAnswer({ kind: "generic" }, "ON")).toBeNull();
+    expect(STRINGS.ar.provinceRefused).not.toBe(STRINGS.ar.provinceFirst);
+  });
+
+  it("the summary names the province the quote was taxed at, in both languages, from one list of names", () => {
+    expect(lifetimeSummary(quote, STRINGS.en, "en").rows).toContainEqual({ label: "Province:", value: "Ontario" });
+    expect(lifetimeSummary(quote, STRINGS.ar, "ar").rows).toContainEqual({ label: "المقاطعة:", value: "أونتاريو" });
+    expect(lifetimeSummary({ ...quote, billingState: undefined }, STRINGS.en, "en").rows.map((row) => row.label)).not.toContain("Province:");
+    expect([STRINGS.ar.provinceChange, STRINGS.en.provinceChange]).toEqual(["تغيير", "Change"]);
+    expect(STRINGS.ar.provinceChangeLabel).toContain(STRINGS.ar.provinceChange);
+    expect(STRINGS.en.provinceChangeLabel).toContain(STRINGS.en.provinceChange);
+  });
+
+  it("the purchase sends the province the shown quote used", () => {
+    expect(lifetimeRequest(quote, "attempt-0003-aaaaaaaa", "en", quote.billingState ?? null)).toMatchObject({ billingState: "ON", acceptedTotal: 11301 });
+  });
+
+  it("a cancelled subscription only ends now; an active one keeps its sentence", () => {
+    expect(lifetimeSummary(quote, STRINGS.ar, "ar", "cancelling").notes[1]).toBe("ينتهي اشتراكك السنوي الآن.");
+    expect(lifetimeSummary(quote, STRINGS.en, "en", "cancelling").notes[1]).toBe("Your yearly subscription ends now.");
+    expect(lifetimeSummary(quote, STRINGS.ar, "ar", "active").notes[1]).toBe("يتوقف اشتراكك السنوي الآن، ولن يتجدد ولن يُخصم منه شيء بعد اليوم.");
+    expect(lifetimeSummary(quote, STRINGS.en, "en").notes[1]).toBe("Your yearly subscription stops now. It won't renew, and nothing more is charged for it.");
+  });
 });
 
 describe("asksForProvince", () => {
@@ -491,6 +563,17 @@ describe("the switch panel", () => {
     expect(switchSummary(quote, "active", STRINGS.en, "en").notes).not.toContain(STRINGS.en.switchResumes);
     const noCard = switchSummary({ ...quote, card: undefined }, "active", STRINGS.en, "en");
     expect(noCard.rows.map((row) => row.label)).not.toContain("Card:");
+  });
+
+  it("says the yearly renewal is before tax when the quote carries tax or the renewals are taxed", () => {
+    const plain = "It renews automatically on November 26, 2027, then every year at $49.99, until you cancel.";
+    const plusTax = "It renews automatically on November 26, 2027, then every year at $49.99 plus tax, until you cancel.";
+    expect(switchSummary(quote, "active", STRINGS.en, "en").notes[0]).toBe(plain);
+    expect(switchSummary({ ...quote, tax: 600, total: 5266 }, "active", STRINGS.en, "en").notes[0]).toBe(plusTax);
+    expect(switchSummary(quote, "active", STRINGS.en, "en", true).notes[0]).toBe(plusTax);
+    expect(switchSummary(quote, "active", STRINGS.ar, "ar", true).notes[0]).toBe(
+      `يتجدد الاشتراك تلقائيًا في ${formatDate(quote.renewsAt, "ar")}، ثم كل سنة بمبلغ ${iso("٤٩٫٩٩ دولار")} إضافةً إلى الضريبة، حتى تلغيه.`,
+    );
   });
 
   it("in Arabic, the credit after a label that says it is taken off, with no minus sign", () => {
@@ -663,6 +746,14 @@ describe("accountView: every state", () => {
       lines: [],
     });
     expect(statusText(monthly, STRINGS.en, "en").sentence).toBe("Your monthly plan renews on December 14, 2026 for $4.99.");
+
+    // Taxed renewals: the amount is said to be before tax; a missing flag reads as untaxed.
+    const taxedYearly = accountView(sub("active", { plan: "web_yearly", amount: 4999, currency: "usd", renewsAt: RENEWS, renewalTaxed: true }), plansAnswer(), NOW);
+    expect(taxedYearly.status).toEqual({ kind: "active", plan: "web_yearly", renewsAt: RENEWS, amount: 4999, currency: "usd", taxed: true });
+    expect(words(taxedYearly).sentence).toBe(`اشتراكك السنوي يتجدد في ${iso("١٤ ديسمبر ٢٠٢٦")} بمبلغ ${iso("٤٩٫٩٩ دولار")} إضافةً إلى الضريبة.`);
+    expect(statusText(taxedYearly, STRINGS.en, "en").sentence).toBe("Your yearly plan renews on December 14, 2026 for $49.99 plus tax.");
+    const untaxed = accountView(sub("active", { plan: "web_yearly", amount: 4999, currency: "usd", renewsAt: RENEWS, renewalTaxed: false }), plansAnswer(), NOW);
+    expect(statusText(untaxed, STRINGS.en, "en").sentence).toBe("Your yearly plan renews on December 14, 2026 for $49.99.");
 
     const yearly = accountView(sub("active", { plan: "web_yearly", renewsAt: RENEWS }), plansAnswer(), NOW);
     expect(yearly.sections).toEqual([{ kind: "card" }, { kind: "upgrade", yearly: false, lifetime: true }]);
@@ -976,5 +1067,59 @@ describe("the announcement after a load", () => {
     expect(loadAnnouncement("أصبح لديك بريميوم مدى الحياة.", "بريميوم مدى الحياة")).toBe("أصبح لديك بريميوم مدى الحياة.");
     expect(loadAnnouncement("عاد التجديد التلقائي.", "بريميوم مفعّل")).toBe("عاد التجديد التلقائي. بريميوم مفعّل.");
     expect(loadAnnouncement(undefined, "ليس لديك بريميوم")).toBe("ليس لديك بريميوم.");
+  });
+});
+
+describe("countries where the site does not sell", () => {
+  const blocked = (fields: Partial<PlansResponse> = {}) => plansAnswer({ blockedCountry: "CA", ...fields });
+  const first = { kind: "countryUnavailable", country: "CA", subscribed: false };
+  const held = { kind: "countryUnavailable", country: "CA", subscribed: true };
+
+  it("one notice replaces every sale, and nothing to pay is offered", () => {
+    const none = accountView(sub("none"), blocked(), NOW);
+    expect(none.sections).toEqual([first]);
+    expect(none.primary).toBeNull();
+    expect(accountView(sub("ended", { endsAt: PAST }), blocked(), NOW).sections).toEqual([first]);
+    const monthly = accountView(sub("active", { plan: "web_monthly", renewsAt: RENEWS, card: CARD }), blocked({ blockers: ["already_subscribed"] }), NOW);
+    expect(monthly.sections).toEqual([{ kind: "card", card: CARD }, held]);
+    expect(monthly.cancel).toBe(true);
+    const cancelling = accountView(sub("cancelling", { plan: "web_yearly", endsAt: ENDS }), blocked(), NOW);
+    expect(cancelling.sections).toEqual([{ kind: "card" }, held]);
+    expect(cancelling.primary).toEqual({ kind: "resume" });
+    expect(accountView(sub("payment_failed", { plan: "web_monthly", endsAt: ENDS }), blocked(), NOW).sections).toEqual([held]);
+    const store = accountView(sub("none", { premium: [storeSource("apple", true)] }), blocked(), NOW);
+    expect(store.sections).toEqual([held]);
+    expect(store.primary).toEqual({ kind: "manageInStore", platform: "apple" });
+    expect(accountView(sub("none", { premium: [grant()] }), blocked(), NOW).sections).toEqual([first], "premium that is ending");
+  });
+
+  it("leaves what is held alone: lifetime, a bank step, and a missing field reads as not blocked", () => {
+    expect(accountView(sub("lifetime"), blocked(), NOW).sections).toEqual([]);
+    expect(accountView(sub("needs_action", { endsAt: ENDS, card: CARD }), blocked(), NOW).primary).toEqual({ kind: "confirmPayment" });
+    expect(accountView(sub("none"), plansAnswer(), NOW).sections[0].kind).toBe("purchase");
+  });
+
+  it("the status drops «choose a plan» where the notice took the plans' place", () => {
+    expect(statusText(accountView(sub("none"), blocked(), NOW), STRINGS.ar, "ar")).toEqual({ title: STRINGS.ar.statusNone, sentence: null, lines: [] });
+    expect(statusText(accountView(sub("none"), blocked(), NOW), STRINGS.en, "en").sentence).toBeNull();
+    const ended = statusText(accountView(sub("ended", { endsAt: PAST }), blocked(), NOW), STRINGS.en, "en");
+    expect(ended).toEqual({ title: STRINGS.en.statusEnded(formatDate(PAST, "en")), sentence: null, lines: [] });
+    expect(statusText(accountView(sub("none"), plansAnswer(), NOW), STRINGS.en, "en").sentence).toBe(STRINGS.en.statusChoosePlan);
+  });
+
+  it("the three notices: a first purchase, a subscriber, a refused card; the country from the platform in each language", () => {
+    expect(refusalFrom(httpsError("failed-precondition", { reason: "country_unavailable", country: "CA" }))).toEqual({ kind: "countryUnavailable", country: "CA" });
+    expect(countryName("CA", "ar")).toBe("كندا");
+    expect(countryName("CA", "en")).toBe("Canada");
+    expect(countryName("not a code", "en")).toBe("not a code");
+    expect(countryNoticeText(first, STRINGS.ar, "ar")).toBe("الدفع من هذا الموقع غير متاح في كندا حاليًا. يمكنك الاشتراك من داخل التطبيق.");
+    expect(countryNoticeText(first, STRINGS.en, "en")).toBe("Paying on this site isn't available in Canada yet. You can subscribe in the app.");
+    expect(countryNoticeText(held, STRINGS.ar, "ar")).toBe("الدفع من هذا الموقع غير متاح في كندا حاليًا.");
+    expect(countryNoticeText(held, STRINGS.en, "en")).toBe("Paying on this site isn't available in Canada yet.");
+    expect(STRINGS.ar.countryUnavailableCard(countryName("CA", "ar"))).toBe("لم تُحفظ البطاقة. الدفع من هذا الموقع غير متاح في كندا حاليًا، فاستخدم بطاقة من بلد آخر.");
+    expect(STRINGS.en.countryUnavailableCard(countryName("CA", "en"))).toBe("The card wasn't saved. Paying on this site isn't available in Canada yet, so use a card from another country.");
+    for (const s of [STRINGS.ar, STRINGS.en]) {
+      expect(JSON.stringify([s.countryUnavailable("X"), s.subscribeInApp, s.nothingCharged, s.countryUnavailableCard("X")])).not.toMatch(/كندا|Canada/);
+    }
   });
 });

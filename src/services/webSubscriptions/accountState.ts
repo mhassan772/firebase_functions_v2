@@ -103,6 +103,8 @@ export interface WebSlotView {
   paidThrough?: Date;
   expiresAt?: Date;
   tier?: string;
+  /** The subscription's latest paid invoice carried tax (`web.lastPaidTaxed`). */
+  lastPaidTaxed: boolean;
 }
 
 /**
@@ -114,7 +116,7 @@ export interface WebSlotView {
  */
 export function webSlotView(data: DocumentData | undefined, now: Date): WebSlotView {
   const state = normalized(data, now);
-  if (!data || !state) return { state: "none" };
+  if (!data || !state) return { state: "none", lastPaidTaxed: false };
   const web = (data.web ?? {}) as DocumentData;
   const view: WebSlotView = {
     state: "ended",
@@ -125,6 +127,7 @@ export function webSlotView(data: DocumentData | undefined, now: Date): WebSlotV
     paidThrough: timestampDate(web.paidThrough),
     expiresAt: state.expiresAt,
     tier: typeof web.tier === "string" ? web.tier : undefined,
+    lastPaidTaxed: web.lastPaidTaxed === true,
   };
   if (view.plan === "web_lifetime") {
     view.state = state.active ? "lifetime" : "ended";
