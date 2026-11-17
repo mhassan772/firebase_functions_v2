@@ -19,6 +19,7 @@ const { deriveWebSlot, readWebStripeFacts, WEB_GRACE_MS, WEB_RENEWAL_SLACK_MS } 
 const { ledgerUpdate, nextLedgerStatus, purchaseIdFor } = require("../lib/services/webSubscriptions/ledger");
 const {
   billingAddressFromToken,
+  blockedCountryOf,
   cardFromToken,
   chargedTier,
   createPriceLookup,
@@ -503,6 +504,26 @@ describe("pricing", () => {
     assert.deepEqual(odd.countries, { EG: "low" });
   });
 
+  test("blocked countries: the default list, each signal alone, the order, lower case, an empty or malformed list", () => {
+    assert.deepEqual(config.blockedCountries, ["CA"]);
+    assert.equal(blockedCountryOf(config, { known: ["CA"] }), "CA");
+    assert.equal(blockedCountryOf(config, { card: "CA" }), "CA");
+    assert.equal(blockedCountryOf(config, { billing: "CA" }), "CA");
+    assert.equal(blockedCountryOf(config, { known: ["US", "ca"], card: "US", billing: "US" }), "CA", "every known country, any case");
+    assert.equal(blockedCountryOf(config, { known: [], card: null, billing: undefined }), undefined);
+    assert.equal(blockedCountryOf(config, { known: ["US"], card: "DE", billing: "EG" }), undefined);
+    const two = webPricingConfigFromData({ blockedCountries: ["eg", "CA"] });
+    assert.deepEqual(two.blockedCountries, ["EG", "CA"]);
+    assert.equal(blockedCountryOf(two, { known: ["EG"], card: "CA", billing: "CA" }), "EG", "known first");
+    assert.equal(blockedCountryOf(two, { card: "EG", billing: "CA" }), "EG", "then the card");
+    assert.equal(blockedCountryOf(two, { card: "US", billing: "CA" }), "CA", "then the billing country");
+    const open = webPricingConfigFromData({ blockedCountries: [] });
+    assert.equal(blockedCountryOf(open, { known: ["CA"], card: "CA", billing: "CA" }), undefined, "an empty list blocks nobody");
+    for (const malformed of ["CA", ["CA", "Canada"], ["CA", 1], ["XX"], null, { CA: true }]) {
+      assert.deepEqual(webPricingConfigFromData({ blockedCountries: malformed }).blockedCountries, ["CA"], JSON.stringify(malformed));
+    }
+  });
+
   test("the known tier is the dearest among the app report and every store country", () => {
     assert.deepEqual(knownTier(config, { storePurchase: [] }), { tier: "standard", countryKnown: false, knownCountry: null });
     assert.equal(knownTier(config, { appReport: "EG", storePurchase: [] }).tier, "low");
@@ -561,6 +582,40 @@ describe("pricing", () => {
     );
   });
 
+  test("an upgrade's quote is the one-off invoice alone: a running subscription's renewal never joins it", async () => {
+    // The sandbox's numbers of 2026-11-16: an Ontario yearly subscriber upgrading with a credit of
+    // 4998. The preview also listed the yearly renewal (4999 + 650 tax); the invoice charged 11301.
+    const fake = createFakeStripe({ taxRates: { ON: 0.13, AB: 0.05 } });
+    const lookup = createPriceLookup(fake);
+    const lifetime = (await lookup.get(["web_lifetime_standard"])).get("web_lifetime_standard");
+    const credit = { amount: 4998, description: "Credit" };
+    const quoteFor = async (lookupKey, setUp) => {
+      const customer = fake.addCustomer(null, { address: { country: "CA", state: "ON", postal_code: "M5V 3L9" } });
+      const { subscriptionId } = fake.paySubscription({ customer, lookupKey, automaticTax: true });
+      if (setUp) setUp(fake.state.subscriptions.get(subscriptionId));
+      const { taxAddress, ...total } = await quoteTotal(fake, lifetime, { taxEnabled: true, customer, credit });
+      assert.deepEqual(taxAddress, { address: { country: "CA", state: "ON", postal_code: "M5V 3L9" }, changed: false });
+      return total;
+    };
+    const amountsOf = async (pending) => {
+      const { taxAddress, ...total } = await pending;
+      return total;
+    };
+    const expected = { amount: 14999, tax: 1300, total: 11301, currency: "usd" };
+    assert.deepEqual(await quoteTotal(fake, lifetime, { taxEnabled: true, address: { country: "CA", state: "ON" }, credit }), expected);
+    assert.deepEqual(await quoteTotal(fake, lifetime, { taxEnabled: true, address: { country: "CA", state: "ON" } }), { amount: 14999, tax: 1950, total: 16949, currency: "usd" });
+    assert.deepEqual(await quoteTotal(fake, lifetime, { taxEnabled: true, address: { country: "CA", state: "AB" }, credit }), { amount: 14999, tax: 500, total: 10501, currency: "usd" });
+    assert.deepEqual(await quoteTotal(fake, lifetime, { taxEnabled: true, address: { country: "US", postal_code: "10001" }, credit }), { amount: 14999, tax: 0, total: 10001, currency: "usd" });
+    assert.deepEqual(await quoteTotal(fake, lifetime, { taxEnabled: false, customer: fake.addCustomer(null), credit }), { amount: 14999, tax: 0, total: 10001, currency: "usd" });
+    assert.deepEqual(await amountsOf(quoteTotal(fake, lifetime, { taxEnabled: true, customer: fake.addCustomer(null, { address: { country: "CA", state: "ON" } }), credit })), expected);
+    assert.deepEqual(await amountsOf(quoteTotal(fake, lifetime, { taxEnabled: true, customer: fake.addCustomer(null, { address: { country: "CA", state: "ON" } }) })), { amount: 14999, tax: 1950, total: 16949, currency: "usd" });
+    assert.deepEqual(await quoteFor("web_yearly_standard"), expected, "from yearly");
+    assert.deepEqual(await quoteFor("web_monthly_standard"), expected, "from monthly");
+    assert.deepEqual(await quoteFor("web_yearly_standard", (sub) => Object.assign(sub, { cancel_at_period_end: true })), expected, "set to cancel");
+    assert.deepEqual(await quoteFor("web_yearly_standard", (sub) => Object.assign(sub, { status: "canceled" })), expected, "ended");
+    assert.deepEqual(await quoteFor("web_monthly_standard", (sub) => Object.assign(sub, { status: "past_due" })), expected, "past due");
+  });
+
   test("billing address rules", async () => {
     const fake = createFakeStripe();
     const token = async (billing) => fake.retrieveConfirmationToken(fake.addToken({ country: "CA", billing }));
@@ -573,6 +628,11 @@ describe("pricing", () => {
     const postal = await token({ country: "CA", postal_code: "M5V 3L9", line1: "1 King St" });
     const read = billingAddressFromToken(postal, { taxEnabled: true });
     assert.deepEqual([read.country, read.state, read.address.postal_code], ["CA", null, "M5V 3L9"]);
+    // A province is added only where Stripe could not place the address, and only a real code.
+    assert.equal(billingAddressFromToken(postal, { taxEnabled: true, billingState: "AB" }).state, null);
+    assert.equal(billingAddressFromToken(bare, { taxEnabled: false, billingState: "Ontario" }).state, null);
+    const american = await token({ country: "US", postal_code: "10001" });
+    assert.equal(billingAddressFromToken(american, { taxEnabled: true, billingState: "ON" }).state, null);
   });
 
   test("only cards are accepted; the card's country, funding and wallet are read", async () => {

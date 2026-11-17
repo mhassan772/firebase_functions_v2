@@ -307,6 +307,8 @@ export function toWebCallableError(event: string, operationId: string, stage: st
       code: error.code,
       ...(reasonOf(error) ? { reason: reasonOf(error) } : {}),
       ...(typeof details?.category === "string" ? { category: details.category } : {}),
+      // A blocked country's code; nothing else about the buyer.
+      ...(typeof details?.country === "string" ? { country: details.country } : {}),
     });
     return error;
   }

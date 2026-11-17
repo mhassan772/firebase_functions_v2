@@ -67,8 +67,8 @@ export function manageWebSubscription(
 export function manageWebSubscription(
   app: FirebaseApp,
   request:
-    | { action: "quote_lifetime" }
-    | { action: "buy_lifetime"; acceptedTotal: number; attemptId: string; lang: Lang }
+    | { action: "quote_lifetime"; billingState?: string }
+    | { action: "buy_lifetime"; acceptedTotal: number; attemptId: string; lang: Lang; billingState?: string }
     | { action: "finish_lifetime"; purchaseId: string },
 ): Promise<LifetimeResult>;
 export function manageWebSubscription(app: FirebaseApp, request: { action: string }): Promise<unknown> {

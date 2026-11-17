@@ -46,6 +46,8 @@ export interface PlansResponse {
   blockers: string[];
   /// Missing from a backend older than this page.
   premium?: PremiumSource[];
+  /// The account's known country when this site does not sell there; missing means not blocked.
+  blockedCountry?: string;
 }
 
 /// What a re-price answer shows; nothing was charged.
@@ -88,6 +90,8 @@ export interface SubscriptionResponse {
   storeSubscription: StoreSubscription | null;
   /// Every source of premium the account holds; missing from a backend older than this page.
   premium?: PremiumSource[];
+  /// The renewals are taxed, so `amount` is before tax; missing from an older backend, read as false.
+  renewalTaxed?: boolean;
 }
 
 export type ManageResult =
@@ -132,6 +136,8 @@ export interface LifetimeQuote {
   /// The plan whose unused time is credited, and which stops.
   creditedPlan: "web_monthly" | "web_yearly";
   card?: { brand: string; last4: string };
+  /// The province the buyer chose, when the quote was taxed with it; sent back with the purchase.
+  billingState?: string;
 }
 
 export type LifetimeResult =
@@ -386,6 +392,10 @@ const DECLINE_CATEGORIES: readonly DeclineCategory[] = [
 /// A failed call, decided from its code and `details` alone; the message is never shown.
 export type Refusal =
   | { kind: "declined"; category: DeclineCategory }
+  /// `province`: a Canadian address a province would complete (the upgrade's saved address).
+  | { kind: "billingAddressIncomplete"; province?: boolean }
+  /// This site does not sell in `country`, an alpha-2 code.
+  | { kind: "countryUnavailable"; country: string }
   | { kind: "storeSubscriptionActive"; platform: StorePlatform | null }
   | {
       kind:
@@ -394,7 +404,6 @@ export type Refusal =
         | "salesDisabled"
         | "emailUnverified"
         | "planUnavailable"
-        | "billingAddressIncomplete"
         | "alreadySubscribed"
         | "lifetimeActive"
         | "tokenInvalid"
@@ -450,8 +459,10 @@ export function refusalFrom(error: unknown): Refusal {
       return { kind: "emailUnverified" };
     case "plan_unavailable":
       return { kind: "planUnavailable" };
+    case "country_unavailable":
+      return { kind: "countryUnavailable", country: typeof details.country === "string" ? details.country : "" };
     case "billing_address_incomplete":
-      return { kind: "billingAddressIncomplete" };
+      return { kind: "billingAddressIncomplete", province: details.province === true };
     case "already_subscribed":
       return { kind: "alreadySubscribed" };
     case "lifetime_active":
@@ -541,7 +552,8 @@ export type Status =
   | { kind: "lifetime" }
   | { kind: "needsAction"; until?: string }
   | { kind: "paymentFailed"; until?: string }
-  | { kind: "active"; plan?: Plan; renewsAt?: string; amount?: number; currency?: string }
+  /// `taxed`: the amount is before tax, said as "plus tax".
+  | { kind: "active"; plan?: Plan; renewsAt?: string; amount?: number; currency?: string; taxed?: boolean }
   | { kind: "cancelling"; until?: string }
   | { kind: "storeRenews"; platform: StorePlatform; renewsAt?: string }
   | { kind: "endsOnItsOwn"; source: PremiumSource }
@@ -579,7 +591,11 @@ export type Section =
   | { kind: "upgrade"; yearly: boolean; lifetime: boolean }
   | { kind: "payByCard"; platform: StorePlatform; until?: string; lifetime: Purchase | null }
   | { kind: "continueAfter"; purchase: Purchase }
-  | { kind: "purchase"; purchase: Purchase };
+  | { kind: "purchase"; purchase: Purchase }
+  /// Shown wherever something would be sold, when the known country is one this site does not sell in.
+  /// `subscribed`: the account already has a subscription (from a store or this site), so the
+  /// notice does not send it to subscribe in the app.
+  | { kind: "countryUnavailable"; country: string; subscribed: boolean };
 
 export interface AccountView {
   tone: Tone;
@@ -727,9 +743,15 @@ export function accountView(subscription: SubscriptionResponse, answer: PlansAns
   const lines = (except?: PremiumSource) => others.filter((source) => source !== except && !(twice && source.source === twice && source.renews));
   const twiceSections: Section[] = twice ? [{ kind: "payingTwice", platform: twice, lifetime: subscription.state === "lifetime" }] : [];
   const salesOff = "refusal" in answer && answer.refusal.kind === "salesDisabled";
+  // One notice replaces every sale; nothing about a subscription already held changes.
+  const blocked = "plans" in answer && answer.plans.blockedCountry ? answer.plans.blockedCountry : null;
+  const sale = (sections: Section[], subscribed = false): Section[] =>
+    blocked && sections.length > 0 ? [{ kind: "countryUnavailable", country: blocked, subscribed }] : sections;
   const plan = isPlan(subscription.plan) ? subscription.plan : undefined;
-  const upgrade: Section[] =
-    !salesOff && (plan === "web_monthly" || plan === "web_yearly") ? [{ kind: "upgrade", yearly: plan === "web_monthly", lifetime: true }] : [];
+  const upgrade: Section[] = sale(
+    !salesOff && (plan === "web_monthly" || plan === "web_yearly") ? [{ kind: "upgrade", yearly: plan === "web_monthly", lifetime: true }] : [],
+    true,
+  );
   const card: Section = { kind: "card", ...(subscription.card ? { card: subscription.card } : {}) };
 
   if (pendingAfterLoad(pending, subscription, now)) {
@@ -756,14 +778,21 @@ export function accountView(subscription: SubscriptionResponse, answer: PlansAns
         status: { kind: "paymentFailed", until: subscription.endsAt },
         others: lines(),
         primary: { kind: "changeCard" },
-        sections: [...twiceSections, ...(lifetime ? [{ kind: "lifetimeInstead" as const, purchase: lifetime }] : [])],
+        sections: [...twiceSections, ...sale(lifetime ? [{ kind: "lifetimeInstead" as const, purchase: lifetime }] : [], true)],
         cancel: true,
       };
     }
     case "active":
       return {
         tone: "ok",
-        status: { kind: "active", plan, renewsAt: subscription.renewsAt, amount: subscription.amount, currency: subscription.currency },
+        status: {
+          kind: "active",
+          plan,
+          renewsAt: subscription.renewsAt,
+          amount: subscription.amount,
+          currency: subscription.currency,
+          ...(subscription.renewalTaxed === true ? { taxed: true } : {}),
+        },
         others: lines(),
         primary: null,
         sections: [...twiceSections, card, ...upgrade],
@@ -791,7 +820,7 @@ export function accountView(subscription: SubscriptionResponse, answer: PlansAns
       status: { kind: "storeRenews", platform: renewing.source, renewsAt: renewing.until },
       others: lines(renewing),
       primary: { kind: "manageInStore", platform: renewing.source },
-      sections: salesOff ? [] : [{ kind: "payByCard", platform: renewing.source, until: renewing.until, lifetime: purchaseOf(answer, "web_lifetime") }],
+      sections: salesOff ? [] : sale([{ kind: "payByCard", platform: renewing.source, until: renewing.until, lifetime: purchaseOf(answer, "web_lifetime") }], true),
       cancel: false,
     };
   }
@@ -802,7 +831,7 @@ export function accountView(subscription: SubscriptionResponse, answer: PlansAns
       status: { kind: "endsOnItsOwn", source: described },
       others: lines(described),
       primary: null,
-      sections: [{ kind: "continueAfter", purchase: purchaseOf(answer)! }],
+      sections: sale([{ kind: "continueAfter", purchase: purchaseOf(answer)! }]),
       cancel: false,
     };
   }
@@ -811,10 +840,27 @@ export function accountView(subscription: SubscriptionResponse, answer: PlansAns
     tone: "neutral",
     status: subscription.state === "ended" ? { kind: "ended", endedAt: subscription.endsAt } : { kind: "none" },
     others: [],
-    primary: purchase.offers.length ? { kind: "pay" } : null,
-    sections: [{ kind: "purchase", purchase }],
+    primary: purchase.offers.length && !blocked ? { kind: "pay" } : null,
+    sections: sale([{ kind: "purchase", purchase }]),
     cancel: false,
   };
+}
+
+/// A country's name in the page's language, from the platform, so no country is written into a
+/// string; the code itself when the platform cannot name it.
+export function countryName(code: string, lang: Lang): string {
+  try {
+    return new Intl.DisplayNames([lang], { type: "region" }).of(code) ?? code;
+  } catch {
+    return code;
+  }
+}
+
+/// The blocked-country notice: that this site does not sell in the country, and, to someone with
+/// no subscription to keep, that they can subscribe in the app.
+export function countryNoticeText(section: { country: string; subscribed: boolean }, s: Strings, lang: Lang): string {
+  const here = s.countryUnavailable(countryName(section.country, lang));
+  return section.subscribed ? here : `${here} ${s.subscribeInApp}`;
 }
 
 /// The status block's words: a title, one sentence, and the plain lines under them.
@@ -822,6 +868,8 @@ export function statusText(view: AccountView, s: Strings, lang: Lang): { title: 
   const status = view.status;
   const lines = view.others.map((source) => premiumLine(source, s, lang));
   const date = (iso: string | undefined) => formatDate(iso, lang);
+  // No "choose a plan" where the blocked-country notice took the plans' place.
+  const plansShown = !view.sections.some((section) => section.kind === "countryUnavailable");
   switch (status.kind) {
     case "lifetime":
       return { title: s.statusLifetime, sentence: s.statusLifetimeBody, lines };
@@ -830,7 +878,8 @@ export function statusText(view: AccountView, s: Strings, lang: Lang): { title: 
     case "paymentFailed":
       return { title: s.statusPaymentFailed, sentence: s.statusPaymentFailedBody(date(status.until)), lines };
     case "active": {
-      const amount = typeof status.amount === "number" && status.currency ? formatMoney(status.amount, status.currency, lang) : null;
+      const money = typeof status.amount === "number" && status.currency ? formatMoney(status.amount, status.currency, lang) : null;
+      const amount = money && status.taxed ? s.plusTax(money) : money;
       const plan = status.plan ? planName(status.plan, s) : null;
       return { title: s.statusOn, sentence: s.statusActiveBody(plan, date(status.renewsAt), amount), lines };
     }
@@ -846,9 +895,9 @@ export function statusText(view: AccountView, s: Strings, lang: Lang): { title: 
       return { title: s.statusOnUntil(date(source.until)), sentence, lines };
     }
     case "ended":
-      return { title: s.statusEnded(date(status.endedAt)), sentence: s.statusChoosePlan, lines };
+      return { title: s.statusEnded(date(status.endedAt)), sentence: plansShown ? s.statusChoosePlan : null, lines };
     case "none":
-      return { title: s.statusNone, sentence: s.statusChoosePlan, lines };
+      return { title: s.statusNone, sentence: plansShown ? s.statusChoosePlan : null, lines };
     case "confirming":
       return { title: s.confirmingTitle, sentence: s.confirmingBody, lines };
   }
@@ -888,8 +937,9 @@ export interface SwitchSummary {
 
 /// What the switch panel says for a quote, with every amount and date in the page's formats.
 /// The credit sits under a label that says it is taken off, so it carries no minus sign; tax
-/// shows only when there is some.
-export function switchSummary(quote: SwitchQuote, state: SubscriptionState, s: Strings, lang: Lang): SwitchSummary {
+/// shows only when there is some. The yearly renewal is said to be before tax when the quote
+/// carries tax or the subscription's renewals are taxed (`renewalTaxed`).
+export function switchSummary(quote: SwitchQuote, state: SubscriptionState, s: Strings, lang: Lang, renewalTaxed = false): SwitchSummary {
   const money = (cents: number) => formatMoney(cents, quote.currency, lang);
   const yearly = money(quote.amount);
   const total = money(quote.total);
@@ -901,31 +951,49 @@ export function switchSummary(quote: SwitchQuote, state: SubscriptionState, s: S
   if (quote.tax > 0) rows.push({ label: s.switchTax, value: money(quote.tax) });
   rows.push({ label: s.switchTotalToday, value: total });
   if (quote.card) rows.push({ label: s.labelCard, value: cardText(quote.card, s, lang) });
-  const notes = [s.switchRenews(date, yearly)];
+  const notes = [s.switchRenews(date, quote.tax > 0 || renewalTaxed ? s.plusTax(yearly) : yearly)];
   if (state === "cancelling") notes.push(s.switchResumes);
   notes.push(s.noticeNoRefunds);
   return { rows, notes, confirm: s.switchConfirm(total) };
 }
 
-/// The `buy_lifetime` request for one press of the confirm button, as `switchRequest`.
-export function lifetimeRequest(quote: LifetimeQuote, attemptId: string, lang: Lang) {
-  return { action: "buy_lifetime" as const, acceptedTotal: quote.total, attemptId, lang };
+/// The `quote_lifetime` request: with the province the buyer chose when the saved address lacked
+/// one, and no `billingState` key otherwise (an `undefined` value would be sent as `null`).
+export function lifetimeQuoteRequest(province: string | null) {
+  return { action: "quote_lifetime" as const, ...(province ? { billingState: province } : {}) };
+}
+
+/// What a `billing_address_incomplete` refusal of the upgrade's quote asks of the panel: `ask` for
+/// a province when none was sent, `refused` when the province sent did not complete the address
+/// (shown at the select, never a retry that sends it again), or nothing to do with a province.
+export function provinceAnswer(refusal: Refusal, sentProvince: string | null): "ask" | "refused" | null {
+  if (refusal.kind !== "billingAddressIncomplete" || !refusal.province) return null;
+  return sentProvince ? "refused" : "ask";
+}
+
+/// The `buy_lifetime` request for one press of the confirm button, as `switchRequest`, with the
+/// province of the quote when one was chosen.
+export function lifetimeRequest(quote: LifetimeQuote, attemptId: string, lang: Lang, province: string | null = null) {
+  return { action: "buy_lifetime" as const, acceptedTotal: quote.total, attemptId, lang, ...(province ? { billingState: province } : {}) };
 }
 
 /// What the upgrade panel says for a quote: the same rows as the switch panel, with the credit
-/// named after the plan it comes from, then one payment with no renewal, that the subscription
-/// stops now, and no refunds. What lifetime means is said only in the terms.
-export function lifetimeSummary(quote: LifetimeQuote, s: Strings, lang: Lang): SwitchSummary {
+/// named after the plan it comes from and the province the quote was taxed at when the buyer chose
+/// one, then one payment with no renewal, that the subscription stops now (or, already cancelled,
+/// only that it ends now), and no refunds. What lifetime means is said only in the terms.
+export function lifetimeSummary(quote: LifetimeQuote, s: Strings, lang: Lang, state: SubscriptionState = "active"): SwitchSummary {
   const money = (cents: number) => formatMoney(cents, quote.currency, lang);
   const total = money(quote.total);
   const rows: SwitchSummary["rows"] = [{ label: s.lifetimePrice, value: money(quote.amount) }];
   if (quote.credit > 0) rows.push({ label: s.lifetimeCredit(planName(quote.creditedPlan, s)), value: money(quote.credit) });
+  if (quote.billingState) rows.push({ label: s.provinceRow, value: s.provinces[quote.billingState] ?? quote.billingState });
   if (quote.tax > 0) rows.push({ label: s.switchTax, value: money(quote.tax) });
   rows.push({ label: s.switchTotalToday, value: total });
   if (quote.card) rows.push({ label: s.labelCard, value: cardText(quote.card, s, lang) });
+  const plan = planName(quote.creditedPlan, s);
   return {
     rows,
-    notes: [s.lifetimeHint, s.lifetimeStops(planName(quote.creditedPlan, s)), s.noticeNoRefunds],
+    notes: [s.lifetimeHint, state === "cancelling" ? s.lifetimeEnds(plan) : s.lifetimeStops(plan), s.noticeNoRefunds],
     confirm: s.lifetimeConfirm(total),
   };
 }

@@ -8,8 +8,10 @@
  * emulator hold. No webhook is registered in the sandbox, so every event is undelivered; the
  * handlers sync on their own, and one scenario rebuilds a slot from the reconcile phase alone.
  * Every customer it creates, and its test clocks, are deleted at the end. Products and prices are
- * only read. Stripe Tax is not active in the sandbox, so tax stays off. With the argument
- * `switch`, only the monthly-to-yearly scenarios run, each on its own test clock.
+ * only read. Tax stays off except with the argument `tax`, which switches `taxEnabled` on in the
+ * emulator's config for its own scenarios (the sandbox's Stripe Tax has one registration, Canada
+ * GST/HST) and off again after. With the argument `switch`, only the monthly-to-yearly scenarios
+ * run, each on its own test clock.
  *
  * Refuses any key that is not a sandbox secret key (sk_test_) and never prints a key or a
  * client secret.
@@ -34,7 +36,7 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
 }
 
 const Stripe = require('stripe');
-const { Timestamp } = require('firebase-admin/firestore');
+const { FieldValue, Timestamp } = require('firebase-admin/firestore');
 const { admin } = require('../../lib/config/admin');
 const { liveStripeGateway, isResourceMissing } = require('../../lib/services/webSubscriptions/stripeGateway');
 const { syncWebEntitlement, WEB_GRACE_MS } = require('../../lib/services/webSubscriptions/sync');
@@ -53,8 +55,9 @@ const { billingNotifier, WEB_EMAIL_OUTBOX_COLLECTION } = require('../../lib/serv
 const stripe = new Stripe(key);
 const gateway = liveStripeGateway(key);
 /**
- * `switch` and `lifetime` run only the plan switch or the lifetime upgrade scenarios (both may be
- * given), whose Stripe objects all live on test clocks; no argument runs everything.
+ * `switch`, `lifetime` and `tax` run only the plan switch, the lifetime upgrade or the tax
+ * scenarios (any of them may be given), whose Stripe objects all live on test clocks; no argument
+ * runs everything.
  */
 const ONLY = process.argv.slice(2);
 const RUN = (name) => ONLY.length === 0 || ONLY.includes(name);
@@ -103,18 +106,18 @@ const caller = (uid) => ({
   rawRequest: { ip: '198.51.100.20' },
 });
 
-/** A token as the Payment Element makes it: a card with a billing country. */
-async function token(cardToken, { setupFutureUsage = 'off_session', billingCountry = 'US' } = {}) {
+/** A token as the Payment Element makes it: a card with a billing country, or a fuller `address`. */
+async function token(cardToken, { setupFutureUsage = 'off_session', billingCountry = 'US', address } = {}) {
   const created = await stripe.testHelpers.confirmationTokens.create({
-    payment_method_data: { type: 'card', card: { token: cardToken }, billing_details: { address: { country: billingCountry } } },
+    payment_method_data: { type: 'card', card: { token: cardToken }, billing_details: { address: address ?? { country: billingCountry } } },
     ...(setupFutureUsage ? { setup_future_usage: setupFutureUsage } : {}),
   });
   return created.id;
 }
 
-async function start(uid, plan, cardToken, acceptedTotal) {
-  const confirmationToken = await token(cardToken, { setupFutureUsage: plan === 'web_lifetime' ? null : 'off_session' });
-  const answer = await handleStartWebPurchase({ plan, confirmationToken, acceptedTotal, lang: 'en' }, caller(uid), deps);
+async function start(uid, plan, cardToken, acceptedTotal, { address, billingState } = {}) {
+  const confirmationToken = await token(cardToken, { setupFutureUsage: plan === 'web_lifetime' ? null : 'off_session', address });
+  const answer = await handleStartWebPurchase({ plan, confirmationToken, acceptedTotal, lang: 'en', ...(billingState ? { billingState } : {}) }, caller(uid), deps);
   return { answer, confirmationToken };
 }
 
@@ -160,6 +163,11 @@ try {
   const UPGRADE = newUid('upgrade');
   const UPGRADE_YEARLY = newUid('upgradeyearly');
   const UPGRADE_DECLINE = newUid('upgradedecline');
+  const TAX_FIRST = newUid('taxfirst');
+  const TAX_SWITCH = newUid('taxswitch');
+  const TAX_UPGRADE = newUid('taxupgrade');
+  const TAX_ABROAD = newUid('taxabroad');
+  const TAX_PROVINCE = newUid('taxprovince');
   await db.collection('web_pricing').doc('config').set({
     salesEnabled: true,
     taxEnabled: false,
@@ -617,6 +625,117 @@ try {
           slot.productId === 'web_monthly' && entry?.status === 'failed',
         `${refused}; subscription ${sub.status}; invoice ${invoice?.status}; slot ${slot.productId}; ledger ${entry?.status}/${entry?.failure}`);
       clockNow = undefined;
+    }
+  }
+
+  // 12. Tax (Stripe Tax, one registration: Canada GST/HST), each scenario on its own test clock.
+  const taxOf = (invoice) => (invoice.total_taxes ?? []).reduce((sum, row) => sum + row.amount, 0);
+  const lineTaxes = (invoice) => invoice.lines.data.map((line) => `${line.amount}[${(line.taxes ?? []).map((row) => row.amount).join(',')}]`).join(' ');
+  const ONTARIO = { country: 'CA', state: 'ON', postal_code: 'M5V 3L9' };
+  const ALBERTA = { country: 'CA', state: 'AB', postal_code: 'T2P 1J9' };
+  if (RUN('tax')) {
+    // Its scenarios bill in Canada, which the default `blockedCountries` refuses.
+    await db.collection('web_pricing').doc('config').update({ taxEnabled: true, blockedCountries: [] });
+    try {
+      // 12a. A first yearly purchase at an Ontario address: re-priced with tax, then charged it.
+      {
+        const uid = TAX_FIRST;
+        await clockCustomer(uid, 'tax-first');
+        const { answer: quoted, confirmationToken } = await start(uid, 'web_yearly', 'tok_us', 4999, { address: ONTARIO });
+        const answer = await handleStartWebPurchase({ plan: 'web_yearly', confirmationToken, acceptedTotal: quoted.quote?.total, lang: 'en' }, caller(uid), deps);
+        const entry = answer.purchaseId ? await ledgerOf(answer.purchaseId) : undefined;
+        const invoice = entry ? await stripe.invoices.retrieve(entry.stripe.invoiceId) : undefined;
+        const view = await handleGetWebSubscription({}, caller(uid), deps);
+        check('tax: a first yearly purchase in Ontario is re-priced to 4999 + 650, charged exactly that, and its renewal said to be taxed',
+          quoted.status === 'reprice' && quoted.quote.reason === 'tax' && quoted.quote.tax === 650 && quoted.quote.total === 5649 &&
+            answer.status === 'succeeded' && invoice?.total === 5649 && taxOf(invoice) === 650 && entry.tax === 650 && entry.billingState === 'ON' &&
+            view.renewalTaxed === true && view.amount === 4999,
+          `quote ${JSON.stringify(quoted.quote)}; answer ${answer.status}; invoice ${invoice?.total} tax ${invoice && taxOf(invoice)}; page amount ${view.amount} taxed ${view.renewalTaxed}`);
+        clockNow = undefined;
+      }
+
+      // 12b. The yearly switch of an Alberta monthly subscriber: tax on the yearly price less the credit.
+      {
+        const uid = TAX_SWITCH;
+        const clock = await clockCustomer(uid, 'tax-switch');
+        const { answer: bought } = await start(uid, 'web_monthly', 'tok_us', 524, { address: ALBERTA });
+        await clock.advanceTo(clock.frozen + 10 * DAY);
+        const { quote } = await manageAs(uid, { action: 'quote_switch_yearly' });
+        const answer = await switchAs(uid, quote);
+        const entry = answer.purchaseId ? await ledgerOf(answer.purchaseId) : undefined;
+        const invoice = entry ? await stripe.invoices.retrieve(entry.stripe.invoiceId) : undefined;
+        const net = quote.amount - quote.credit;
+        check('tax: an Alberta monthly subscriber switches to yearly with 5% on the net, charged exactly the quote',
+          bought.status === 'succeeded' && quote.credit > 0 && Math.abs(quote.tax - Math.round(net * 0.05)) <= 1 && quote.total === net + quote.tax &&
+            answer.status === 'succeeded' && invoice?.total === quote.total && taxOf(invoice) === quote.tax && entry.tax === quote.tax,
+          `bought ${bought.status}; quote ${quote.amount} - ${quote.credit} + ${quote.tax} = ${quote.total}; invoice ${invoice?.total} lines ${invoice && lineTaxes(invoice)}`);
+        clockNow = undefined;
+      }
+
+      // 12c. The lifetime upgrade of an Ontario yearly subscriber: the quote is the invoice, paid at once.
+      {
+        const uid = TAX_UPGRADE;
+        const clock = await clockCustomer(uid, 'tax-upgrade');
+        const { answer: bought } = await start(uid, 'web_yearly', 'tok_us', 5649, { address: ONTARIO });
+        await clock.advanceTo(clock.frozen + 10 * DAY);
+        const { quote } = await manageAs(uid, { action: 'quote_lifetime' });
+        const answer = await manageAs(uid, { action: 'buy_lifetime', acceptedTotal: quote.total, attemptId: crypto.randomUUID(), lang: 'en' });
+        const entry = answer.purchaseId ? await ledgerOf(answer.purchaseId) : undefined;
+        const invoice = entry?.stripe.invoiceId ? await stripe.invoices.retrieve(entry.stripe.invoiceId) : undefined;
+        const mail = (await db.collection(WEB_EMAIL_OUTBOX_COLLECTION).where('uid', '==', uid).get()).docs.map((doc) => doc.data()).find((row) => row.plan === 'web_lifetime');
+        check('tax: an Ontario yearly subscriber upgrades to lifetime; the quote equals the invoice and it completes on the first confirmation',
+          bought.status === 'succeeded' && answer.status === 'succeeded' && invoice?.status === 'paid' && invoice.total === quote.total && taxOf(invoice) === quote.tax &&
+            quote.total === quote.amount - quote.credit + quote.tax && (await slotOf(uid)).productId === 'web_lifetime',
+          `quote ${quote.amount} - ${quote.credit} + ${quote.tax} = ${quote.total}; answer ${answer.status}; invoice ${invoice?.status} ${invoice?.total} lines ${invoice && lineTaxes(invoice)}`);
+        check('tax: the upgrade\'s ledger entry and email carry the invoice\'s amounts',
+          entry?.status === 'paid' && entry.tax === quote.tax && entry.total === invoice?.total && mail?.tax === quote.tax && mail?.total === invoice?.total && mail?.credit === quote.credit,
+          `ledger ${entry?.amount}/${entry?.credit}/${entry?.tax}/${entry?.total}; email ${mail?.amount}/${mail?.credit}/${mail?.tax}/${mail?.total}`);
+        clockNow = undefined;
+      }
+
+      // 12d. A purchase outside Canada carries no tax.
+      {
+        const uid = TAX_ABROAD;
+        await clockCustomer(uid, 'tax-abroad');
+        const { answer } = await start(uid, 'web_yearly', 'tok_us', 4999, { address: { country: 'US', postal_code: '10001' } });
+        const entry = answer.purchaseId ? await ledgerOf(answer.purchaseId) : undefined;
+        const invoice = entry ? await stripe.invoices.retrieve(entry.stripe.invoiceId) : undefined;
+        const view = await handleGetWebSubscription({}, caller(uid), deps);
+        check('tax: a US purchase is charged 4999 with no tax, and its renewal is not said to be taxed',
+          answer.status === 'succeeded' && invoice?.total === 4999 && taxOf(invoice) === 0 && entry.tax === 0 && view.renewalTaxed === false,
+          `answer ${answer.status}; invoice ${invoice?.total} tax ${invoice && taxOf(invoice)}; taxed ${view.renewalTaxed}`);
+        clockNow = undefined;
+      }
+
+      // 12e. A Canadian who bought while tax was off has no province on file: the upgrade asks for one.
+      {
+        const uid = TAX_PROVINCE;
+        const clock = await clockCustomer(uid, 'tax-province');
+        await db.collection('web_pricing').doc('config').update({ taxEnabled: false });
+        const { answer: bought } = await start(uid, 'web_monthly', 'tok_us', 499, { address: { country: 'CA' } });
+        await db.collection('web_pricing').doc('config').update({ taxEnabled: true });
+        await clock.advanceTo(clock.frozen + 10 * DAY);
+        let asked;
+        try {
+          await manageAs(uid, { action: 'quote_lifetime' });
+        } catch (error) {
+          asked = error;
+        }
+        const { quote } = await manageAs(uid, { action: 'quote_lifetime', billingState: 'ON' });
+        const afterQuote = (await stripe.customers.retrieve(clock.customer)).address;
+        const answer = await manageAs(uid, { action: 'buy_lifetime', acceptedTotal: quote.total, attemptId: crypto.randomUUID(), lang: 'en', billingState: 'ON' });
+        const saved = (await stripe.customers.retrieve(clock.customer)).address;
+        const entry = answer.purchaseId ? await ledgerOf(answer.purchaseId) : undefined;
+        const invoice = entry?.stripe.invoiceId ? await stripe.invoices.retrieve(entry.stripe.invoiceId) : undefined;
+        check('tax: no province on file → billing_address_incomplete with province; quoted with the chosen one without saving it; the purchase saves it and is charged exactly',
+          bought.status === 'succeeded' && reasonOf(asked ?? {}) === 'billing_address_incomplete' && asked.details?.province === true &&
+            !afterQuote?.state && quote.billingState === 'ON' && saved?.country === 'CA' && saved?.state === 'ON' && quote.tax > 0 &&
+            answer.status === 'succeeded' && invoice?.total === quote.total && entry.billingCountry === 'CA' && entry.billingState === 'ON',
+          `refusal ${asked ? `${reasonOf(asked)}/province ${asked.details?.province}` : 'none'}; province after the quote ${afterQuote?.state ?? 'none'}, after the purchase ${saved?.state}; quote ${quote.total} tax ${quote.tax}; answer ${answer.status}; invoice ${invoice?.total}`);
+        clockNow = undefined;
+      }
+    } finally {
+      await db.collection('web_pricing').doc('config').update({ taxEnabled: false, blockedCountries: FieldValue.delete() });
     }
   }
 } catch (error) {

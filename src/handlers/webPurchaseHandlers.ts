@@ -36,7 +36,11 @@ import { abandonPendingPurchase, stopPendingStripeSide } from "../services/webSu
 import {
   billingAddressFromToken,
   cardFromToken,
+  assertSaleAllowed,
+  blockedCountryOf,
   chargedTier,
+  isCanadianProvince,
+  knownCountryList,
   knownTier,
   lookupKeyFor,
   quoteTotal,
@@ -60,7 +64,6 @@ import {
   logWebInfo,
   openWebGate,
   optionalCents,
-  optionalString,
   readConfirmationToken,
   readRequestObject,
   readWebLang,
@@ -95,7 +98,15 @@ const DECLINE_CATEGORIES: readonly DeclineCategory[] = [
 ];
 
 export const PURCHASE_ID_PATTERN = /^[0-9a-f]{32}$/;
-const BILLING_STATE_PATTERN = /^[\p{L}\p{N} .'-]{1,64}$/u;
+/**
+ * A province the page adds to a Canadian address: one of `CANADIAN_PROVINCES`, or `invalid_request`.
+ * Null or missing is not given.
+ */
+export function readBillingState(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!isCanadianProvince(value)) throw invalidRequest();
+  return value;
+}
 
 // ---------------------------------------------------------------------------
 // getWebPlans
@@ -113,6 +124,12 @@ export interface WebPlansResult {
   blockers: string[];
   /** Added after the first page shipped, so that page ignores it. */
   premium: PremiumSource[];
+  /**
+   * The account's known country when this site does not sell there (`blockedCountryOf` on the
+   * known countries alone), so the page says so before any card is entered; left out otherwise.
+   * Added after the page shipped; a page that does not know it treats it as not blocked.
+   */
+  blockedCountry?: string;
 }
 
 /**
@@ -146,7 +163,8 @@ export async function handleGetWebPlans(
 
     state.stage = "prices";
     const now = deps.now();
-    const known = knownTier(gate.config, await deps.storeCountry.knownCountries(uid));
+    const knownCountries = await deps.storeCountry.knownCountries(uid);
+    const known = knownTier(gate.config, knownCountries);
     const tierPrices = gate.config.tiers[known.tier]?.prices ?? {};
     const keys = WEB_PLANS.map((plan) => tierPrices[plan]).filter((key): key is string => Boolean(key));
     const prices = await gate.prices.get(keys);
@@ -160,6 +178,7 @@ export async function handleGetWebPlans(
     const { blockers, storeSubscription } = purchaseBlockers(slots, now);
     const view = webSlotView(slots.web, now);
     const premium = existingPremium(slots, now);
+    const blockedCountry = blockedCountryOf(gate.config, { known: knownCountryList(knownCountries) });
     logWebInfo(`${event}_success`, operationId, {
       uid,
       tier: known.tier,
@@ -167,6 +186,7 @@ export async function handleGetWebPlans(
       livemode: gate.gateway.livemode,
       blockers,
       premium: premium.map((source) => source.source),
+      ...(blockedCountry ? { blockedCountry } : {}),
       appCheck: hasAppCheck(context),
     });
     return {
@@ -180,6 +200,7 @@ export async function handleGetWebPlans(
       storeSubscription,
       blockers,
       premium,
+      ...(blockedCountry ? { blockedCountry } : {}),
     };
   } catch (error) {
     throw toWebCallableError(event, operationId, state.stage, error);
@@ -218,7 +239,7 @@ function readStartRequest(data: unknown): StartRequest {
     plan: request.plan,
     confirmationToken: requiredString(request.confirmationToken, CONFIRMATION_TOKEN_PATTERN),
     acceptedTotal,
-    billingState: optionalString(request.billingState, BILLING_STATE_PATTERN),
+    billingState: readBillingState(request.billingState),
     lang: readWebLang(request.lang),
     acknowledgeExisting: request.acknowledgeExisting === true,
   };
@@ -292,6 +313,11 @@ export async function handleStartWebPurchase(
     }
     await assertPurchaseAllowed(ctx, request.plan, request.acknowledgeExisting);
 
+    // Before the token is read, the lock taken, the entry written or anything made at Stripe.
+    state.stage = "country";
+    const knownCountries = await deps.storeCountry.knownCountries(uid);
+    assertSaleAllowed(config, { known: knownCountryList(knownCountries) });
+
     state.stage = "token";
     const token = await readConfirmationToken(
       gateway,
@@ -301,9 +327,14 @@ export async function handleStartWebPurchase(
       (problem) => logWebInfo(`${event}_token_refused`, operationId, { uid, purchaseId, problem })
     );
     const card = cardFromToken(token);
+    assertSaleAllowed(config, {
+      known: knownCountryList(knownCountries),
+      card: card.country,
+      billing: token.payment_method_preview?.billing_details?.address?.country ?? null,
+    });
 
     state.stage = "price";
-    const known = knownTier(config, await deps.storeCountry.knownCountries(uid));
+    const known = knownTier(config, knownCountries);
     const tierCharged = chargedTier(config, known.tier, card.country);
     const lookupKey = lookupKeyFor(config, tierCharged, request.plan);
     const billing = billingAddressFromToken(token, { taxEnabled: config.taxEnabled, billingState: request.billingState });
@@ -715,6 +746,8 @@ export async function createLifetimeInvoice(
       auto_advance: false,
       currency: price.currency,
       automatic_tax: { enabled: config.taxEnabled },
+      // Never a customer coupon: the quote is previewed without the customer, so it has none.
+      discounts: "",
       payment_settings: { payment_method_types: ["card"] },
       metadata: metadataFor(entry),
     },
